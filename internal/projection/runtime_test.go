@@ -41,6 +41,7 @@ func newProjectionTestStore(t *testing.T) (*store.EventStore, *pgxpool.Pool, str
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cleanupCancel()
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.consumer_leases WHERE workspace_id=$1`, workspaceID)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.task_state_projections WHERE workspace_id=$1`, workspaceID)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.control_checkpoints WHERE workspace_id=$1`, workspaceID)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.idempotency_records WHERE workspace_id=$1`, workspaceID)
@@ -197,6 +198,52 @@ func TestRunnerPreCommitFailureRollsBackProjectionAndCheckpoint(t *testing.T) {
 	}
 }
 
+func TestRunnerStaleLeaseCannotApplyProjectionOrAdvanceCheckpoint(t *testing.T) {
+	eventStore, pool, workspaceID := newProjectionTestStore(t)
+	appended := appendTaskEvents(t, eventStore,
+		makeTaskEvent(t, workspaceID, "task-fenced", TaskProjectionStatusDone, "protected", "session-fenced"),
+	)[0]
+	consumerID := "projection.fenced"
+	oldOwner, err := eventStore.AcquireConsumerLease(context.Background(), workspaceID, consumerID, "worker-old", 20*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	newOwner, err := eventStore.AcquireConsumerLease(context.Background(), workspaceID, consumerID, "worker-new", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newOwner.Lease.Fence <= oldOwner.Lease.Fence {
+		t.Fatalf("new fence=%d old fence=%d", newOwner.Lease.Fence, oldOwner.Lease.Fence)
+	}
+
+	oldRunner, err := NewRunnerWithOwner(eventStore, NewTaskProjection(consumerID, 10), "worker-old", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := oldRunner.RunBatchWithLease(context.Background(), oldOwner.Lease); !errors.Is(err, store.ErrConsumerLeaseFenced) {
+		t.Fatalf("stale run error=%v, want ErrConsumerLeaseFenced", err)
+	}
+	if got := checkpoint(t, eventStore, workspaceID, consumerID); got != 0 {
+		t.Fatalf("stale worker advanced checkpoint=%d", got)
+	}
+	if got := snapshotHash(t, pool, workspaceID); got != emptySnapshotHash(t) {
+		t.Fatalf("stale worker changed projection=%s", got)
+	}
+
+	newRunner, err := NewRunnerWithOwner(eventStore, NewTaskProjection(consumerID, 10), "worker-new", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := newRunner.RunBatchWithLease(context.Background(), newOwner.Lease)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.EventsApplied != 1 || result.CheckpointAfter != appended.Event.Sequence {
+		t.Fatalf("new owner result=%+v", result)
+	}
+}
+
 func TestRunnerCommittedBatchIsSafeToReplayAndDuplicateConsumer(t *testing.T) {
 	eventStore, pool, workspaceID := newProjectionTestStore(t)
 	event := appendTaskEvents(t, eventStore,
@@ -261,6 +308,7 @@ func TestRunnerConcurrentConsumersPreserveIntegrityAndWorkspaceIsolation(t *test
 	otherWorkspace := workspaceID + "-other"
 	t.Cleanup(func() {
 		ctx := context.Background()
+		_, _ = pool.Exec(ctx, `DELETE FROM fornix.consumer_leases WHERE workspace_id=$1`, otherWorkspace)
 		_, _ = pool.Exec(ctx, `DELETE FROM fornix.task_state_projections WHERE workspace_id=$1`, otherWorkspace)
 		_, _ = pool.Exec(ctx, `DELETE FROM fornix.control_checkpoints WHERE workspace_id=$1`, otherWorkspace)
 		_, _ = pool.Exec(ctx, `DELETE FROM fornix.control_events WHERE workspace_id=$1`, otherWorkspace)
@@ -274,25 +322,41 @@ func TestRunnerConcurrentConsumersPreserveIntegrityAndWorkspaceIsolation(t *test
 
 	const concurrentRuns = 6
 	results := make(chan error, concurrentRuns)
+	winners := make(chan *Runner, concurrentRuns)
 	var wg sync.WaitGroup
 	for i := 0; i < concurrentRuns; i++ {
 		wg.Add(1)
-		go func() {
+		go func(i int) {
 			defer wg.Done()
-			runner, err := NewRunner(eventStore, NewTaskProjection("projection.concurrent", 2))
+			runner, err := NewRunnerWithOwner(eventStore, NewTaskProjection("projection.concurrent", 2), fmt.Sprintf("projection-worker-%d", i), time.Second)
 			if err == nil {
 				_, err = runner.RunBatch(context.Background(), workspaceID)
+				if err == nil {
+					winners <- runner
+				}
 			}
 			results <- err
-		}()
+		}(i)
 	}
 	wg.Wait()
 	close(results)
+	successes := 0
+	held := 0
 	for err := range results {
-		if err != nil {
-			t.Fatalf("concurrent consumer error: %v", err)
+		if err == nil {
+			successes++
+			continue
 		}
+		if errors.Is(err, store.ErrConsumerLeaseHeld) {
+			held++
+			continue
+		}
+		t.Fatalf("concurrent consumer error: %v", err)
 	}
+	if successes != 1 || held != concurrentRuns-1 {
+		t.Fatalf("concurrent ownership successes=%d held=%d want successes=1 held=%d", successes, held, concurrentRuns-1)
+	}
+	runUntilCaughtUp(t, <-winners, workspaceID)
 	if got := checkpoint(t, eventStore, workspaceID, "projection.concurrent"); got == 0 {
 		t.Fatal("concurrent consumer did not advance checkpoint")
 	}

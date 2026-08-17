@@ -123,6 +123,36 @@ func NewEvent(eventType string, payload any) (EventEnvelope, error) {
 	return event, nil
 }
 
+// Clone returns an event value that can be normalized or serialized without
+// mutating slices, raw JSON, or entity references owned by the caller. Store
+// boundaries may receive the same logical event concurrently for duplicate
+// delivery, so normalization must not race on shared backing arrays.
+func (e EventEnvelope) Clone() EventEnvelope {
+	clone := e
+	clone.Payload = append(json.RawMessage(nil), e.Payload...)
+	clone.Task = cloneEntityRef(e.Task)
+	clone.Session = cloneEntityRef(e.Session)
+	clone.StateDeltas = make([]StateDelta, len(e.StateDeltas))
+	for i, delta := range e.StateDeltas {
+		clone.StateDeltas[i] = delta
+		clone.StateDeltas[i].Value = append(json.RawMessage(nil), delta.Value...)
+		clone.StateDeltas[i].Evidence = append([]string(nil), delta.Evidence...)
+	}
+	clone.Artifacts = append([]ArtifactReference(nil), e.Artifacts...)
+	clone.Provenance.SourceEventIDs = append([]string(nil), e.Provenance.SourceEventIDs...)
+	clone.Provenance.SourceArtifactRefs = append([]string(nil), e.Provenance.SourceArtifactRefs...)
+	clone.Provenance.SourcePaths = append([]string(nil), e.Provenance.SourcePaths...)
+	return clone
+}
+
+func cloneEntityRef(ref *EntityRef) *EntityRef {
+	if ref == nil {
+		return nil
+	}
+	clone := *ref
+	return &clone
+}
+
 // NewID creates a non-secret opaque identifier without adding a UUID
 // dependency to the control-plane contract package.
 func NewID(prefix string) string {

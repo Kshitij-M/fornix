@@ -43,13 +43,14 @@ authoritative structured state
   state deltas, artifacts, provenance, causation/correlation IDs, raw payloads,
   idempotency, replay, and durable checkpoints.
 - A deterministic checkpointed projection runtime with a rebuildable task
-  lifecycle view.
+  lifecycle view, protected by workspace-scoped consumer ownership leases and
+  monotonic fencing tokens.
 
 ## Current gaps
 
 - Workspace-aware identities, roles, tenant isolation, and scoped credentials.
-- Task dependency DAGs, leases, fencing, retry budgets, cancellation, and
-  dead-letter handling.
+- Task dependency DAGs, task-execution leases/fencing, retry budgets,
+  cancellation, and dead-letter handling.
 - Typed event integration for every mutation path.
 - Artifact storage, raw prompt/tool capture, and a general memory compiler.
 - SQL-first retrieval planning, progressive gist/detail/raw disclosure, and
@@ -61,7 +62,8 @@ authoritative structured state
 
 1. Establish typed contracts, migrations, event history, and test harness.
 2. Add checkpointed projections and deterministic task lifecycle state.
-3. Add workspace-scoped task dependencies, leases, fencing, and recovery.
+3. Add workspace-scoped task dependencies, task-execution leases/fencing, and
+   recovery. Consumer leases/fencing now protect projection ownership.
 4. Add deterministic retrieval planning and bounded context compilation.
 5. Add provenance graphs, selective unfolding, lifecycle consolidation, and
    optional learned routing behind measured evaluation.

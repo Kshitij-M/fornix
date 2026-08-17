@@ -8,6 +8,7 @@ pattern; do not copy code solely because a README names a feature.
 | Control-plane substrate | Coordination baseline | Postgres schema, pgx pool, capability dispatch, heartbeats, watcher backoff | Split seams, add workspaces, identities, dependencies, leases, and migrations |
 | Typed event/state history | Orloj | Event vocabulary, ordered reads, idempotency, transactional checkpoints | Reimplemented in `internal/contracts` and `internal/store`; Postgres remains authority |
 | Checkpointed projections | Orloj + agentmemory | Checkpoint commits, replay verification, bounded replay, keyed serialization | Reimplemented in `internal/projection` with derived task state and no broker |
+| Consumer ownership and fencing | Orloj + agentmemory | Transactional row locking, explicit owner/fence validation, expiry/takeover, bounded TTLs | Reimplemented in `internal/store` and integrated with projections; Postgres remains authority |
 | Memory lifecycle | agentmemory | Observation capture, memory types, budgets, audit trail, worker boundaries | Use Postgres events and typed provenance while retaining private/shared scope |
 | Hybrid retrieval | agentmemory + ClawMem | BM25/vector/graph fusion, intent routing, traversal, score explanations | Deterministic escalation first with stage telemetry and hard budgets |
 | Reversible disclosure | FornixDB | Gist/detail/source references, supersession, decay, retention tiers | Keep evidence content-addressed and indexes derived |

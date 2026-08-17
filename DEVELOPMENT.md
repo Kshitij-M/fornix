@@ -30,6 +30,7 @@ make python-check
 make smoke
 make smoke-events
 make smoke-projection
+make smoke-leases
 make dev-up
 make dev-run
 make dev-up-watcher
@@ -40,10 +41,13 @@ make dev-down
 The projection runtime is an internal Postgres-backed pull API. It does not
 start a background worker; callers explicitly run bounded batches or a
 rebuild. The v0.12 smoke exercises replay, duplicate delivery, rollback,
-concurrency, and workspace isolation:
+concurrency, and workspace isolation. The v0.13 smoke adds durable
+workspace-scoped consumer leases, fencing, expiry/takeover, stale-owner
+rejection, and lease transaction rollback:
 
 ```sh
 make smoke-projection
+make smoke-leases
 ```
 
 To run the database integration tests directly:

@@ -44,9 +44,18 @@ type Subscriber interface {
 type Runner struct {
 	events     *store.EventStore
 	subscriber Subscriber
+	ownerID    string
+	leaseTTL   time.Duration
 }
 
 func NewRunner(events *store.EventStore, subscriber Subscriber) (*Runner, error) {
+	return NewRunnerWithOwner(events, subscriber, contracts.NewID("consumer"), contracts.DefaultConsumerLeaseTTL)
+}
+
+// NewRunnerWithOwner is useful for durable worker identities and deterministic
+// concurrency tests. Production processes should use a unique owner ID per
+// process or worker instance.
+func NewRunnerWithOwner(events *store.EventStore, subscriber Subscriber, ownerID string, leaseTTL time.Duration) (*Runner, error) {
 	if events == nil {
 		return nil, fmt.Errorf("event store is required")
 	}
@@ -59,7 +68,33 @@ func NewRunner(events *store.EventStore, subscriber Subscriber) (*Runner, error)
 	if strings.TrimSpace(subscriber.Name()) == "" {
 		return nil, fmt.Errorf("subscriber name is required")
 	}
-	return &Runner{events: events, subscriber: subscriber}, nil
+	ownerID = strings.TrimSpace(ownerID)
+	if ownerID == "" {
+		return nil, fmt.Errorf("consumer owner ID is required")
+	}
+	if leaseTTL <= 0 {
+		leaseTTL = contracts.DefaultConsumerLeaseTTL
+	}
+	if leaseTTL > contracts.MaxConsumerLeaseTTL {
+		leaseTTL = contracts.MaxConsumerLeaseTTL
+	}
+	return &Runner{events: events, subscriber: subscriber, ownerID: ownerID, leaseTTL: leaseTTL}, nil
+}
+
+func (r *Runner) OwnerID() string {
+	return r.ownerID
+}
+
+func (r *Runner) AcquireLease(ctx context.Context, workspaceID string) (contracts.ConsumerLeaseResult, error) {
+	return r.events.AcquireConsumerLease(ctx, workspaceID, r.subscriber.ConsumerID(), r.ownerID, r.leaseTTL)
+}
+
+func (r *Runner) RenewLease(ctx context.Context, lease contracts.ConsumerLease, ttl time.Duration) (contracts.ConsumerLease, error) {
+	return r.events.RenewConsumerLease(ctx, lease, ttl)
+}
+
+func (r *Runner) ReleaseLease(ctx context.Context, lease contracts.ConsumerLease) error {
+	return r.events.ReleaseConsumerLease(ctx, lease)
 }
 
 type BatchResult struct {
@@ -71,6 +106,7 @@ type BatchResult struct {
 	EventsDuplicate  int
 	CheckpointBefore uint64
 	CheckpointAfter  uint64
+	LeaseFence       uint64
 	HasMore          bool
 	Duration         time.Duration
 }
@@ -78,26 +114,44 @@ type BatchResult struct {
 type RunHook func(BatchResult) error
 
 func (r *Runner) RunBatch(ctx context.Context, workspaceID string) (BatchResult, error) {
-	return r.runBatch(ctx, workspaceID, nil)
+	acquired, err := r.AcquireLease(ctx, workspaceID)
+	if err != nil {
+		return BatchResult{Projection: r.subscriber.Name(), ConsumerID: r.subscriber.ConsumerID(), WorkspaceID: strings.TrimSpace(workspaceID)}, err
+	}
+	return r.runBatchWithLease(ctx, acquired.Lease, nil)
+}
+
+// RunBatchWithLease executes a batch only with the exact current owner and
+// fence. It is the preferred entry point for callers that renew explicitly.
+func (r *Runner) RunBatchWithLease(ctx context.Context, lease contracts.ConsumerLease) (BatchResult, error) {
+	if err := r.validateLease(lease); err != nil {
+		return BatchResult{}, err
+	}
+	return r.runBatchWithLease(ctx, lease, nil)
 }
 
 // RunBatchWithHook exists to make the pre-commit crash boundary testable. A
 // production caller should use RunBatch; the hook executes after projection
 // writes and checkpoint advancement but before COMMIT.
 func (r *Runner) RunBatchWithHook(ctx context.Context, workspaceID string, hook RunHook) (BatchResult, error) {
-	return r.runBatch(ctx, workspaceID, hook)
+	acquired, err := r.AcquireLease(ctx, workspaceID)
+	if err != nil {
+		return BatchResult{Projection: r.subscriber.Name(), ConsumerID: r.subscriber.ConsumerID(), WorkspaceID: strings.TrimSpace(workspaceID)}, err
+	}
+	return r.runBatchWithLease(ctx, acquired.Lease, hook)
 }
 
-func (r *Runner) runBatch(ctx context.Context, workspaceID string, hook RunHook) (BatchResult, error) {
-	workspaceID = strings.TrimSpace(workspaceID)
-	if workspaceID == "" {
-		return BatchResult{}, fmt.Errorf("workspace_id is required")
+func (r *Runner) runBatchWithLease(ctx context.Context, lease contracts.ConsumerLease, hook RunHook) (BatchResult, error) {
+	if err := r.validateLease(lease); err != nil {
+		return BatchResult{}, err
 	}
+	workspaceID := strings.TrimSpace(lease.WorkspaceID)
 	started := time.Now()
 	result := BatchResult{
 		Projection:  r.subscriber.Name(),
 		ConsumerID:  r.subscriber.ConsumerID(),
 		WorkspaceID: workspaceID,
+		LeaseFence:  lease.Fence,
 	}
 	tx, err := r.events.Begin(ctx)
 	if err != nil {
@@ -105,6 +159,9 @@ func (r *Runner) runBatch(ctx context.Context, workspaceID string, hook RunHook)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
 
+	if _, err := r.events.ValidateConsumerLeaseTx(ctx, tx, lease); err != nil {
+		return result, err
+	}
 	before, err := r.events.EnsureCheckpointTx(ctx, tx, workspaceID, r.subscriber.ConsumerID())
 	if err != nil {
 		return result, err
@@ -139,7 +196,7 @@ func (r *Runner) runBatch(ctx context.Context, workspaceID string, hook RunHook)
 	after := before
 	if len(events) > 0 {
 		after = events[len(events)-1].Sequence
-		if err := r.events.AdvanceCheckpointAtTx(ctx, tx, workspaceID, r.subscriber.ConsumerID(), before, after); err != nil {
+		if err := r.events.AdvanceCheckpointAtTxWithLease(ctx, tx, lease, before, after); err != nil {
 			return result, err
 		}
 	}
@@ -165,6 +222,7 @@ type RebuildResult struct {
 	EventsApplied   int
 	EventsDuplicate int
 	Checkpoint      uint64
+	LeaseFence      uint64
 	Duration        time.Duration
 }
 
@@ -177,12 +235,20 @@ func (r *Runner) Rebuild(ctx context.Context, workspaceID string) (RebuildResult
 	if workspaceID == "" {
 		return RebuildResult{}, fmt.Errorf("workspace_id is required")
 	}
+	acquired, err := r.AcquireLease(ctx, workspaceID)
+	if err != nil {
+		return RebuildResult{Projection: r.subscriber.Name(), ConsumerID: r.subscriber.ConsumerID(), WorkspaceID: workspaceID}, err
+	}
+	lease := acquired.Lease
 	started := time.Now()
 	resetTx, err := r.events.Begin(ctx)
 	if err != nil {
 		return RebuildResult{}, fmt.Errorf("begin projection rebuild: %w", err)
 	}
 	defer func() { _ = resetTx.Rollback(ctx) }()
+	if _, err := r.events.ValidateConsumerLeaseTx(ctx, resetTx, lease); err != nil {
+		return RebuildResult{}, err
+	}
 	if _, err := r.events.EnsureCheckpointTx(ctx, resetTx, workspaceID, r.subscriber.ConsumerID()); err != nil {
 		return RebuildResult{}, err
 	}
@@ -200,9 +266,10 @@ func (r *Runner) Rebuild(ctx context.Context, workspaceID string) (RebuildResult
 		Projection:  r.subscriber.Name(),
 		ConsumerID:  r.subscriber.ConsumerID(),
 		WorkspaceID: workspaceID,
+		LeaseFence:  lease.Fence,
 	}
 	for {
-		batch, runErr := r.RunBatch(ctx, workspaceID)
+		batch, runErr := r.runBatchWithLease(ctx, lease, nil)
 		if runErr != nil {
 			return result, runErr
 		}
@@ -216,6 +283,22 @@ func (r *Runner) Rebuild(ctx context.Context, workspaceID string) (RebuildResult
 			return result, nil
 		}
 	}
+}
+
+func (r *Runner) validateLease(lease contracts.ConsumerLease) error {
+	if err := contracts.ValidateConsumerLeaseIdentity(lease.WorkspaceID, lease.ConsumerID, lease.OwnerID); err != nil {
+		return err
+	}
+	if lease.ConsumerID != r.subscriber.ConsumerID() {
+		return fmt.Errorf("consumer lease consumer_id %q does not match subscriber %q", lease.ConsumerID, r.subscriber.ConsumerID())
+	}
+	if lease.OwnerID != r.ownerID {
+		return fmt.Errorf("consumer lease owner_id %q does not match runner owner %q", lease.OwnerID, r.ownerID)
+	}
+	if lease.Fence == 0 {
+		return fmt.Errorf("consumer lease fence is required")
+	}
+	return nil
 }
 
 func boundedBatchSize(size int) int {

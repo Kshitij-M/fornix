@@ -80,6 +80,19 @@ sequence, application count, a deterministic state hash, and update time.
 Loop 2's `fornix.control_checkpoints` remains the durable cursor table; the
 subscriber's consumer ID names the projection instance.
 
+## Loop 4 ownership extension
+
+Migration `006_consumer_leases.sql` adds a current ownership row keyed by
+`(workspace_id, consumer_id)`. The projection runner acquires and validates a
+Postgres-backed lease before a batch or rebuild. A takeover increments a
+monotonic fence; projection effects and checkpoint advancement require the
+exact owner/fence token in the same transaction. An expired or stale consumer
+therefore fails closed without changing the derived view or cursor.
+
+The lease is coordination metadata, not business history. Event rows remain
+append-only and authoritative, and rebuild still starts from sequence zero.
+The runtime remains a bounded pull API with no broker or background worker.
+
 ## Reference scan and reuse decisions
 
 - Orloj `store/session_store.go`: reuse the transaction boundary, row locking,

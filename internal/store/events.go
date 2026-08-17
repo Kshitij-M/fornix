@@ -77,6 +77,7 @@ func (s *EventStore) AppendTx(ctx context.Context, tx pgx.Tx, event contracts.Ev
 	if tx == nil {
 		return AppendResult{}, fmt.Errorf("event append transaction is nil")
 	}
+	event = event.Clone()
 	if err := event.Normalize(); err != nil {
 		return AppendResult{}, fmt.Errorf("normalize event: %w", err)
 	}

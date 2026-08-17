@@ -17,6 +17,9 @@ task coordination, retrieval, and code indexing.
   monotonic checkpoints.
 - Transactional projection updates with rebuild, duplicate protection, crash
   rollback tests, concurrency tests, and workspace isolation.
+- Durable workspace-scoped projection consumer leases with monotonically
+  increasing fencing tokens, expiry/takeover, stale-owner rejection, and
+  checkpoint authorization.
 - Docker-backed Go/Python checks, Postgres integration tests, CI, and smoke
   tests.
 
@@ -24,8 +27,9 @@ task coordination, retrieval, and code indexing.
 
 - One shared bearer key; no tenant-aware identities, roles, scoped credentials,
   rotation, revocation, or audit policy.
-- Task claims still need dependency-aware scheduling, expiring leases, fencing,
-  retry budgets, cancellation, and dead-letter handling.
+- Task claims still need dependency-aware scheduling, task-execution leases and
+  fencing, retry budgets, cancellation, and dead-letter handling. The new
+  lease substrate currently protects projection consumers, not task workers.
 - Not every mutation path emits typed events yet.
 - No content-addressed artifact store for large outputs, raw prompt/tool
   capture, or general memory compiler.
@@ -35,6 +39,8 @@ task coordination, retrieval, and code indexing.
   exporter, or operational backpressure policy.
 - The projection runtime is an internal pull API; no background subscriber or
   public replay API is provided yet.
+- Lease transitions are current coordination state rather than an append-only
+  audit stream; operational metrics and lease-history retention are deferred.
 
 ## Qualification commands
 
@@ -43,6 +49,7 @@ make check
 make build
 make smoke
 make smoke-projection
+make smoke-leases
 ```
 
 Postgres-backed results and measured latency/storage/replay throughput are

@@ -63,9 +63,10 @@ The final v0.12 smoke qualification reported:
 
 - The runtime is an internal pull API. It does not start a background worker,
   expose a public event stream, or provide broker-based delivery.
-- Rebuild should be coordinated as an exclusive operation for a consumer; a
-  future lease/fence or subscription ownership record should close the small
-  reset-to-replay handoff window.
+- Rebuild is now coordinated by the workspace-scoped consumer lease/fencing
+  substrate in migration 006. The lease protects projection consumers only;
+  task execution still needs dependency-aware task leases/fences and recovery
+  policy.
 - Only task lifecycle events currently produce this derived view. Task create,
   claim, coordination messages, memo writes, federation, and watcher events
   still need typed event integration.

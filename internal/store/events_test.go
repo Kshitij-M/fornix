@@ -41,6 +41,7 @@ func newEventTestStore(t *testing.T) (*EventStore, *pgxpool.Pool, string) {
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cleanupCancel()
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.consumer_leases WHERE workspace_id=$1`, workspaceID)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.control_checkpoints WHERE workspace_id=$1`, workspaceID)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.idempotency_records WHERE workspace_id=$1`, workspaceID)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.control_events WHERE workspace_id=$1`, workspaceID)

@@ -17,7 +17,8 @@ routing first; spend model tokens only when ambiguity requires reasoning.
   federation compatibility endpoints.
 - Typed event envelopes, state deltas, provenance, artifact references,
   idempotency, raw payload retention, and monotonic checkpoints.
-- Deterministic checkpointed projection runtime with rebuildable task state.
+- Deterministic checkpointed projection runtime with rebuildable task state,
+  workspace-scoped consumer leases, and monotonic fencing.
 - Docker-backed development environment, CI, integration tests, and smoke
   tests.
 
