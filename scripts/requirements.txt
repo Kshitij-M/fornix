@@ -1,0 +1,5 @@
+PyYAML==6.0.3
+requests==2.34.2
+tree-sitter==0.26.0
+tree-sitter-go==0.25.0
+tree-sitter-python==0.25.0

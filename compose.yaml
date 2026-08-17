@@ -1,0 +1,66 @@
+name: fornix-dev
+
+services:
+  db:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_DB: ${FORNIX_DB_NAME:-fornix}
+      POSTGRES_USER: ${FORNIX_DB_USER:-fornix}
+      POSTGRES_PASSWORD: ${FORNIX_DB_PASSWORD:-fornix-dev-only}
+    ports:
+      - "${FORNIX_PG_PORT:-55433}:5432"
+    volumes:
+      - fornix-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${FORNIX_DB_USER:-fornix} -d ${FORNIX_DB_NAME:-fornix}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  fornix:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: [app]
+    environment:
+      FORNIX_KEY: ${FORNIX_KEY:?copy .env.example to .env and set FORNIX_KEY}
+      FORNIX_PG_DSN: postgres://${FORNIX_DB_USER:-fornix}:${FORNIX_DB_PASSWORD:-fornix-dev-only}@db:5432/${FORNIX_DB_NAME:-fornix}?sslmode=disable
+      FORNIX_LISTEN: :8201
+      FORNIX_OLLAMA_URL: http://ollama:11434
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8201:8201"
+
+  watcher:
+    build:
+      context: .
+      dockerfile: Dockerfile.watcher
+    profiles: [watch]
+    environment:
+      FORNIX_URL: http://fornix:8201
+      FORNIX_KEY: ${FORNIX_KEY:?copy .env.example to .env and set FORNIX_KEY}
+      FORNIX_WATCHER_METRICS_ADDR: 0.0.0.0:8202
+    working_dir: /workspace
+    volumes:
+      - .:/workspace:ro
+    depends_on:
+      db:
+        condition: service_healthy
+      fornix:
+        condition: service_started
+    ports:
+      - "8202:8202"
+
+  ollama:
+    image: ollama/ollama:latest
+    profiles: [ai]
+    ports:
+      - "11434:11434"
+    volumes:
+      - fornix-ollama-data:/root/.ollama
+
+volumes:
+  fornix-postgres-data:
+  fornix-ollama-data:

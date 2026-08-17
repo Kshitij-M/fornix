@@ -1,0 +1,19 @@
+FROM golang:1.25.13 AS build
+
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags='-s -w' -o /out/fornix-watcher ./cmd/fornix-watcher
+
+FROM python:3.13-slim-bookworm
+
+WORKDIR /workspace
+COPY scripts/requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir --requirement /tmp/requirements.txt
+RUN useradd --system --uid 10001 --create-home fornix
+COPY --from=build /out/fornix-watcher /usr/local/bin/fornix-watcher
+COPY deploy/examples/watcher.yaml /app/watcher.yaml
+USER fornix
+
+ENTRYPOINT ["/usr/local/bin/fornix-watcher", "--config", "/app/watcher.yaml"]

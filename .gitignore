@@ -1,0 +1,28 @@
+# Binary outputs
+/fornix
+/cmd/fornix/fornix
+/bin/
+/dist/
+/.venv/
+
+# Logs
+*.log
+fornix.log
+
+# Backups + scratch
+*.bak
+*.bak-*
+*.tmp
+*.swp
+.DS_Store
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Local development secrets/configuration
+.env
+
+# IDE
+.idea/
+.vscode/

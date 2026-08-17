@@ -1,0 +1,14 @@
+[Unit]
+Description=Fornix watcher (inotify → /v1/symbol/reindex)
+After=network.target fornix.service
+
+[Service]
+Type=simple
+Environment=FORNIX_URL=http://localhost:8201
+Environment=FORNIX_KEY=test-key-1
+ExecStart=/usr/local/bin/fornix-watcher --config %h/.fornix/watcher.yaml
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

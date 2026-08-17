@@ -1,0 +1,9 @@
+.git
+.env
+bin
+tmp
+*.log
+*.sqlite
+*.db
+reference_repos
+chats

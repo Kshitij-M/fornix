@@ -1,0 +1,21 @@
+fornix_url: ${FORNIX_URL}
+fornix_key: ${FORNIX_KEY}
+indexer_path: ./scripts/fornix-indexer.py
+metrics_addr: ${FORNIX_WATCHER_METRICS_ADDR}  # GET /healthz; defaults to loopback when unset
+debounce_ms: 500
+backoff_max_ms: 60000          # cap exponential backoff at 60s
+startup_rescan: true           # walk every repo once on boot to reconcile drift
+repos:
+  - repo: fornix
+    path: .
+    languages: [go, python]
+ignore:
+  - .git/
+  - node_modules/
+  - vendor/
+  - target/
+  - dist/
+  - bin/
+  - .venv/
+  - "*.pyc"
+  - "__pycache__/"
