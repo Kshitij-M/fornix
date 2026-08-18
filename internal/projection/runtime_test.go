@@ -94,6 +94,76 @@ func appendTaskEvents(t *testing.T, eventStore *store.EventStore, events ...cont
 	return results
 }
 
+func makeNamedLifecycleEvent(t *testing.T, workspaceID, taskID, eventType, status, sessionID string) contracts.EventEnvelope {
+	t.Helper()
+	event, err := contracts.NewEvent(eventType, map[string]any{"task_id": taskID, "status": status})
+	if err != nil {
+		t.Fatalf("create lifecycle event: %v", err)
+	}
+	event.Scope.WorkspaceID = workspaceID
+	event.Task = &contracts.EntityRef{ID: taskID, Kind: "task", WorkspaceID: workspaceID}
+	if sessionID != "" {
+		event.Session = &contracts.EntityRef{ID: sessionID, Kind: "session", WorkspaceID: workspaceID}
+	}
+	if status != "" {
+		statusValue, _ := json.Marshal(status)
+		event.StateDeltas = append(event.StateDeltas, contracts.StateDelta{Op: contracts.DeltaSet, Path: "/tasks/" + taskID + "/status", Value: statusValue})
+		assigned := sessionID
+		if status == TaskProjectionStatusDone || status == TaskProjectionStatusFailed || status == TaskProjectionStatusCancelled || status == TaskProjectionStatusDeadLetter || status == TaskProjectionStatusPending {
+			assigned = ""
+		}
+		assignedValue, _ := json.Marshal(assigned)
+		event.StateDeltas = append(event.StateDeltas, contracts.StateDelta{Op: contracts.DeltaSet, Path: "/tasks/" + taskID + "/assigned_session", Value: assignedValue})
+	}
+	return event
+}
+
+func TestTaskProjectionAcceptsCompleteLifecycle(t *testing.T) {
+	eventStore, pool, workspaceID := newProjectionTestStore(t)
+	events := []contracts.EventEnvelope{
+		makeNamedLifecycleEvent(t, workspaceID, "lifecycle-a", "task.created", TaskProjectionStatusPending, ""),
+		makeNamedLifecycleEvent(t, workspaceID, "lifecycle-a", "task.claimed", TaskProjectionStatusClaimed, "worker-a"),
+		makeNamedLifecycleEvent(t, workspaceID, "lifecycle-a", "task.lease_renewed", "", "worker-a"),
+		makeNamedLifecycleEvent(t, workspaceID, "lifecycle-a", "task.progressed", TaskProjectionStatusActive, "worker-a"),
+		makeNamedLifecycleEvent(t, workspaceID, "lifecycle-a", "task.retry_scheduled", TaskProjectionStatusPending, ""),
+		makeNamedLifecycleEvent(t, workspaceID, "lifecycle-a", "task.claimed", TaskProjectionStatusClaimed, "worker-a"),
+		makeNamedLifecycleEvent(t, workspaceID, "lifecycle-a", "task.completed", TaskProjectionStatusDone, "worker-a"),
+		makeNamedLifecycleEvent(t, workspaceID, "lifecycle-b", "task.created", TaskProjectionStatusPending, ""),
+		makeNamedLifecycleEvent(t, workspaceID, "lifecycle-b", "task.cancelled", TaskProjectionStatusCancelled, ""),
+		makeNamedLifecycleEvent(t, workspaceID, "lifecycle-c", "task.created", TaskProjectionStatusPending, ""),
+		makeNamedLifecycleEvent(t, workspaceID, "lifecycle-c", "task.failed", TaskProjectionStatusFailed, "worker-a"),
+		makeNamedLifecycleEvent(t, workspaceID, "lifecycle-d", "task.created", TaskProjectionStatusPending, ""),
+		makeNamedLifecycleEvent(t, workspaceID, "lifecycle-d", "task.deadlettered", TaskProjectionStatusDeadLetter, "worker-a"),
+	}
+	appended := appendTaskEvents(t, eventStore, events...)
+	runner, err := NewRunner(eventStore, NewTaskProjection("projection.lifecycle", 4))
+	if err != nil {
+		t.Fatal(err)
+	}
+	results := runUntilCaughtUp(t, runner, workspaceID)
+	if results[len(results)-1].CheckpointAfter != appended[len(appended)-1].Event.Sequence {
+		t.Fatalf("checkpoint=%d want=%d", results[len(results)-1].CheckpointAfter, appended[len(appended)-1].Event.Sequence)
+	}
+	for taskID, want := range map[string]string{"lifecycle-a": TaskProjectionStatusDone, "lifecycle-b": TaskProjectionStatusCancelled, "lifecycle-c": TaskProjectionStatusFailed, "lifecycle-d": TaskProjectionStatusDeadLetter} {
+		tx, err := pool.Begin(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		state, found, err := ReadTaskStateTx(context.Background(), tx, workspaceID, taskID)
+		_ = tx.Rollback(context.Background())
+		if err != nil || !found || state.Status != want {
+			t.Fatalf("task %s state=%+v found=%v err=%v want=%s", taskID, state, found, err, want)
+		}
+	}
+	hashBefore := snapshotHash(t, pool, workspaceID)
+	if _, err := runner.Rebuild(context.Background(), workspaceID); err != nil {
+		t.Fatal(err)
+	}
+	if hashAfter := snapshotHash(t, pool, workspaceID); hashAfter != hashBefore {
+		t.Fatalf("lifecycle rebuild hash=%s want=%s", hashAfter, hashBefore)
+	}
+}
+
 func snapshotHash(t *testing.T, pool *pgxpool.Pool, workspaceID string) string {
 	t.Helper()
 	tx, err := pool.Begin(context.Background())

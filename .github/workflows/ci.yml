@@ -100,6 +100,12 @@ jobs:
           FORNIX_URL: http://localhost:8201
           FORNIX_KEY: fornix-ci-test-key
         run: scripts/test/v0.11-event-smokes.sh
+      - name: Run task execution smoke
+        env:
+          FORNIX_URL: http://localhost:8201
+          FORNIX_KEY: fornix-ci-test-key
+          FORNIX_TASK_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+        run: scripts/test/v0.14-task-smokes.sh
 
   vulnerabilities:
     name: Vulnerability scan

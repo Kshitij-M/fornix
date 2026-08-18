@@ -31,6 +31,7 @@ make smoke
 make smoke-events
 make smoke-projection
 make smoke-leases
+make smoke-tasks
 make dev-up
 make dev-run
 make dev-up-watcher
@@ -48,6 +49,7 @@ rejection, and lease transaction rollback:
 ```sh
 make smoke-projection
 make smoke-leases
+make smoke-tasks
 ```
 
 To run the database integration tests directly:
@@ -58,6 +60,13 @@ docker run --rm --add-host=host.docker.internal:host-gateway \
   -v "$PWD:/workspace" -w /workspace golang:1.25.13 \
   go test ./internal/store ./internal/projection -count=1 -v
 ```
+
+Task execution is a Postgres-only state machine. Claim responses include the
+current task fence; send that fence with the session ID to renew, complete,
+fail, or cancel a claimed task. A retryable failure returns a task to the
+deterministic dependency-aware queue until its bounded attempt budget is
+exhausted, then dead-letters it. Expired ownership is recovered by takeover;
+the old fence cannot mutate the task.
 
 ## Repository rules
 

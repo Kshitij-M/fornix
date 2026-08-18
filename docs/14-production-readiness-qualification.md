@@ -20,6 +20,10 @@ task coordination, retrieval, and code indexing.
 - Durable workspace-scoped projection consumer leases with monotonically
   increasing fencing tokens, expiry/takeover, stale-owner rejection, and
   checkpoint authorization.
+- Durable workspace-scoped task execution leases with monotonically increasing
+  fences, expiry/takeover, stale-worker rejection, dependency-aware ordering,
+  bounded retry/dead-letter transitions, cancellation, and atomic lifecycle
+  events.
 - Docker-backed Go/Python checks, Postgres integration tests, CI, and smoke
   tests.
 
@@ -27,9 +31,6 @@ task coordination, retrieval, and code indexing.
 
 - One shared bearer key; no tenant-aware identities, roles, scoped credentials,
   rotation, revocation, or audit policy.
-- Task claims still need dependency-aware scheduling, task-execution leases and
-  fencing, retry budgets, cancellation, and dead-letter handling. The new
-  lease substrate currently protects projection consumers, not task workers.
 - Not every mutation path emits typed events yet.
 - No content-addressed artifact store for large outputs, raw prompt/tool
   capture, or general memory compiler.
@@ -50,6 +51,7 @@ make build
 make smoke
 make smoke-projection
 make smoke-leases
+make smoke-tasks
 ```
 
 Postgres-backed results and measured latency/storage/replay throughput are

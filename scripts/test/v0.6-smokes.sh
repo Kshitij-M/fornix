@@ -31,12 +31,14 @@ pass "session B (no go-build) gets 204"
 # Session A should successfully claim.
 claim_a=$(curl -fsS "${H[@]}" -X POST "${FORNIX_URL}/v1/task/claim" -d "{\"session_id\":\"${session_a}\"}")
 claimed_id=$(echo "${claim_a}" | jq -r .id)
+claim_fence=$(echo "${claim_a}" | jq -r .fence)
 [[ "${claimed_id}" == "${task_id}" ]] || fail "session A claimed wrong task: expected ${task_id} got ${claimed_id}"
+[[ "${claim_fence}" != "null" && -n "${claim_fence}" ]] || fail "claim returned no execution fence"
 pass "session A claimed task ${task_id}"
 
 echo "== v0.6 smoke test 2: complete + session returns to idle =="
 curl -fsS "${H[@]}" -X POST "${FORNIX_URL}/v1/task/${task_id}/complete" \
-  -d '{"result":"smoke complete","status":"done"}' >/dev/null
+  -d "{\"result\":\"smoke complete\",\"status\":\"done\",\"session_id\":\"${session_a}\",\"fence\":${claim_fence}}" >/dev/null
 status=$(curl -fsS "${H[@]}" "${FORNIX_URL}/v1/tasks?status=done" | jq -r ".tasks[] | select(.id==${task_id}) | .status")
 [[ "${status}" == "done" ]] || fail "task not marked done: ${status}"
 sess_a_status=$(curl -fsS "${H[@]}" "${FORNIX_URL}/v1/sessions" | jq -r ".sessions[] | select(.id==\"${session_a}\") | .status")

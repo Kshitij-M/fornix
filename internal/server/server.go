@@ -34,6 +34,7 @@ const embeddingModel = "nomic-embed-text"
 type server struct {
 	pool            *pgxpool.Pool
 	events          *store.EventStore
+	tasks           *store.TaskStore
 	apiKey          string
 	ollamaURL       string
 	httpClient      *http.Client
@@ -60,9 +61,11 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 		pool.Close()
 		return nil, fmt.Errorf("apply migrations: %w", err)
 	}
+	events := store.NewEventStore(pool)
 	return &server{
 		pool:            pool,
-		events:          store.NewEventStore(pool),
+		events:          events,
+		tasks:           store.NewTaskStore(pool, events),
 		apiKey:          cfg.APIKey,
 		ollamaURL:       cfg.OllamaURL,
 		httpClient:      &http.Client{Timeout: 30 * time.Second},
@@ -218,12 +221,14 @@ type symbolHit struct {
 // ---------- v0.6 orchestrator types ----------
 
 type sessionRegisterReq struct {
+	WorkspaceID  string   `json:"workspace_id,omitempty"`
 	ID           string   `json:"id"`
 	Host         string   `json:"host"`
 	Capabilities []string `json:"capabilities"`
 }
 
 type sessionRow struct {
+	WorkspaceID   string    `json:"workspace_id"`
 	ID            string    `json:"id"`
 	Host          string    `json:"host"`
 	Capabilities  []string  `json:"capabilities"`
@@ -234,35 +239,28 @@ type sessionRow struct {
 }
 
 type taskCreateReq struct {
+	WorkspaceID          string   `json:"workspace_id,omitempty"`
 	Title                string   `json:"title"`
 	Brief                string   `json:"brief"`
 	RequiredCapabilities []string `json:"required_capabilities"`
 	CreatedBy            string   `json:"created_by"`
+	MaxAttempts          int      `json:"max_attempts,omitempty"`
+	DependsOn            []int64  `json:"depends_on,omitempty"`
 }
 
 type taskClaimReq struct {
-	SessionID string `json:"session_id"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+	SessionID   string `json:"session_id"`
+	LeaseTTLMS  int64  `json:"lease_ttl_ms,omitempty"`
 }
 
 type taskCompleteReq struct {
+	WorkspaceID    string `json:"workspace_id,omitempty"`
+	SessionID      string `json:"session_id,omitempty"`
+	Fence          uint64 `json:"fence,omitempty"`
 	Result         string `json:"result"`
 	Status         string `json:"status"`
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
-}
-
-type taskRow struct {
-	ID                   int64      `json:"id"`
-	Title                string     `json:"title"`
-	Brief                string     `json:"brief"`
-	RequiredCapabilities []string   `json:"required_capabilities"`
-	AssignedSession      *string    `json:"assigned_session,omitempty"`
-	Status               string     `json:"status"`
-	Result               *string    `json:"result,omitempty"`
-	CreatedBy            string     `json:"created_by"`
-	OriginHost           string     `json:"origin_host"`
-	CreatedAt            time.Time  `json:"created_at"`
-	ClaimedAt            *time.Time `json:"claimed_at,omitempty"`
-	CompletedAt          *time.Time `json:"completed_at,omitempty"`
 }
 
 // ---------- v0.7 federation types ----------
@@ -1155,22 +1153,29 @@ func (s *server) handleSessionRegister(w http.ResponseWriter, r *http.Request) {
 	if req.Capabilities == nil {
 		req.Capabilities = []string{}
 	}
+	workspaceID := requestWorkspace(r, req.WorkspaceID)
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO fornix.sessions (id, host, capabilities, status, last_heartbeat, registered_at)
-		VALUES ($1,$2,$3,'idle', now(), now())
-		ON CONFLICT (id) DO UPDATE SET
+	var registeredWorkspace string
+	err := s.pool.QueryRow(ctx, `
+		INSERT INTO fornix.sessions (workspace_id, id, host, capabilities, status, last_heartbeat, registered_at)
+		VALUES ($1,$2,$3,$4,'idle', clock_timestamp(), clock_timestamp())
+		ON CONFLICT (workspace_id, id) DO UPDATE SET
 		  host=EXCLUDED.host,
 		  capabilities=EXCLUDED.capabilities,
 		  status=CASE WHEN fornix.sessions.status='offline' THEN 'idle' ELSE fornix.sessions.status END,
-		  last_heartbeat=now()`,
-		req.ID, req.Host, req.Capabilities)
+		  last_heartbeat=clock_timestamp()
+		RETURNING workspace_id`,
+		workspaceID, req.ID, req.Host, req.Capabilities).Scan(&registeredWorkspace)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeErr(w, 409, "session id belongs to another workspace")
+			return
+		}
 		writeErr(w, 500, "db: "+err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"id": req.ID, "registered": true})
+	writeJSON(w, 200, map[string]any{"id": req.ID, "workspace_id": registeredWorkspace, "registered": true})
 }
 
 func (s *server) handleSessionHeartbeat(w http.ResponseWriter, r *http.Request, id string) {
@@ -1180,11 +1185,12 @@ func (s *server) handleSessionHeartbeat(w http.ResponseWriter, r *http.Request, 
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
+	workspaceID := requestWorkspace(r, "")
 	tag, err := s.pool.Exec(ctx, `
 		UPDATE fornix.sessions
-		SET last_heartbeat=now(),
+		SET last_heartbeat=clock_timestamp(),
 		    status=CASE WHEN status='offline' THEN 'idle' ELSE status END
-		WHERE id=$1`, id)
+		WHERE workspace_id=$1 AND id=$2`, workspaceID, id)
 	if err != nil {
 		writeErr(w, 500, "db: "+err.Error())
 		return
@@ -1205,12 +1211,13 @@ func (s *server) handleSessionsList(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	statusFilter := r.URL.Query().Get("status")
 	capability := r.URL.Query().Get("capability")
+	workspaceID := requestWorkspace(r, r.URL.Query().Get("workspace_id"))
 
-	query := `SELECT id, host, capabilities,
+	query := `SELECT workspace_id, id, host, capabilities,
 	                 CASE WHEN last_heartbeat < now() - INTERVAL '90 seconds' THEN 'offline' ELSE status END AS effective_status,
 	                 current_task_id, last_heartbeat, registered_at
-	          FROM fornix.sessions WHERE 1=1`
-	args := []any{}
+	          FROM fornix.sessions WHERE workspace_id=$1`
+	args := []any{workspaceID}
 	if statusFilter != "" {
 		args = append(args, statusFilter)
 		query += fmt.Sprintf(" AND (CASE WHEN last_heartbeat < now() - INTERVAL '90 seconds' THEN 'offline' ELSE status END) = $%d", len(args))
@@ -1230,7 +1237,7 @@ func (s *server) handleSessionsList(w http.ResponseWriter, r *http.Request) {
 	for rows.Next() {
 		var sr sessionRow
 		var current *int64
-		if err := rows.Scan(&sr.ID, &sr.Host, &sr.Capabilities, &sr.Status, &current, &sr.LastHeartbeat, &sr.RegisteredAt); err != nil {
+		if err := rows.Scan(&sr.WorkspaceID, &sr.ID, &sr.Host, &sr.Capabilities, &sr.Status, &current, &sr.LastHeartbeat, &sr.RegisteredAt); err != nil {
 			continue
 		}
 		sr.CurrentTaskID = current
@@ -1256,21 +1263,20 @@ func (s *server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 	if req.RequiredCapabilities == nil {
 		req.RequiredCapabilities = []string{}
 	}
+	workspaceID := requestWorkspace(r, req.WorkspaceID)
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	host, _ := os.Hostname()
-	var id int64
-	err := s.pool.QueryRow(ctx, `
-		INSERT INTO fornix.tasks (title, brief, required_capabilities, created_by, origin_host)
-		VALUES ($1,$2,$3,$4,$5)
-		RETURNING id`,
-		req.Title, req.Brief, req.RequiredCapabilities, req.CreatedBy, host,
-	).Scan(&id)
+	task, event, err := s.tasks.Create(ctx, store.TaskCreateInput{
+		WorkspaceID: workspaceID, Title: req.Title, Brief: req.Brief,
+		RequiredCapabilities: req.RequiredCapabilities, CreatedBy: req.CreatedBy,
+		OriginHost: host, MaxAttempts: req.MaxAttempts, DependsOn: req.DependsOn,
+	})
 	if err != nil {
-		writeErr(w, 500, "db: "+err.Error())
+		writeTaskStoreErr(w, err)
 		return
 	}
-	writeJSON(w, 200, map[string]any{"id": id, "created": true})
+	writeJSON(w, 200, map[string]any{"id": task.ID, "workspace_id": workspaceID, "created": true, "event_id": event.EventID, "event_sequence": event.Sequence})
 }
 
 func (s *server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
@@ -1287,56 +1293,24 @@ func (s *server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "session_id required")
 		return
 	}
+	workspaceID := requestWorkspace(r, req.WorkspaceID)
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-
-	// Verify the session exists and pick out its capabilities.
-	var caps []string
-	err := s.pool.QueryRow(ctx, `SELECT capabilities FROM fornix.sessions WHERE id=$1`, req.SessionID).Scan(&caps)
+	result, err := s.tasks.ClaimNext(ctx, store.TaskClaimInput{WorkspaceID: workspaceID, SessionID: req.SessionID, LeaseTTL: time.Duration(req.LeaseTTLMS) * time.Millisecond})
 	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeErr(w, 404, "session not registered")
+		if errors.Is(err, store.ErrTaskNoReady) {
+			w.WriteHeader(http.StatusNoContent)
 			return
 		}
-		writeErr(w, 500, "db: "+err.Error())
+		writeTaskStoreErr(w, err)
 		return
 	}
-
-	// Atomically claim the next pending task whose required capabilities are a subset of this session's.
-	var t taskRow
-	var assigned, result *string
-	var claimed, completed *time.Time
-	err = s.pool.QueryRow(ctx, `
-		UPDATE fornix.tasks
-		SET status='claimed', assigned_session=$1, claimed_at=now()
-		WHERE id = (
-		  SELECT id FROM fornix.tasks
-		  WHERE status='pending'
-		    AND (required_capabilities = '{}'::TEXT[] OR required_capabilities <@ $2)
-		  ORDER BY created_at
-		  FOR UPDATE SKIP LOCKED
-		  LIMIT 1
-		)
-		RETURNING id, title, brief, required_capabilities, assigned_session, status, result, created_by, origin_host, created_at, claimed_at, completed_at`,
-		req.SessionID, caps,
-	).Scan(&t.ID, &t.Title, &t.Brief, &t.RequiredCapabilities, &assigned, &t.Status, &result, &t.CreatedBy, &t.OriginHost, &t.CreatedAt, &claimed, &completed)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			w.WriteHeader(204)
-			return
-		}
-		writeErr(w, 500, "db: "+err.Error())
-		return
-	}
-	t.AssignedSession = assigned
-	t.Result = result
-	t.ClaimedAt = claimed
-	t.CompletedAt = completed
-
-	// Mark the session busy + remember its current task.
-	_, _ = s.pool.Exec(ctx, `UPDATE fornix.sessions SET status='busy', current_task_id=$1, last_heartbeat=now() WHERE id=$2`, t.ID, req.SessionID)
-
-	writeJSON(w, 200, t)
+	writeJSON(w, 200, struct {
+		store.Task
+		Lease    contracts.TaskExecutionLease `json:"lease"`
+		Fence    uint64                       `json:"fence"`
+		Takeover bool                         `json:"takeover"`
+	}{Task: result.Task, Lease: result.Lease, Fence: result.Lease.Fence, Takeover: result.Takeover})
 }
 
 func (s *server) handleTaskComplete(w http.ResponseWriter, r *http.Request, id int64) {
@@ -1357,128 +1331,30 @@ func (s *server) handleTaskComplete(w http.ResponseWriter, r *http.Request, id i
 	if req.IdempotencyKey == "" {
 		req.IdempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
 	}
-	status := req.Status
-	if status == "" {
-		status = "done"
-	}
-	if status != "done" && status != "failed" && status != "in_progress" {
-		writeErr(w, 400, "status must be done|failed|in_progress")
-		return
-	}
+	workspaceID := requestWorkspace(r, req.WorkspaceID)
+	ownerID, fence := taskOwnerAndFence(r, req.SessionID, req.Fence)
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		writeErr(w, 500, "db: "+err.Error())
-		return
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	var assignedSession *string
-	if err := tx.QueryRow(ctx, `
-		SELECT assigned_session
-		FROM fornix.tasks
-		WHERE id=$1
-		FOR UPDATE`, id).Scan(&assignedSession); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			writeErr(w, 404, "task not found")
+	if strings.TrimSpace(req.Status) == contracts.TaskStatusFailed {
+		result, err := s.tasks.Fail(ctx, store.TaskFailureInput{WorkspaceID: workspaceID, TaskID: id, OwnerID: ownerID, Fence: fence, Error: req.Result, FailureClass: contracts.FailureUnknown, Retryable: boolPtr(false), IdempotencyKey: req.IdempotencyKey, ActorID: ownerID, Payload: body})
+		if err != nil {
+			writeTaskStoreErr(w, err)
 			return
 		}
-		writeErr(w, 500, "db: "+err.Error())
+		writeTaskMutationResponse(w, id, result)
 		return
 	}
-
-	eventType := "task.progressed"
-	if status == "done" {
-		eventType = "task.completed"
-	} else if status == "failed" {
-		eventType = "task.failed"
-	}
-	event, err := contracts.NewEvent(eventType, json.RawMessage(body))
+	result, err := s.tasks.Complete(ctx, store.TaskOutcomeInput{WorkspaceID: workspaceID, TaskID: id, OwnerID: ownerID, Fence: fence, Result: req.Result, Status: req.Status, IdempotencyKey: req.IdempotencyKey, ActorID: ownerID, Payload: body})
 	if err != nil {
-		writeErr(w, 400, "invalid event payload: "+err.Error())
-		return
-	}
-	// Keep the caller's exact JSON bytes alongside the queryable JSONB form.
-	event.Payload = append(json.RawMessage(nil), body...)
-	workspaceID := strings.TrimSpace(r.Header.Get("X-Workspace-ID"))
-	if workspaceID == "" {
-		workspaceID = contracts.DefaultWorkspaceID
-	}
-	event.Scope.WorkspaceID = workspaceID
-	event.IdempotencyKey = req.IdempotencyKey
-	event.Task = &contracts.EntityRef{ID: strconv.FormatInt(id, 10), Kind: "task", WorkspaceID: workspaceID}
-	if assignedSession != nil {
-		event.Session = &contracts.EntityRef{ID: *assignedSession, Kind: "session", WorkspaceID: workspaceID}
-	}
-	statusValue, _ := json.Marshal(status)
-	resultValue, _ := json.Marshal(req.Result)
-	event.StateDeltas = []contracts.StateDelta{
-		{Op: contracts.DeltaSet, Path: fmt.Sprintf("/tasks/%d/status", id), Value: statusValue},
-		{Op: contracts.DeltaSet, Path: fmt.Sprintf("/tasks/%d/result", id), Value: resultValue},
-	}
-	if assignedSession != nil && status != "in_progress" {
-		event.StateDeltas = append(event.StateDeltas, contracts.StateDelta{
-			Op:    contracts.DeltaSet,
-			Path:  "/sessions/" + *assignedSession + "/status",
-			Value: json.RawMessage(`"idle"`),
-		})
-	}
-
-	appendResult, err := s.events.AppendTx(ctx, tx, event)
-	if err != nil {
-		if errors.Is(err, store.ErrIdempotencyConflict) {
-			writeErr(w, 409, err.Error())
-			return
-		}
-		writeErr(w, 500, "event: "+err.Error())
-		return
-	}
-	if appendResult.Duplicate {
-		if err := tx.Commit(ctx); err != nil {
-			writeErr(w, 500, "db: "+err.Error())
-			return
-		}
-		writeJSON(w, 200, map[string]any{
-			"id":             id,
-			"status":         status,
-			"event_id":       appendResult.Event.EventID,
-			"event_sequence": appendResult.Event.Sequence,
-			"deduped":        true,
-		})
-		return
-	}
-
-	completedAt := pgxNullTime()
-	if status != "in_progress" {
-		completedAt = pgxNowTime()
-	}
-	_, err = tx.Exec(ctx, `
-		UPDATE fornix.tasks
-		SET status=$1, result=$2, completed_at=$3
-		WHERE id=$4`,
-		status, req.Result, completedAt, id)
-	if err != nil {
-		writeErr(w, 500, "db: "+err.Error())
-		return
-	}
-	if assignedSession != nil && status != "in_progress" {
-		if _, err := tx.Exec(ctx, `UPDATE fornix.sessions SET status='idle', current_task_id=NULL, last_heartbeat=now() WHERE id=$1`, *assignedSession); err != nil {
-			writeErr(w, 500, "db: "+err.Error())
-			return
-		}
-	}
-	if err := tx.Commit(ctx); err != nil {
-		writeErr(w, 500, "db: "+err.Error())
+		writeTaskStoreErr(w, err)
 		return
 	}
 	writeJSON(w, 200, map[string]any{
 		"id":             id,
-		"status":         status,
-		"event_id":       appendResult.Event.EventID,
-		"event_sequence": appendResult.Event.Sequence,
-		"deduped":        false,
+		"status":         result.Task.Status,
+		"event_id":       result.Event.EventID,
+		"event_sequence": result.Event.Sequence,
+		"deduped":        result.Deduped,
 	})
 }
 
@@ -1492,49 +1368,171 @@ func (s *server) handleTasksList(w http.ResponseWriter, r *http.Request) {
 	statusFilter := r.URL.Query().Get("status")
 	assigned := r.URL.Query().Get("assigned")
 	since := r.URL.Query().Get("since")
-
-	query := `SELECT id, title, brief, required_capabilities, assigned_session, status, result, created_by, origin_host, created_at, claimed_at, completed_at
-	          FROM fornix.tasks WHERE 1=1`
-	args := []any{}
-	if statusFilter != "" {
-		args = append(args, statusFilter)
-		query += fmt.Sprintf(" AND status = $%d", len(args))
-	}
-	if assigned != "" {
-		args = append(args, assigned)
-		query += fmt.Sprintf(" AND assigned_session = $%d", len(args))
-	}
-	if since != "" {
-		args = append(args, since)
-		query += fmt.Sprintf(" AND created_at > $%d", len(args))
-	}
-	query += " ORDER BY created_at DESC LIMIT 200"
-	rows, err := s.pool.Query(ctx, query, args...)
+	workspaceID := requestWorkspace(r, r.URL.Query().Get("workspace_id"))
+	tasks, err := s.tasks.List(ctx, workspaceID, statusFilter, assigned, since, 200)
 	if err != nil {
-		writeErr(w, 500, "db: "+err.Error())
+		writeTaskStoreErr(w, err)
 		return
 	}
-	defer rows.Close()
-	out := []taskRow{}
-	for rows.Next() {
-		var t taskRow
-		var assignedSession, result *string
-		var claimed, completed *time.Time
-		if err := rows.Scan(&t.ID, &t.Title, &t.Brief, &t.RequiredCapabilities, &assignedSession, &t.Status, &result, &t.CreatedBy, &t.OriginHost, &t.CreatedAt, &claimed, &completed); err != nil {
-			continue
-		}
-		t.AssignedSession = assignedSession
-		t.Result = result
-		t.ClaimedAt = claimed
-		t.CompletedAt = completed
-		out = append(out, t)
-	}
-	writeJSON(w, 200, map[string]any{"tasks": out, "count": len(out)})
+	writeJSON(w, 200, map[string]any{"tasks": tasks, "count": len(tasks), "workspace_id": workspaceID})
 }
 
-// pgxNullTime / pgxNowTime: tiny helpers so we can pass either a NULL or now() through pgx.
-func pgxNullTime() any { return nil }
-func pgxNowTime() any  { return time.Now().UTC() }
+func (s *server) handleTaskRenew(w http.ResponseWriter, r *http.Request, id int64) {
+	if !s.requireAuth(r) {
+		writeErr(w, 401, "unauthorised")
+		return
+	}
+	var req struct {
+		WorkspaceID string `json:"workspace_id,omitempty"`
+		SessionID   string `json:"session_id,omitempty"`
+		Fence       uint64 `json:"fence,omitempty"`
+		LeaseTTLMS  int64  `json:"lease_ttl_ms,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, 400, "invalid json")
+		return
+	}
+	workspaceID := requestWorkspace(r, req.WorkspaceID)
+	ownerID, fence := taskOwnerAndFence(r, req.SessionID, req.Fence)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	result, err := s.tasks.Renew(ctx, workspaceID, id, ownerID, fence, time.Duration(req.LeaseTTLMS)*time.Millisecond, ownerID)
+	if err != nil {
+		writeTaskStoreErr(w, err)
+		return
+	}
+	writeJSON(w, 200, result)
+}
+
+func (s *server) handleTaskFail(w http.ResponseWriter, r *http.Request, id int64) {
+	if !s.requireAuth(r) {
+		writeErr(w, 401, "unauthorised")
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeErr(w, 400, "invalid json")
+		return
+	}
+	var req struct {
+		WorkspaceID    string `json:"workspace_id,omitempty"`
+		SessionID      string `json:"session_id,omitempty"`
+		Fence          uint64 `json:"fence,omitempty"`
+		Error          string `json:"error"`
+		FailureClass   string `json:"failure_class,omitempty"`
+		Retryable      *bool  `json:"retryable,omitempty"`
+		RetryAfterMS   *int64 `json:"retry_after_ms,omitempty"`
+		IdempotencyKey string `json:"idempotency_key,omitempty"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeErr(w, 400, "invalid json")
+		return
+	}
+	if req.IdempotencyKey == "" {
+		req.IdempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	}
+	ownerID, fence := taskOwnerAndFence(r, req.SessionID, req.Fence)
+	workspaceID := requestWorkspace(r, req.WorkspaceID)
+	var retryAfter *time.Duration
+	if req.RetryAfterMS != nil {
+		delay := time.Duration(*req.RetryAfterMS) * time.Millisecond
+		retryAfter = &delay
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	result, err := s.tasks.Fail(ctx, store.TaskFailureInput{WorkspaceID: workspaceID, TaskID: id, OwnerID: ownerID, Fence: fence, Error: req.Error, FailureClass: req.FailureClass, Retryable: req.Retryable, RetryAfter: retryAfter, IdempotencyKey: req.IdempotencyKey, ActorID: ownerID, Payload: body})
+	if err != nil {
+		writeTaskStoreErr(w, err)
+		return
+	}
+	writeTaskMutationResponse(w, id, result)
+}
+
+func (s *server) handleTaskCancel(w http.ResponseWriter, r *http.Request, id int64) {
+	if !s.requireAuth(r) {
+		writeErr(w, 401, "unauthorised")
+		return
+	}
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		writeErr(w, 400, "invalid json")
+		return
+	}
+	var req struct {
+		WorkspaceID    string `json:"workspace_id,omitempty"`
+		SessionID      string `json:"session_id,omitempty"`
+		Fence          uint64 `json:"fence,omitempty"`
+		Reason         string `json:"reason,omitempty"`
+		IdempotencyKey string `json:"idempotency_key,omitempty"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		writeErr(w, 400, "invalid json")
+		return
+	}
+	if req.IdempotencyKey == "" {
+		req.IdempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	}
+	ownerID, fence := taskOwnerAndFence(r, req.SessionID, req.Fence)
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	result, err := s.tasks.Cancel(ctx, store.TaskCancelInput{WorkspaceID: requestWorkspace(r, req.WorkspaceID), TaskID: id, OwnerID: ownerID, Fence: fence, Reason: req.Reason, IdempotencyKey: req.IdempotencyKey, ActorID: ownerID, Payload: body})
+	if err != nil {
+		writeTaskStoreErr(w, err)
+		return
+	}
+	writeTaskMutationResponse(w, id, result)
+}
+
+func writeTaskMutationResponse(w http.ResponseWriter, id int64, result store.TaskMutationResult) {
+	writeJSON(w, 200, map[string]any{"id": id, "status": result.Task.Status, "event_id": result.Event.EventID, "event_sequence": result.Event.Sequence, "deduped": result.Deduped, "retry_scheduled": result.RetryScheduled})
+}
+
+func requestWorkspace(r *http.Request, bodyWorkspace string) string {
+	workspaceID := strings.TrimSpace(bodyWorkspace)
+	if workspaceID == "" {
+		workspaceID = strings.TrimSpace(r.Header.Get("X-Workspace-ID"))
+	}
+	if workspaceID == "" {
+		workspaceID = contracts.DefaultWorkspaceID
+	}
+	return workspaceID
+}
+
+func taskOwnerAndFence(r *http.Request, owner string, fence uint64) (string, uint64) {
+	if strings.TrimSpace(owner) == "" {
+		owner = strings.TrimSpace(r.Header.Get("X-Session-ID"))
+	}
+	if fence == 0 {
+		if raw := strings.TrimSpace(r.Header.Get("X-Task-Fence")); raw != "" {
+			fence, _ = strconv.ParseUint(raw, 10, 64)
+		}
+	}
+	return strings.TrimSpace(owner), fence
+}
+
+func boolPtr(value bool) *bool { return &value }
+
+func writeTaskStoreErr(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	switch {
+	case errors.Is(err, store.ErrTaskNotFound):
+		status = http.StatusNotFound
+	case errors.Is(err, store.ErrTaskNoReady):
+		status = http.StatusNoContent
+	case errors.Is(err, store.ErrTaskLeaseExpired), errors.Is(err, store.ErrTaskLeaseReleased):
+		status = http.StatusGone
+	case errors.Is(err, store.ErrTaskLeaseFenced), errors.Is(err, store.ErrTaskLeaseOwned), errors.Is(err, store.ErrTaskLeaseHeld),
+		errors.Is(err, store.ErrTaskNotClaimed), errors.Is(err, store.ErrTaskTerminal), errors.Is(err, store.ErrTaskSessionBusy),
+		errors.Is(err, store.ErrTaskDependencyMissing), errors.Is(err, store.ErrTaskDependencyCycle), errors.Is(err, store.ErrTaskRetryBudgetExhausted),
+		errors.Is(err, store.ErrIdempotencyConflict):
+		status = http.StatusConflict
+	case errors.Is(err, store.ErrTaskLeaseMissing):
+		status = http.StatusPreconditionFailed
+	case errors.Is(err, store.ErrTaskInvalidStatus):
+		status = http.StatusBadRequest
+	}
+	writeErr(w, status, err.Error())
+}
 
 // ---------- v0.7 federation handlers ----------
 
@@ -1782,8 +1780,9 @@ func (s *server) handleRouterRecommend(w http.ResponseWriter, r *http.Request) {
 
 // ---------- background workers ----------
 
-// sessionsReaper marks sessions whose heartbeat is older than 90s as offline,
-// and reverts tasks claimed by an offline session after 5 minutes of no progress.
+// sessionsReaper marks sessions whose heartbeat is older than 90s as offline.
+// Task recovery is governed by task_execution_leases and fencing; directly
+// rewriting a claimed task here would bypass the authoritative lease epoch.
 func (s *server) sessionsReaper(ctx context.Context) {
 	t := time.NewTicker(30 * time.Second)
 	defer t.Stop()
@@ -1798,16 +1797,6 @@ func (s *server) sessionsReaper(ctx context.Context) {
 				SET status='offline', current_task_id=NULL
 				WHERE last_heartbeat < now() - INTERVAL '90 seconds' AND status <> 'offline'`); err != nil {
 				log.Printf("reaper: sessions update warn: %v", err)
-			}
-			if _, err := s.pool.Exec(rc, `
-				UPDATE fornix.tasks
-				SET status='pending', assigned_session=NULL, claimed_at=NULL
-				WHERE status IN ('claimed','in_progress')
-				  AND claimed_at < now() - INTERVAL '5 minutes'
-				  AND (assigned_session IS NULL OR assigned_session IN (
-				        SELECT id FROM fornix.sessions WHERE status='offline'
-				  ))`); err != nil {
-				log.Printf("reaper: tasks revert warn: %v", err)
 			}
 			cancel()
 		}
@@ -2034,7 +2023,7 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("/v1/task/", func(w http.ResponseWriter, r *http.Request) {
 		rest := strings.TrimPrefix(r.URL.Path, "/v1/task/")
 		parts := strings.SplitN(rest, "/", 2)
-		if len(parts) == 2 && parts[1] == "complete" {
+		if len(parts) == 2 && (parts[1] == "complete" || parts[1] == "renew" || parts[1] == "fail" || parts[1] == "cancel") {
 			id, err := strconv.ParseInt(parts[0], 10, 64)
 			if err != nil {
 				writeErr(w, 400, "bad id")
@@ -2044,7 +2033,16 @@ func (s *server) routes() http.Handler {
 				writeErr(w, 405, "POST only")
 				return
 			}
-			s.handleTaskComplete(w, r, id)
+			switch parts[1] {
+			case "complete":
+				s.handleTaskComplete(w, r, id)
+			case "renew":
+				s.handleTaskRenew(w, r, id)
+			case "fail":
+				s.handleTaskFail(w, r, id)
+			case "cancel":
+				s.handleTaskCancel(w, r, id)
+			}
 			return
 		}
 		writeErr(w, 404, "unknown task route")

@@ -19,12 +19,15 @@ routing first; spend model tokens only when ambiguity requires reasoning.
   idempotency, raw payload retention, and monotonic checkpoints.
 - Deterministic checkpointed projection runtime with rebuildable task state,
   workspace-scoped consumer leases, and monotonic fencing.
+- Workspace-scoped task execution leases with monotonic fencing, dependency-
+  aware claims, transactional renewal/completion/failure/cancellation, bounded
+  retries, and dead-letter transitions.
 - Docker-backed development environment, CI, integration tests, and smoke
   tests.
 
 The service is an alpha single-node control and retrieval substrate. Identity,
-tenant-aware authorization, task leases/fences, dependency scheduling, public
-replay APIs, artifact storage, and production operations remain on the roadmap.
+tenant-aware authorization, public replay APIs, artifact storage, and
+production operations remain on the roadmap.
 
 ## Quickstart
 

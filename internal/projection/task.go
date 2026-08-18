@@ -15,11 +15,15 @@ import (
 )
 
 const (
-	TaskProjectionName         = "task-state-v1"
-	DefaultTaskConsumerID      = "projection.task_state.v1"
-	TaskProjectionStatusDone   = "done"
-	TaskProjectionStatusFailed = "failed"
-	TaskProjectionStatusActive = "in_progress"
+	TaskProjectionName             = "task-state-v1"
+	DefaultTaskConsumerID          = "projection.task_state.v1"
+	TaskProjectionStatusDone       = "done"
+	TaskProjectionStatusFailed     = "failed"
+	TaskProjectionStatusActive     = "in_progress"
+	TaskProjectionStatusClaimed    = "claimed"
+	TaskProjectionStatusPending    = "pending"
+	TaskProjectionStatusCancelled  = "cancelled"
+	TaskProjectionStatusDeadLetter = "deadletter"
 )
 
 // TaskProjection is a derived, workspace-scoped task view. The task table
@@ -57,6 +61,12 @@ func (p *TaskProjection) BatchSize() int {
 // control-plane events are acknowledged without changing the derived view so
 // one subscriber can safely consume the shared event stream.
 func (p *TaskProjection) Apply(ctx context.Context, tx pgx.Tx, event contracts.EventEnvelope) (ApplyResult, error) {
+	if event.EventType == "task.lease_renewed" {
+		if tx == nil {
+			return ApplyResult{}, errors.New("task projection transaction is nil")
+		}
+		return ApplyResult{Handled: true}, nil
+	}
 	status, supported := taskEventStatus(event.EventType)
 	if !supported {
 		return ApplyResult{}, nil
@@ -110,7 +120,9 @@ func (p *TaskProjection) Apply(ctx context.Context, tx pgx.Tx, event contracts.E
 			current.Result = deltaState.Result
 		}
 	}
-	if event.Session != nil {
+	if deltaState.AssignedSessionPresent {
+		current.AssignedSession = deltaState.AssignedSession
+	} else if event.Session != nil {
 		if event.Session.Kind != "" && event.Session.Kind != "session" {
 			return ApplyResult{}, fmt.Errorf("task projection session reference kind must be session")
 		}
@@ -234,9 +246,11 @@ func SnapshotHashTx(ctx context.Context, tx pgx.Tx, workspaceID string) (string,
 }
 
 type taskDeltaResult struct {
-	Status        string
-	Result        string
-	ResultPresent bool
+	Status                 string
+	Result                 string
+	ResultPresent          bool
+	AssignedSession        string
+	AssignedSessionPresent bool
 }
 
 func taskDeltaState(event contracts.EventEnvelope, expectedStatus, taskID string) (taskDeltaResult, error) {
@@ -244,8 +258,9 @@ func taskDeltaState(event contracts.EventEnvelope, expectedStatus, taskID string
 	statusFound := false
 	statusPath := "/tasks/" + taskID + "/status"
 	resultPath := "/tasks/" + taskID + "/result"
+	assignedPath := "/tasks/" + taskID + "/assigned_session"
 	for _, delta := range event.StateDeltas {
-		if delta.Path != statusPath && delta.Path != resultPath {
+		if delta.Path != statusPath && delta.Path != resultPath && delta.Path != assignedPath {
 			continue
 		}
 		if delta.Op != contracts.DeltaSet {
@@ -265,6 +280,15 @@ func taskDeltaState(event contracts.EventEnvelope, expectedStatus, taskID string
 			}
 			result.Status = status
 			statusFound = true
+			continue
+		}
+		if delta.Path == assignedPath {
+			decoded, err := decodeTaskResult(delta.Value)
+			if err != nil {
+				return taskDeltaResult{}, err
+			}
+			result.AssignedSession = decoded
+			result.AssignedSessionPresent = true
 			continue
 		}
 		decoded, err := decodeTaskResult(delta.Value)
@@ -303,10 +327,20 @@ func decodeTaskResult(raw json.RawMessage) (string, error) {
 
 func taskEventStatus(eventType string) (string, bool) {
 	switch strings.TrimSpace(eventType) {
+	case "task.created":
+		return TaskProjectionStatusPending, true
+	case "task.claimed":
+		return TaskProjectionStatusClaimed, true
+	case "task.retry_scheduled":
+		return TaskProjectionStatusPending, true
 	case "task.completed":
 		return TaskProjectionStatusDone, true
 	case "task.failed":
 		return TaskProjectionStatusFailed, true
+	case "task.deadlettered":
+		return TaskProjectionStatusDeadLetter, true
+	case "task.cancelled":
+		return TaskProjectionStatusCancelled, true
 	case "task.progressed":
 		return TaskProjectionStatusActive, true
 	default:
