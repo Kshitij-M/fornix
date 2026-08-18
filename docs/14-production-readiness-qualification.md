@@ -24,6 +24,10 @@ task coordination, retrieval, and code indexing.
   fences, expiry/takeover, stale-worker rejection, dependency-aware ordering,
   bounded retry/dead-letter transitions, cancellation, and atomic lifecycle
   events.
+- Deterministic staged retrieval with repeatable-read snapshots, workspace
+  isolation, hard item/byte/token budgets, bounded graph expansion, gated
+  vector search, evidence hashes, provenance, stable ordering, and context
+  hashes.
 - Docker-backed Go/Python checks, Postgres integration tests, CI, and smoke
   tests.
 
@@ -34,8 +38,8 @@ task coordination, retrieval, and code indexing.
 - Not every mutation path emits typed events yet.
 - No content-addressed artifact store for large outputs, raw prompt/tool
   capture, or general memory compiler.
-- No SQL-first context compiler with hard total-token budgets and provenance
-  explanations.
+- No general gist/detail/raw artifact-backed memory compiler; the current
+  context compiler operates over memo, chunk, symbol, and event source rows.
 - No backup/restore drill, high-availability plan, capacity benchmark, metrics
   exporter, or operational backpressure policy.
 - The projection runtime is an internal pull API; no background subscriber or
@@ -52,6 +56,7 @@ make smoke
 make smoke-projection
 make smoke-leases
 make smoke-tasks
+make smoke-retrieval
 ```
 
 Postgres-backed results and measured latency/storage/replay throughput are

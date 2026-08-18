@@ -16,7 +16,7 @@ FORNIX_KEY ?= $(shell sed -n 's/^FORNIX_KEY=//p' .env 2>/dev/null | head -n 1)
 PROJECTION_PG_DSN ?= postgres://fornix:fornix-dev-only@host.docker.internal:55433/fornix?sslmode=disable
 FORNIX_TEST_PG_DSN ?=
 
-.PHONY: fmt test vet build python-install python-check check smoke smoke-events smoke-projection smoke-leases smoke-tasks dev-up dev-up-ai dev-up-watcher dev-run dev-logs dev-down
+.PHONY: fmt test vet build python-install python-check check smoke smoke-events smoke-projection smoke-leases smoke-tasks smoke-retrieval dev-up dev-up-ai dev-up-watcher dev-run dev-logs dev-down
 
 fmt:
 	$(GOFMT_CMD) -w $(GO_FILES)
@@ -53,12 +53,16 @@ smoke-leases:
 smoke-tasks:
 	FORNIX_TASK_PG_DSN=$(PROJECTION_PG_DSN) FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) scripts/test/v0.14-task-smokes.sh
 
+smoke-retrieval:
+	FORNIX_RETRIEVAL_PG_DSN=$(PROJECTION_PG_DSN) FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) scripts/test/v0.15-retrieval-smokes.sh
+
 smoke:
 	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) PYTHON_BIN=$(PYTHON_BIN) scripts/test/v0.10-smokes.sh
 	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) scripts/test/v0.11-event-smokes.sh
 	FORNIX_PROJECTION_PG_DSN=$(PROJECTION_PG_DSN) scripts/test/v0.12-projection-smokes.sh
 	FORNIX_LEASE_PG_DSN=$(PROJECTION_PG_DSN) scripts/test/v0.13-lease-smokes.sh
 	FORNIX_TASK_PG_DSN=$(PROJECTION_PG_DSN) FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) scripts/test/v0.14-task-smokes.sh
+	FORNIX_RETRIEVAL_PG_DSN=$(PROJECTION_PG_DSN) FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) scripts/test/v0.15-retrieval-smokes.sh
 
 check: test vet python-check
 

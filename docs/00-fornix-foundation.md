@@ -48,14 +48,18 @@ authoritative structured state
 - A deterministic task execution state machine with workspace-scoped worker
   leases/fences, dependency-aware claims, retry budgets, cancellation, and
   dead-letter transitions. Lifecycle mutations append typed events atomically.
+- A deterministic retrieval planner and bounded context compiler. Requests run
+  through workspace-scoped structured SQL, lexical search, bounded symbol
+  graph expansion, and caller-supplied vector search only when justified;
+  every item carries an evidence hash and hard item/byte/token budgets.
 
 ## Current gaps
 
 - Workspace-aware identities, roles, tenant isolation, and scoped credentials.
 - Typed event integration for every mutation path.
 - Artifact storage, raw prompt/tool capture, and a general memory compiler.
-- SQL-first retrieval planning, progressive gist/detail/raw disclosure, and
-  hard total-token context compilation.
+- General gist/detail/raw memory lifecycle and artifact-backed disclosure beyond
+  the current memo/chunk/symbol source representations.
 - Backups, restore drills, metrics, capacity benchmarks, and operational
   backpressure.
 

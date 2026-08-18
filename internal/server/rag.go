@@ -70,6 +70,7 @@ func (w ragWeights) explain() string {
 }
 
 type ragReq struct {
+	WorkspaceID    string     `json:"workspace_id,omitempty"`
 	Q              string     `json:"q"`
 	TopK           int        `json:"top_k"`
 	Weights        ragWeights `json:"weights"`
@@ -116,6 +117,7 @@ func (s *server) handleRAG(w http.ResponseWriter, r *http.Request) {
 	if req.MaxChunkTokens <= 0 {
 		req.MaxChunkTokens = 400
 	}
+	workspaceID := requestWorkspace(r, req.WorkspaceID)
 	weights := req.Weights.normalised()
 
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
@@ -194,6 +196,8 @@ func (s *server) handleRAG(w http.ResponseWriter, r *http.Request) {
 		pathFilter = "AND (" + strings.Join(patterns, " OR ") + ")"
 	}
 
+	args = append(args, workspaceID)
+	workspaceIdx := len(args)
 	args = append(args, req.TopK)
 	topKIdx := len(args)
 
@@ -201,11 +205,11 @@ func (s *server) handleRAG(w http.ResponseWriter, r *http.Request) {
 SELECT id, source_path, source_range, content, metadata,
        (%s) AS score
 FROM fornix.chunks
-WHERE 1=1
+WHERE workspace_id = $%d
   %s
   %s
 ORDER BY score DESC
-LIMIT $%d`, scoreExpr, candidateWhere, pathFilter, topKIdx)
+LIMIT $%d`, scoreExpr, workspaceIdx, candidateWhere, pathFilter, topKIdx)
 
 	rows, err := s.pool.Query(ctx, query, args...)
 	if err != nil {
@@ -259,6 +263,7 @@ LIMIT $%d`, scoreExpr, candidateWhere, pathFilter, topKIdx)
 // ---------- chunk upsert (companion endpoint for the ingestion workstream) ----------
 
 type chunkUpsertReq struct {
+	WorkspaceID string                 `json:"workspace_id,omitempty"`
 	SourcePath  string                 `json:"source_path"`
 	SourceRange string                 `json:"source_range"`
 	Content     string                 `json:"content"`
@@ -291,6 +296,7 @@ func (s *server) handleChunkUpsert(w http.ResponseWriter, r *http.Request) {
 
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
+	workspaceID := requestWorkspace(r, req.WorkspaceID)
 
 	var emb []float32
 	if e, err := s.embed(ctx, req.Content); err == nil {
@@ -311,19 +317,19 @@ func (s *server) handleChunkUpsert(w http.ResponseWriter, r *http.Request) {
 	var err error
 	if emb != nil {
 		err = s.pool.QueryRow(ctx, `
-			INSERT INTO fornix.chunks (source_path, source_range, content, content_sha256, metadata, embedding)
-			VALUES ($1, $2, $3, $4, $5::jsonb, $6)
-			ON CONFLICT (content_sha256) DO UPDATE SET content_sha256 = EXCLUDED.content_sha256
+			INSERT INTO fornix.chunks (workspace_id, source_path, source_range, content, content_sha256, metadata, embedding)
+			VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+			ON CONFLICT (workspace_id, content_sha256) DO UPDATE SET content_sha256 = EXCLUDED.content_sha256
 			RETURNING id, (xmax = 0)`,
-			req.SourcePath, req.SourceRange, req.Content, hash, string(mdJSON), pgvector.NewVector(emb),
+			workspaceID, req.SourcePath, req.SourceRange, req.Content, hash, string(mdJSON), pgvector.NewVector(emb),
 		).Scan(&id, &inserted)
 	} else {
 		err = s.pool.QueryRow(ctx, `
-			INSERT INTO fornix.chunks (source_path, source_range, content, content_sha256, metadata)
-			VALUES ($1, $2, $3, $4, $5::jsonb)
-			ON CONFLICT (content_sha256) DO UPDATE SET content_sha256 = EXCLUDED.content_sha256
+			INSERT INTO fornix.chunks (workspace_id, source_path, source_range, content, content_sha256, metadata)
+			VALUES ($1, $2, $3, $4, $5, $6::jsonb)
+			ON CONFLICT (workspace_id, content_sha256) DO UPDATE SET content_sha256 = EXCLUDED.content_sha256
 			RETURNING id, (xmax = 0)`,
-			req.SourcePath, req.SourceRange, req.Content, hash, string(mdJSON),
+			workspaceID, req.SourcePath, req.SourceRange, req.Content, hash, string(mdJSON),
 		).Scan(&id, &inserted)
 	}
 	if err != nil {

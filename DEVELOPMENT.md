@@ -32,6 +32,7 @@ make smoke-events
 make smoke-projection
 make smoke-leases
 make smoke-tasks
+make smoke-retrieval
 make dev-up
 make dev-run
 make dev-up-watcher
@@ -50,6 +51,7 @@ rejection, and lease transaction rollback:
 make smoke-projection
 make smoke-leases
 make smoke-tasks
+make smoke-retrieval
 ```
 
 To run the database integration tests directly:
@@ -67,6 +69,17 @@ fail, or cancel a claimed task. A retryable failure returns a task to the
 deterministic dependency-aware queue until its bounded attempt budget is
 exhausted, then dead-letters it. Expired ownership is recovered by takeover;
 the old fence cannot mutate the task.
+
+Retrieval is a read-only Postgres snapshot and is exposed at `POST
+/v1/retrieve`. The planner performs structured and lexical work before bounded
+graph expansion, and requires a caller-supplied embedding before vector work.
+Every response includes stage trace counters, source/evidence references, a
+stable context hash, and hard item/byte/token totals. Run the v0.15 smoke after
+rebuilding the service:
+
+```sh
+make smoke-retrieval
+```
 
 ## Repository rules
 

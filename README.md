@@ -22,6 +22,9 @@ routing first; spend model tokens only when ambiguity requires reasoning.
 - Workspace-scoped task execution leases with monotonic fencing, dependency-
   aware claims, transactional renewal/completion/failure/cancellation, bounded
   retries, and dead-letter transitions.
+- Deterministic `/v1/retrieve` planning over structured SQL, PostgreSQL FTS,
+  bounded symbol/provenance expansion, and gated caller-supplied pgvector;
+  context packs have evidence hashes, stable content hashes, and hard budgets.
 - Docker-backed development environment, CI, integration tests, and smoke
   tests.
 

@@ -24,6 +24,7 @@ import (
 
 	"github.com/omaveda/fornix/internal/config"
 	"github.com/omaveda/fornix/internal/contracts"
+	"github.com/omaveda/fornix/internal/retrieval"
 	"github.com/omaveda/fornix/internal/store"
 	"github.com/omaveda/fornix/internal/version"
 )
@@ -35,6 +36,7 @@ type server struct {
 	pool            *pgxpool.Pool
 	events          *store.EventStore
 	tasks           *store.TaskStore
+	retrieval       *retrieval.Store
 	apiKey          string
 	ollamaURL       string
 	httpClient      *http.Client
@@ -66,6 +68,7 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 		pool:            pool,
 		events:          events,
 		tasks:           store.NewTaskStore(pool, events),
+		retrieval:       retrieval.NewStore(pool),
 		apiKey:          cfg.APIKey,
 		ollamaURL:       cfg.OllamaURL,
 		httpClient:      &http.Client{Timeout: 30 * time.Second},
@@ -122,10 +125,11 @@ func (s *server) Run(ctx context.Context, listen string) error {
 // ---------- types ----------
 
 type memoCreateReq struct {
-	Title   string   `json:"title"`
-	Content string   `json:"content"`
-	Type    string   `json:"type"`
-	Tags    []string `json:"tags"`
+	WorkspaceID string   `json:"workspace_id,omitempty"`
+	Title       string   `json:"title"`
+	Content     string   `json:"content"`
+	Type        string   `json:"type"`
+	Tags        []string `json:"tags"`
 }
 
 type memoUpdateReq struct {
@@ -143,10 +147,11 @@ type memoCreateResp struct {
 }
 
 type searchReq struct {
-	Query string `json:"query"`
-	TopK  int    `json:"top_k"`
-	Type  string `json:"type"`
-	Mode  string `json:"mode"` // "hybrid" (default) | "tsvector" | "semantic"
+	WorkspaceID string `json:"workspace_id,omitempty"`
+	Query       string `json:"query"`
+	TopK        int    `json:"top_k"`
+	Type        string `json:"type"`
+	Mode        string `json:"mode"` // "hybrid" (default) | "tsvector" | "semantic"
 }
 
 type searchHit struct {
@@ -179,6 +184,7 @@ type coordMsg struct {
 // ---------- v0.5 code graph types ----------
 
 type symbolUpsertReq struct {
+	WorkspaceID string  `json:"workspace_id,omitempty"`
 	Repo        string  `json:"repo"`
 	FilePath    string  `json:"file_path"`
 	SymbolName  string  `json:"symbol_name"`
@@ -192,17 +198,19 @@ type symbolUpsertReq struct {
 }
 
 type symbolEdgeReq struct {
-	SrcID    int64  `json:"src_id"`
-	DstID    int64  `json:"dst_id"`
-	EdgeKind string `json:"edge_kind"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
+	SrcID       int64  `json:"src_id"`
+	DstID       int64  `json:"dst_id"`
+	EdgeKind    string `json:"edge_kind"`
 }
 
 type symbolSearchReq struct {
-	Query string `json:"query"`
-	TopK  int    `json:"top_k"`
-	Repo  string `json:"repo"`
-	Kind  string `json:"symbol_kind"`
-	Mode  string `json:"mode"` // hybrid | semantic | name
+	WorkspaceID string `json:"workspace_id,omitempty"`
+	Query       string `json:"query"`
+	TopK        int    `json:"top_k"`
+	Repo        string `json:"repo"`
+	Kind        string `json:"symbol_kind"`
+	Mode        string `json:"mode"` // hybrid | semantic | name
 }
 
 type symbolHit struct {
@@ -470,6 +478,7 @@ func (s *server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if req.Type == "" {
 		req.Type = "general"
 	}
+	workspaceID := requestWorkspace(r, req.WorkspaceID)
 	hash := sha256hex(req.Title + "\n" + req.Content)
 
 	// Try insert; on conflict return existing id
@@ -489,11 +498,11 @@ func (s *server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var inserted bool
 	if emb != nil {
 		err := s.pool.QueryRow(ctx, `
-			INSERT INTO fornix.memos (title, content, type, tags, sha256, embedding)
-			VALUES ($1, $2, $3, $4, $5, $6)
-			ON CONFLICT (sha256) DO UPDATE SET sha256 = EXCLUDED.sha256
+			INSERT INTO fornix.memos (workspace_id, title, content, type, tags, sha256, embedding)
+			VALUES ($1, $2, $3, $4, $5, $6, $7)
+			ON CONFLICT (workspace_id, sha256) DO UPDATE SET sha256 = EXCLUDED.sha256
 			RETURNING id, (xmax = 0)`,
-			req.Title, req.Content, req.Type, append([]string{}, req.Tags...), hash, pgvector.NewVector(emb),
+			workspaceID, req.Title, req.Content, req.Type, append([]string{}, req.Tags...), hash, pgvector.NewVector(emb),
 		).Scan(&id, &inserted)
 		if err != nil {
 			writeErr(w, 500, "db: "+err.Error())
@@ -501,11 +510,11 @@ func (s *server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		err := s.pool.QueryRow(ctx, `
-			INSERT INTO fornix.memos (title, content, type, tags, sha256)
-			VALUES ($1, $2, $3, $4, $5)
-			ON CONFLICT (sha256) DO UPDATE SET sha256 = EXCLUDED.sha256
+			INSERT INTO fornix.memos (workspace_id, title, content, type, tags, sha256)
+			VALUES ($1, $2, $3, $4, $5, $6)
+			ON CONFLICT (workspace_id, sha256) DO UPDATE SET sha256 = EXCLUDED.sha256
 			RETURNING id, (xmax = 0)`,
-			req.Title, req.Content, req.Type, append([]string{}, req.Tags...), hash,
+			workspaceID, req.Title, req.Content, req.Type, append([]string{}, req.Tags...), hash,
 		).Scan(&id, &inserted)
 		if err != nil {
 			writeErr(w, 500, "db: "+err.Error())
@@ -532,7 +541,8 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request, id int64) 
 	// Read existing
 	var title, content, mtype string
 	var tags []string
-	err := s.pool.QueryRow(ctx, `SELECT title, content, type, tags FROM fornix.memos WHERE id=$1 AND deleted_at IS NULL`, id).Scan(&title, &content, &mtype, &tags)
+	workspaceID := requestWorkspace(r, "")
+	err := s.pool.QueryRow(ctx, `SELECT title, content, type, tags FROM fornix.memos WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL`, workspaceID, id).Scan(&title, &content, &mtype, &tags)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeErr(w, 404, "not found")
@@ -560,11 +570,11 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request, id int64) 
 		emb = e
 	}
 	if emb != nil {
-		_, err = s.pool.Exec(ctx, `UPDATE fornix.memos SET title=$1, content=$2, type=$3, tags=$4, sha256=$5, embedding=$6, updated_at=now() WHERE id=$7`,
-			title, content, mtype, tags, hash, pgvector.NewVector(emb), id)
+		_, err = s.pool.Exec(ctx, `UPDATE fornix.memos SET title=$1, content=$2, type=$3, tags=$4, sha256=$5, embedding=$6, updated_at=now() WHERE workspace_id=$7 AND id=$8`,
+			title, content, mtype, tags, hash, pgvector.NewVector(emb), workspaceID, id)
 	} else {
-		_, err = s.pool.Exec(ctx, `UPDATE fornix.memos SET title=$1, content=$2, type=$3, tags=$4, sha256=$5, updated_at=now() WHERE id=$6`,
-			title, content, mtype, tags, hash, id)
+		_, err = s.pool.Exec(ctx, `UPDATE fornix.memos SET title=$1, content=$2, type=$3, tags=$4, sha256=$5, updated_at=now() WHERE workspace_id=$6 AND id=$7`,
+			title, content, mtype, tags, hash, workspaceID, id)
 	}
 	if err != nil {
 		writeErr(w, 500, "db: "+err.Error())
@@ -580,7 +590,8 @@ func (s *server) handleDelete(w http.ResponseWriter, r *http.Request, id int64) 
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	tag, err := s.pool.Exec(ctx, `UPDATE fornix.memos SET deleted_at=now() WHERE id=$1 AND deleted_at IS NULL`, id)
+	workspaceID := requestWorkspace(r, "")
+	tag, err := s.pool.Exec(ctx, `UPDATE fornix.memos SET deleted_at=now() WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL`, workspaceID, id)
 	if err != nil {
 		writeErr(w, 500, "db: "+err.Error())
 		return
@@ -599,10 +610,11 @@ func (s *server) handleGet(w http.ResponseWriter, r *http.Request, id int64) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
+	workspaceID := requestWorkspace(r, "")
 	var title, content, mtype string
 	var tags []string
 	var createdAt, updatedAt time.Time
-	err := s.pool.QueryRow(ctx, `SELECT title, content, type, tags, created_at, updated_at FROM fornix.memos WHERE id=$1 AND deleted_at IS NULL`, id).Scan(&title, &content, &mtype, &tags, &createdAt, &updatedAt)
+	err := s.pool.QueryRow(ctx, `SELECT title, content, type, tags, created_at, updated_at FROM fornix.memos WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL`, workspaceID, id).Scan(&title, &content, &mtype, &tags, &createdAt, &updatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeErr(w, 404, "not found")
@@ -637,6 +649,7 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if req.Mode == "" {
 		req.Mode = "hybrid"
 	}
+	workspaceID := requestWorkspace(r, req.WorkspaceID)
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
@@ -662,11 +675,11 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			       + (1.0 / (1 + EXTRACT(EPOCH FROM (now()-created_at))/86400.0/30)) * 0.3 AS score,
 			       type, created_at
 			FROM fornix.memos
-			WHERE deleted_at IS NULL
+			WHERE workspace_id=$3 AND deleted_at IS NULL
 			  AND tsv @@ plainto_tsquery('english', $1)
 			  AND ($2 = '' OR type = $2)
-			ORDER BY score DESC LIMIT $3`,
-			req.Query, req.Type, req.TopK)
+			ORDER BY score DESC, id LIMIT $4`,
+			req.Query, req.Type, workspaceID, req.TopK)
 	case "semantic":
 		rows, err = s.pool.Query(ctx, `
 			SELECT id, title, content,
@@ -674,11 +687,11 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			       + (1.0 / (1 + EXTRACT(EPOCH FROM (now()-created_at))/86400.0/30)) * 0.2 AS score,
 			       type, created_at
 			FROM fornix.memos
-			WHERE deleted_at IS NULL
+			WHERE workspace_id=$2 AND deleted_at IS NULL
 			  AND embedding IS NOT NULL
-			  AND ($2 = '' OR type = $2)
-			ORDER BY embedding <=> $1 ASC LIMIT $3`,
-			pgvector.NewVector(qEmb), req.Type, req.TopK)
+			  AND ($3 = '' OR type = $3)
+			ORDER BY embedding <=> $1 ASC, id LIMIT $4`,
+			pgvector.NewVector(qEmb), workspaceID, req.Type, req.TopK)
 	default: // hybrid
 		rows, err = s.pool.Query(ctx, `
 			SELECT id, title, content,
@@ -692,14 +705,14 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			       END AS score,
 			       type, created_at
 			FROM fornix.memos
-			WHERE deleted_at IS NULL
+			WHERE workspace_id=$4 AND deleted_at IS NULL
 			  AND ($3 = '' OR type = $3)
 			  AND (
 			      embedding IS NOT NULL
 			      OR tsv @@ plainto_tsquery('english', $2)
 			  )
-			ORDER BY score DESC LIMIT $4`,
-			pgvector.NewVector(qEmb), req.Query, req.Type, req.TopK)
+			ORDER BY score DESC, id LIMIT $5`,
+			pgvector.NewVector(qEmb), req.Query, req.Type, workspaceID, req.TopK)
 	}
 	if err != nil {
 		writeErr(w, 500, "db: "+err.Error())
@@ -866,6 +879,7 @@ func (s *server) handleSymbolUpsert(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
 	defer cancel()
+	workspaceID := requestWorkspace(r, req.WorkspaceID)
 
 	embedText := req.Signature + "\n" + req.Docstring
 	if req.EmbedSource != nil {
@@ -886,9 +900,9 @@ func (s *server) handleSymbolUpsert(w http.ResponseWriter, r *http.Request) {
 	var inserted bool
 	if emb != nil {
 		err := s.pool.QueryRow(ctx, `
-			INSERT INTO fornix.symbols (repo, file_path, symbol_name, symbol_kind, language, line_start, line_end, signature, docstring, embedding, sha256)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-			ON CONFLICT (repo, file_path, symbol_name, symbol_kind) DO UPDATE
+			INSERT INTO fornix.symbols (workspace_id, repo, file_path, symbol_name, symbol_kind, language, line_start, line_end, signature, docstring, embedding, sha256)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+			ON CONFLICT (workspace_id, repo, file_path, symbol_name, symbol_kind) DO UPDATE
 			  SET language=EXCLUDED.language,
 			      line_start=EXCLUDED.line_start,
 			      line_end=EXCLUDED.line_end,
@@ -899,7 +913,7 @@ func (s *server) handleSymbolUpsert(w http.ResponseWriter, r *http.Request) {
 			      updated_at=now(),
 			      deleted_at=NULL
 			RETURNING id, (xmax = 0)`,
-			req.Repo, req.FilePath, req.SymbolName, req.SymbolKind, req.Language,
+			workspaceID, req.Repo, req.FilePath, req.SymbolName, req.SymbolKind, req.Language,
 			req.LineStart, req.LineEnd, req.Signature, req.Docstring, pgvector.NewVector(emb), hash,
 		).Scan(&id, &inserted)
 		if err != nil {
@@ -908,9 +922,9 @@ func (s *server) handleSymbolUpsert(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		err := s.pool.QueryRow(ctx, `
-			INSERT INTO fornix.symbols (repo, file_path, symbol_name, symbol_kind, language, line_start, line_end, signature, docstring, sha256)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-			ON CONFLICT (repo, file_path, symbol_name, symbol_kind) DO UPDATE
+			INSERT INTO fornix.symbols (workspace_id, repo, file_path, symbol_name, symbol_kind, language, line_start, line_end, signature, docstring, sha256)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+			ON CONFLICT (workspace_id, repo, file_path, symbol_name, symbol_kind) DO UPDATE
 			  SET language=EXCLUDED.language,
 			      line_start=EXCLUDED.line_start,
 			      line_end=EXCLUDED.line_end,
@@ -920,7 +934,7 @@ func (s *server) handleSymbolUpsert(w http.ResponseWriter, r *http.Request) {
 			      updated_at=now(),
 			      deleted_at=NULL
 			RETURNING id, (xmax = 0)`,
-			req.Repo, req.FilePath, req.SymbolName, req.SymbolKind, req.Language,
+			workspaceID, req.Repo, req.FilePath, req.SymbolName, req.SymbolKind, req.Language,
 			req.LineStart, req.LineEnd, req.Signature, req.Docstring, hash,
 		).Scan(&id, &inserted)
 		if err != nil {
@@ -947,10 +961,13 @@ func (s *server) handleSymbolEdge(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
+	workspaceID := requestWorkspace(r, req.WorkspaceID)
 	_, err := s.pool.Exec(ctx, `
 		INSERT INTO fornix.symbol_edges (src_id, dst_id, edge_kind)
-		VALUES ($1,$2,$3)
-		ON CONFLICT DO NOTHING`, req.SrcID, req.DstID, req.EdgeKind)
+		SELECT $1, $2, $3
+		WHERE EXISTS (SELECT 1 FROM fornix.symbols WHERE id=$1 AND workspace_id=$4)
+		  AND EXISTS (SELECT 1 FROM fornix.symbols WHERE id=$2 AND workspace_id=$4)
+		ON CONFLICT DO NOTHING`, req.SrcID, req.DstID, req.EdgeKind, workspaceID)
 	if err != nil {
 		writeErr(w, 500, "db: "+err.Error())
 		return
@@ -978,6 +995,7 @@ func (s *server) handleSymbolSearch(w http.ResponseWriter, r *http.Request) {
 	if req.Mode == "" {
 		req.Mode = "hybrid"
 	}
+	workspaceID := requestWorkspace(r, req.WorkspaceID)
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
@@ -1002,23 +1020,23 @@ func (s *server) handleSymbolSearch(w http.ResponseWriter, r *http.Request) {
 			            WHEN symbol_name ILIKE '%' || $1 || '%' THEN 0.6
 			            ELSE 0.3 END AS score
 			FROM fornix.symbols
-			WHERE deleted_at IS NULL
+			WHERE workspace_id=$4 AND deleted_at IS NULL
 			  AND ($2 = '' OR repo = $2)
 			  AND ($3 = '' OR symbol_kind = $3)
 			  AND symbol_name ILIKE '%' || $1 || '%'
-			ORDER BY score DESC, symbol_name LIMIT $4`,
-			req.Query, req.Repo, req.Kind, req.TopK)
+			ORDER BY score DESC, symbol_name, id LIMIT $5`,
+			req.Query, req.Repo, req.Kind, workspaceID, req.TopK)
 	case "semantic":
 		rows, err = s.pool.Query(ctx, `
 			SELECT id, repo, file_path, symbol_name, symbol_kind, language, line_start, line_end, COALESCE(signature,''),
 			       (1.0 - (embedding <=> $1)) AS score
 			FROM fornix.symbols
-			WHERE deleted_at IS NULL
+			WHERE workspace_id=$2 AND deleted_at IS NULL
 			  AND embedding IS NOT NULL
-			  AND ($2 = '' OR repo = $2)
-			  AND ($3 = '' OR symbol_kind = $3)
-			ORDER BY embedding <=> $1 ASC LIMIT $4`,
-			pgvector.NewVector(qEmb), req.Repo, req.Kind, req.TopK)
+			  AND ($3 = '' OR repo = $3)
+			  AND ($4 = '' OR symbol_kind = $4)
+			ORDER BY embedding <=> $1 ASC, id LIMIT $5`,
+			pgvector.NewVector(qEmb), workspaceID, req.Repo, req.Kind, req.TopK)
 	default: // hybrid: exact-name dominates; otherwise blend semantic + name signal
 		rows, err = s.pool.Query(ctx, `
 			SELECT id, repo, file_path, symbol_name, symbol_kind, language, line_start, line_end, COALESCE(signature,''),
@@ -1034,12 +1052,12 @@ func (s *server) handleSymbolSearch(w http.ResponseWriter, r *http.Request) {
 			         ELSE 0.3
 			       END AS score
 			FROM fornix.symbols
-			WHERE deleted_at IS NULL
+			WHERE workspace_id=$5 AND deleted_at IS NULL
 			  AND ($3 = '' OR repo = $3)
 			  AND ($4 = '' OR symbol_kind = $4)
 			  AND (embedding IS NOT NULL OR symbol_name ILIKE '%' || $2 || '%')
-			ORDER BY score DESC LIMIT $5`,
-			pgvector.NewVector(qEmb), req.Query, req.Repo, req.Kind, req.TopK)
+			ORDER BY score DESC, symbol_name, id LIMIT $6`,
+			pgvector.NewVector(qEmb), req.Query, req.Repo, req.Kind, workspaceID, req.TopK)
 	}
 	if err != nil {
 		writeErr(w, 500, "db: "+err.Error())
@@ -1064,6 +1082,7 @@ func (s *server) handleSymbolNeighbours(w http.ResponseWriter, r *http.Request, 
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
+	workspaceID := requestWorkspace(r, "")
 
 	var query string
 	if direction == "callers" {
@@ -1072,20 +1091,22 @@ func (s *server) handleSymbolNeighbours(w http.ResponseWriter, r *http.Request, 
 			SELECT s.id, s.repo, s.file_path, s.symbol_name, s.symbol_kind, s.language, s.line_start, s.line_end, COALESCE(s.signature,''),
 			       e.edge_kind
 			FROM fornix.symbol_edges e
-			JOIN fornix.symbols s ON s.id = e.src_id
+			JOIN fornix.symbols root ON root.id = e.dst_id AND root.workspace_id = $2
+			JOIN fornix.symbols s ON s.id = e.src_id AND s.workspace_id = $2
 			WHERE e.dst_id = $1 AND s.deleted_at IS NULL
-			ORDER BY s.repo, s.file_path, s.symbol_name`
+			ORDER BY s.repo, s.file_path, s.symbol_name, s.id`
 	} else {
 		// callees: what this symbol calls
 		query = `
 			SELECT s.id, s.repo, s.file_path, s.symbol_name, s.symbol_kind, s.language, s.line_start, s.line_end, COALESCE(s.signature,''),
 			       e.edge_kind
 			FROM fornix.symbol_edges e
-			JOIN fornix.symbols s ON s.id = e.dst_id
+			JOIN fornix.symbols root ON root.id = e.src_id AND root.workspace_id = $2
+			JOIN fornix.symbols s ON s.id = e.dst_id AND s.workspace_id = $2
 			WHERE e.src_id = $1 AND s.deleted_at IS NULL
-			ORDER BY s.repo, s.file_path, s.symbol_name`
+			ORDER BY s.repo, s.file_path, s.symbol_name, s.id`
 	}
-	rows, err := s.pool.Query(ctx, query, id)
+	rows, err := s.pool.Query(ctx, query, id, workspaceID)
 	if err != nil {
 		writeErr(w, 500, "db: "+err.Error())
 		return
@@ -1126,7 +1147,8 @@ func (s *server) handleSymbolReindex(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	tag, err := s.pool.Exec(ctx, `UPDATE fornix.symbols SET deleted_at = now() WHERE repo=$1 AND file_path=$2 AND deleted_at IS NULL`, req.Repo, req.FilePath)
+	workspaceID := requestWorkspace(r, "")
+	tag, err := s.pool.Exec(ctx, `UPDATE fornix.symbols SET deleted_at = now() WHERE workspace_id=$1 AND repo=$2 AND file_path=$3 AND deleted_at IS NULL`, workspaceID, req.Repo, req.FilePath)
 	if err != nil {
 		writeErr(w, 500, "db: "+err.Error())
 		return
@@ -1917,6 +1939,13 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("/healthz", s.handleLiveness)
 	mux.HandleFunc("/readyz", s.handleReadiness)
 	mux.HandleFunc("/v1/health", s.handleHealth)
+	mux.HandleFunc("/v1/retrieve", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != "POST" {
+			writeErr(w, 405, "POST only")
+			return
+		}
+		s.handleRetrieve(w, r)
+	})
 	mux.HandleFunc("/v1/memo/search", s.handleSearch)
 	mux.HandleFunc("/v1/memo/backfill", s.handleBackfillEmbeddings)
 	mux.HandleFunc("/v1/memo/", func(w http.ResponseWriter, r *http.Request) {
