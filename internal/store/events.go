@@ -179,6 +179,21 @@ func (s *EventStore) AppendTx(ctx context.Context, tx pgx.Tx, event contracts.Ev
 	}
 	event.Sequence = uint64(sequence)
 	event.RecordedAt = recordedAtValue.UTC()
+	// Keep one attributable, integrity-checked evidence record beside every
+	// committed event. This is part of the caller-owned transaction: a failure
+	// to preserve evidence must roll back the authoritative event as well.
+	if _, err := NewEvidenceStore(s.pool).PutTx(ctx, tx, EvidencePutInput{
+		WorkspaceID:      workspaceID,
+		SourceReference:  fmt.Sprintf("event:%d", sequence),
+		DeduplicationKey: event.EventID,
+		Kind:             "control_event",
+		MediaType:        "application/json",
+		Gist:             event.EventType,
+		Detail:           string(event.Payload),
+		RawPayload:       event.Payload,
+	}); err != nil {
+		return AppendResult{}, fmt.Errorf("append event evidence: %w", err)
+	}
 	if event.IdempotencyKey != "" {
 		if _, err := tx.Exec(ctx, `
 			UPDATE fornix.idempotency_records

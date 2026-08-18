@@ -35,6 +35,7 @@ const embeddingModel = "nomic-embed-text"
 type server struct {
 	pool            *pgxpool.Pool
 	events          *store.EventStore
+	evidence        *store.EvidenceStore
 	tasks           *store.TaskStore
 	retrieval       *retrieval.Store
 	apiKey          string
@@ -67,6 +68,7 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 	return &server{
 		pool:            pool,
 		events:          events,
+		evidence:        store.NewEvidenceStore(pool),
 		tasks:           store.NewTaskStore(pool, events),
 		retrieval:       retrieval.NewStore(pool),
 		apiKey:          cfg.APIKey,
@@ -1945,6 +1947,34 @@ func (s *server) routes() http.Handler {
 			return
 		}
 		s.handleRetrieve(w, r)
+	})
+	mux.HandleFunc("/v1/evidence", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleEvidencePut(w, r)
+	})
+	mux.HandleFunc("/v1/evidence/edge", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleEvidenceEdge(w, r)
+	})
+	mux.HandleFunc("/v1/evidence/disclose", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleEvidenceDisclosure(w, r)
+	})
+	mux.HandleFunc("/v1/evidence/provenance", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleEvidenceProvenance(w, r)
 	})
 	mux.HandleFunc("/v1/memo/search", s.handleSearch)
 	mux.HandleFunc("/v1/memo/backfill", s.handleBackfillEmbeddings)

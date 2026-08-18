@@ -33,6 +33,7 @@ make smoke-projection
 make smoke-leases
 make smoke-tasks
 make smoke-retrieval
+make smoke-provenance
 make dev-up
 make dev-run
 make dev-up-watcher
@@ -52,6 +53,7 @@ make smoke-projection
 make smoke-leases
 make smoke-tasks
 make smoke-retrieval
+make smoke-provenance
 ```
 
 To run the database integration tests directly:
@@ -79,6 +81,21 @@ rebuilding the service:
 
 ```sh
 make smoke-retrieval
+```
+
+Evidence and provenance are exposed at `POST /v1/evidence`,
+`POST /v1/evidence/edge`, `POST /v1/evidence/disclose`, and
+`POST /v1/evidence/provenance`. Evidence writes compute the raw SHA-256 in
+Fornix, preserve raw bytes, and reject updates/deletes. Disclosure defaults to
+gist-first, can request detail or complete raw, and reports truncation when a
+hard byte/token budget cannot fit the complete raw payload. Supersession and
+contradiction records remain auditable; all routes require the existing bearer
+key and workspace scope.
+
+Run the v0.16 smoke after rebuilding the service:
+
+```sh
+make smoke-provenance
 ```
 
 ## Repository rules

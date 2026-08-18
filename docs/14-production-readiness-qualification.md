@@ -28,6 +28,9 @@ task coordination, retrieval, and code indexing.
   isolation, hard item/byte/token budgets, bounded graph expansion, gated
   vector search, evidence hashes, provenance, stable ordering, and context
   hashes.
+- Immutable workspace-scoped evidence records with computed raw hashes,
+  append-only typed provenance edges, supersession/contradiction metadata,
+  bounded deterministic traversal, and gist/detail/raw disclosure budgets.
 - Docker-backed Go/Python checks, Postgres integration tests, CI, and smoke
   tests.
 
@@ -38,8 +41,8 @@ task coordination, retrieval, and code indexing.
 - Not every mutation path emits typed events yet.
 - No content-addressed artifact store for large outputs, raw prompt/tool
   capture, or general memory compiler.
-- No general gist/detail/raw artifact-backed memory compiler; the current
-  context compiler operates over memo, chunk, symbol, and event source rows.
+- Evidence raw bytes are currently bounded Postgres payloads; there is no
+  object-backed large-artifact disclosure or retention-tier compactor yet.
 - No backup/restore drill, high-availability plan, capacity benchmark, metrics
   exporter, or operational backpressure policy.
 - The projection runtime is an internal pull API; no background subscriber or
@@ -57,6 +60,7 @@ make smoke-projection
 make smoke-leases
 make smoke-tasks
 make smoke-retrieval
+make smoke-provenance
 ```
 
 Postgres-backed results and measured latency/storage/replay throughput are

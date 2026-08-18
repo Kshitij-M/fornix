@@ -52,14 +52,18 @@ authoritative structured state
   through workspace-scoped structured SQL, lexical search, bounded symbol
   graph expansion, and caller-supplied vector search only when justified;
   every item carries an evidence hash and hard item/byte/token budgets.
+- A durable workspace-scoped provenance/evidence substrate. Control events are
+  transactionally mirrored into immutable evidence records with computed raw
+  hashes; typed supersession/contradiction edges support bounded traversal and
+  deterministic gist/detail/raw disclosure without replacing event history.
 
 ## Current gaps
 
 - Workspace-aware identities, roles, tenant isolation, and scoped credentials.
 - Typed event integration for every mutation path.
 - Artifact storage, raw prompt/tool capture, and a general memory compiler.
-- General gist/detail/raw memory lifecycle and artifact-backed disclosure beyond
-  the current memo/chunk/symbol source representations.
+- Artifact-backed disclosure for payloads larger than the bounded Postgres raw
+  evidence cap, plus general memory lifecycle and retention policy.
 - Backups, restore drills, metrics, capacity benchmarks, and operational
   backpressure.
 

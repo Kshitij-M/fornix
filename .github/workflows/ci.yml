@@ -116,6 +116,16 @@ jobs:
           FORNIX_KEY: fornix-ci-test-key
           FORNIX_RETRIEVAL_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
         run: scripts/test/v0.15-retrieval-smokes.sh
+      - name: Run provenance and disclosure integration tests
+        env:
+          FORNIX_TEST_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+        run: go test ./internal/store -run '^Test(Evidence|EventAppendCreates)' -count=1 -v
+      - name: Run provenance and disclosure smoke
+        env:
+          FORNIX_URL: http://localhost:8201
+          FORNIX_KEY: fornix-ci-test-key
+          FORNIX_PROVENANCE_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+        run: scripts/test/v0.16-provenance-smokes.sh
 
   vulnerabilities:
     name: Vulnerability scan

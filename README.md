@@ -25,6 +25,9 @@ routing first; spend model tokens only when ambiguity requires reasoning.
 - Deterministic `/v1/retrieve` planning over structured SQL, PostgreSQL FTS,
   bounded symbol/provenance expansion, and gated caller-supplied pgvector;
   context packs have evidence hashes, stable content hashes, and hard budgets.
+- Immutable workspace-scoped evidence records with computed raw hashes,
+  typed provenance edges, supersession/contradiction history, and bounded
+  deterministic gist/detail/raw disclosure.
 - Docker-backed development environment, CI, integration tests, and smoke
   tests.
 

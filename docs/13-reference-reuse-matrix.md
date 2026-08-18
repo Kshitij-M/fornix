@@ -13,6 +13,7 @@ pattern; do not copy code solely because a README names a feature.
 | Hybrid retrieval | agentmemory + ClawMem | BM25/vector/graph fusion, intent routing, traversal, score explanations | Deterministic escalation first with stage telemetry and hard budgets |
 | Reversible disclosure | FornixDB | Gist/detail/source references, supersession, decay, retention tiers | Keep evidence content-addressed and indexes derived |
 | Graph/provenance | ClawMem + agentmemory | Typed relations, causal/temporal traversal, stale-edge handling | Bound graph expansion to high-value relations |
+| Evidence disclosure | FornixDB + agentmemory | Gist/detail/raw drill-down, source citations, supersession, integrity checks | Immutable Postgres evidence with hard disclosure budgets |
 | Task runtime | Orloj | Desired/current state, leases, retries, idempotency, dead letters, replay | Implement as focused Postgres control-plane packages |
 | Governance | Orloj | Roles, operation allowlists, approval gates, fail-closed policy | Define workspace and identity contracts before broadening access |
 | Observability | agentmemory + Orloj | Structured logs, traces, task history, queue metrics, Prometheus | Instrument cost and stage boundaries before tuning retrieval |
