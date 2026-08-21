@@ -61,20 +61,21 @@ func (r ProvenanceRelation) valid() bool {
 // SourceRecord is the durable evidence identity. RawPayload is intentionally
 // omitted by default and is populated only for a raw disclosure.
 type SourceRecord struct {
-	ID                int64     `json:"id"`
-	WorkspaceID       string    `json:"workspace_id"`
-	SourceReference   string    `json:"source_reference"`
-	DeduplicationKey  string    `json:"deduplication_key,omitempty"`
-	Kind              string    `json:"kind"`
-	MediaType         string    `json:"media_type"`
-	Gist              string    `json:"gist"`
-	Detail            string    `json:"detail,omitempty"`
-	RawPayload        []byte    `json:"raw_payload,omitempty"`
-	EvidenceHash      string    `json:"evidence_hash"`
-	RawSizeBytes      int64     `json:"raw_size_bytes"`
-	SupersedesID      *int64    `json:"supersedes_id,omitempty"`
-	CreatedAt         time.Time `json:"created_at"`
-	IntegrityVerified bool      `json:"integrity_verified,omitempty"`
+	ID                int64        `json:"id"`
+	WorkspaceID       string       `json:"workspace_id"`
+	SourceReference   string       `json:"source_reference"`
+	DeduplicationKey  string       `json:"deduplication_key,omitempty"`
+	Kind              string       `json:"kind"`
+	MediaType         string       `json:"media_type"`
+	Gist              string       `json:"gist"`
+	Detail            string       `json:"detail,omitempty"`
+	RawPayload        []byte       `json:"raw_payload,omitempty"`
+	EvidenceHash      string       `json:"evidence_hash"`
+	RawSizeBytes      int64        `json:"raw_size_bytes"`
+	RawArtifact       *ArtifactRef `json:"raw_artifact,omitempty"`
+	SupersedesID      *int64       `json:"supersedes_id,omitempty"`
+	CreatedAt         time.Time    `json:"created_at"`
+	IntegrityVerified bool         `json:"integrity_verified,omitempty"`
 }
 
 // SourceRecordInput is the JSON-friendly write contract. The store hashes

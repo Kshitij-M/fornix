@@ -23,15 +23,28 @@ services:
       dockerfile: Dockerfile
     profiles: [app]
     environment:
-      FORNIX_KEY: ${FORNIX_KEY:?copy .env.example to .env and set FORNIX_KEY}
+      FORNIX_AUTH_MODE: ${FORNIX_AUTH_MODE:-development}
+      FORNIX_WORKER_ENABLED: ${FORNIX_WORKER_ENABLED:-true}
+      # Required only when FORNIX_AUTH_MODE=development; workspace mode uses
+      # hashed Postgres-backed API keys and does not need the legacy key.
+      FORNIX_KEY: ${FORNIX_KEY:-}
+      FORNIX_BOOTSTRAP_KEY: ${FORNIX_BOOTSTRAP_KEY:-}
       FORNIX_PG_DSN: postgres://${FORNIX_DB_USER:-fornix}:${FORNIX_DB_PASSWORD:-fornix-dev-only}@db:5432/${FORNIX_DB_NAME:-fornix}?sslmode=disable
       FORNIX_LISTEN: :8201
       FORNIX_OLLAMA_URL: http://ollama:11434
+      FORNIX_OPENAI_ENABLED: ${FORNIX_OPENAI_ENABLED:-false}
+      FORNIX_OPENAI_BASE_URL: ${FORNIX_OPENAI_BASE_URL:-https://api.openai.com/v1}
+      FORNIX_OPENAI_MODEL: ${FORNIX_OPENAI_MODEL:-gpt-4o-mini}
+      FORNIX_OPENAI_TIMEOUT_SECONDS: ${FORNIX_OPENAI_TIMEOUT_SECONDS:-30}
+      FORNIX_OPENAI_ALLOW_PRIVATE: ${FORNIX_OPENAI_ALLOW_PRIVATE:-false}
+      FORNIX_OPENAI_API_KEY: ${FORNIX_OPENAI_API_KEY:-}
     depends_on:
       db:
         condition: service_healthy
     ports:
       - "8201:8201"
+    volumes:
+      - .:/workspace:ro
 
   watcher:
     build:
@@ -40,7 +53,10 @@ services:
     profiles: [watch]
     environment:
       FORNIX_URL: http://fornix:8201
-      FORNIX_KEY: ${FORNIX_KEY:?copy .env.example to .env and set FORNIX_KEY}
+      # Supply a workspace-scoped watcher API key when the watch profile is
+      # enabled; the main service does not use this compatibility variable in
+      # workspace auth mode.
+      FORNIX_KEY: ${FORNIX_KEY:-}
       FORNIX_WATCHER_METRICS_ADDR: 0.0.0.0:8202
     working_dir: /workspace
     volumes:

@@ -38,6 +38,11 @@ const (
 // invokes an embedding model on behalf of a read.
 type RetrievalRequest struct {
 	WorkspaceID     string    `json:"workspace_id"`
+	RequestID       string    `json:"request_id,omitempty"`
+	IdempotencyKey  string    `json:"idempotency_key,omitempty"`
+	Actor           ActorRef  `json:"actor,omitempty"`
+	CausationID     string    `json:"causation_id,omitempty"`
+	CorrelationID   string    `json:"correlation_id,omitempty"`
 	Query           string    `json:"query,omitempty"`
 	ExactSourceRefs []string  `json:"exact_source_refs,omitempty"`
 	TaskID          string    `json:"task_id,omitempty"`
@@ -135,10 +140,17 @@ type ContextPack struct {
 
 func (r RetrievalRequest) Normalize() (RetrievalRequest, error) {
 	r.WorkspaceID = strings.TrimSpace(r.WorkspaceID)
+	r.RequestID = strings.TrimSpace(r.RequestID)
+	r.IdempotencyKey = strings.TrimSpace(r.IdempotencyKey)
 	if r.WorkspaceID == "" {
 		return RetrievalRequest{}, fmt.Errorf("workspace_id is required")
 	}
+	if len(r.RequestID) > MaxEventIDLength || len(r.IdempotencyKey) > MaxIdempotencyLength {
+		return RetrievalRequest{}, fmt.Errorf("retrieval request identity is too large")
+	}
 	r.Query = strings.TrimSpace(r.Query)
+	r.CausationID = strings.TrimSpace(r.CausationID)
+	r.CorrelationID = strings.TrimSpace(r.CorrelationID)
 	r.TaskID = strings.TrimSpace(r.TaskID)
 	r.MemoType = strings.TrimSpace(r.MemoType)
 	r.Repo = strings.TrimSpace(r.Repo)
@@ -223,6 +235,14 @@ func (r RetrievalRequest) Hash() (string, error) {
 	if err != nil {
 		return "", err
 	}
+	// Admission identity is metadata, not retrieval content. Keep plans and
+	// context hashes stable when the same logical request is retried with a
+	// different transport request ID or authenticated actor representation.
+	normalized.RequestID = ""
+	normalized.IdempotencyKey = ""
+	normalized.Actor = ActorRef{}
+	normalized.CausationID = ""
+	normalized.CorrelationID = ""
 	b, err := json.Marshal(normalized)
 	if err != nil {
 		return "", fmt.Errorf("hash retrieval request: %w", err)

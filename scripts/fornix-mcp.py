@@ -25,13 +25,18 @@ from urllib.error import HTTPError, URLError
 
 FORNIX_URL = os.environ.get("FORNIX_URL", "http://localhost:8201").rstrip("/")
 FORNIX_KEY = os.environ.get("FORNIX_KEY", "")
+FORNIX_WORKSPACE = os.environ.get("FORNIX_WORKSPACE_ID", "default")
 TIMEOUT = float(os.environ.get("FORNIX_TIMEOUT", "20"))
 
 
-def _call(method: str, path: str, body: Any | None = None) -> Any:
+def _call(method: str, path: str, body: Any | None = None, idempotency: str = "") -> Any:
     url = f"{FORNIX_URL}{path}"
     data = None
     headers = {"Authorization": f"Bearer {FORNIX_KEY}"}
+    if FORNIX_WORKSPACE:
+        headers["X-Workspace-ID"] = FORNIX_WORKSPACE
+    if idempotency:
+        headers["Idempotency-Key"] = idempotency
     if body is not None:
         data = json.dumps(body).encode()
         headers["Content-Type"] = "application/json"
@@ -48,6 +53,109 @@ def _call(method: str, path: str, body: Any | None = None) -> Any:
 
 def tool_health(_args: dict) -> dict:
     return _call("GET", "/v1/health")
+
+
+def tool_task_create(args: dict) -> dict:
+    return _call("POST", "/v1/task", {
+        "workspace_id": FORNIX_WORKSPACE,
+        "title": args.get("title", "MCP task"),
+        "brief": args.get("brief", ""),
+        "required_capabilities": args.get("required_capabilities", []),
+        "max_attempts": int(args.get("max_attempts") or 2),
+    }, args.get("idempotency_key", ""))
+
+
+def tool_task_list(_args: dict) -> dict:
+    return _call("GET", f"/v1/tasks?workspace_id={FORNIX_WORKSPACE}")
+
+
+def tool_task_get(args: dict) -> dict:
+    return _call("GET", f"/v1/task/{int(args['task_id'])}?workspace_id={FORNIX_WORKSPACE}")
+
+
+def _ingest_source(args: dict) -> dict:
+    return {
+        "repository": args.get("repository", "reference-repo"),
+        "source_root": args.get("source_root", os.environ.get("FORNIX_REFERENCE_WORKDIR", "/workspace/fixtures/reference-repo")),
+        "ignore_rules": list(args.get("ignore_rules") or [])[:128],
+        "extract_symbols": bool(args.get("extract_symbols", True)),
+        "embedding": {"enabled": bool(args.get("embedding", False))},
+    }
+
+
+def tool_ingest_dry_run(args: dict) -> dict:
+    return _call("POST", "/v1/operator/ingest/dry-run", {
+        "workspace_id": FORNIX_WORKSPACE,
+        "source": _ingest_source(args),
+        "batch_size": min(int(args.get("batch_size") or 32), 256),
+    })
+
+
+def tool_ingest_submit(args: dict) -> dict:
+    key = args.get("idempotency_key", "ingest:mcp:" + args.get("repository", "reference-repo"))
+    return _call("POST", "/v1/operator/ingest/jobs", {
+        "workspace_id": FORNIX_WORKSPACE,
+        "idempotency_key": key,
+        "source": _ingest_source(args),
+        "batch_size": min(int(args.get("batch_size") or 32), 256),
+    }, key)
+
+
+def tool_ingest_status(args: dict) -> dict:
+    return _call("GET", f"/v1/operator/ingest/jobs/{args['job_id']}?workspace_id={FORNIX_WORKSPACE}")
+
+
+def tool_ingest_resume(args: dict) -> dict:
+    return _call("POST", f"/v1/operator/ingest/jobs/{args['job_id']}/resume", {
+        "workspace_id": FORNIX_WORKSPACE,
+        "batch_size": min(int(args.get("batch_size") or 32), 256),
+        "worker_id": args.get("worker_id", "fornix-mcp-ingest-worker"),
+    })
+
+
+def tool_ingest_cancel(args: dict) -> dict:
+    return _call("POST", f"/v1/operator/ingest/jobs/{args['job_id']}/cancel", {"workspace_id": FORNIX_WORKSPACE})
+
+
+def tool_retrieve(args: dict) -> dict:
+    return _call("POST", "/v1/retrieve", {
+        "workspace_id": FORNIX_WORKSPACE,
+        "query": args.get("query", ""),
+        "max_items": min(int(args.get("max_items") or 20), 100),
+        "max_bytes": min(int(args.get("max_bytes") or 32768), 1 << 20),
+        "max_tokens": min(int(args.get("max_tokens") or 8192), 65536),
+    }, args.get("idempotency_key", ""))
+
+
+def tool_run_get(args: dict) -> dict:
+    return _call("GET", f"/v1/agent/run/{args['run_id']}?workspace_id={FORNIX_WORKSPACE}")
+
+
+def tool_run_replay(args: dict) -> dict:
+    return _call("POST", f"/v1/agent/run/{args['run_id']}/replay?workspace_id={FORNIX_WORKSPACE}", {})
+
+
+def tool_artifact_disclose(args: dict) -> dict:
+    return _call("POST", "/v1/artifacts/disclose", {
+        "workspace_id": FORNIX_WORKSPACE,
+        "content_hash": args.get("content_hash", ""),
+        "artifact_id": int(args.get("artifact_id") or 0),
+        "level": args.get("level", "gist"),
+        "max_bytes": min(int(args.get("max_bytes") or 32768), 1 << 20),
+        "max_tokens": min(int(args.get("max_tokens") or 8192), 65536),
+        "max_items": min(int(args.get("max_items") or 100), 100),
+    })
+
+
+def tool_evidence_disclose(args: dict) -> dict:
+    return _call("POST", "/v1/evidence/disclose", {
+        "workspace_id": FORNIX_WORKSPACE,
+        "evidence_id": int(args.get("evidence_id") or 0),
+        "source_reference": args.get("source_reference", ""),
+        "level": args.get("level", "gist"),
+        "max_bytes": min(int(args.get("max_bytes") or 32768), 1 << 20),
+        "max_tokens": min(int(args.get("max_tokens") or 8192), 65536),
+    })
 
 
 def tool_search(args: dict) -> dict:
@@ -202,6 +310,84 @@ TOOLS = [
             "required": ["query"],
         },
         "fn": tool_symbol_context,
+    },
+    {
+        "name": "fornix__task_create",
+        "description": "Create a workspace-scoped durable task.",
+        "inputSchema": {"type": "object", "properties": {"title": {"type": "string"}, "brief": {"type": "string"}, "required_capabilities": {"type": "array", "items": {"type": "string"}}, "max_attempts": {"type": "integer", "minimum": 1, "maximum": 10}, "idempotency_key": {"type": "string"}}, "required": ["brief"]},
+        "fn": tool_task_create,
+    },
+    {
+        "name": "fornix__task_list",
+        "description": "List tasks in the authenticated workspace.",
+        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "fn": tool_task_list,
+    },
+    {
+        "name": "fornix__task_get",
+        "description": "Read one workspace-scoped task.",
+        "inputSchema": {"type": "object", "properties": {"task_id": {"type": "integer"}}, "required": ["task_id"]},
+        "fn": tool_task_get,
+    },
+    {
+        "name": "fornix__ingest_dry_run",
+        "description": "Discover a mounted repository deterministically without durable mutation.",
+        "inputSchema": {"type": "object", "properties": {"repository": {"type": "string"}, "source_root": {"type": "string"}, "ignore_rules": {"type": "array", "items": {"type": "string"}}, "extract_symbols": {"type": "boolean"}, "batch_size": {"type": "integer", "maximum": 256}}},
+        "fn": tool_ingest_dry_run,
+    },
+    {
+        "name": "fornix__ingest_submit",
+        "description": "Submit an idempotent durable repository ingestion job.",
+        "inputSchema": {"type": "object", "properties": {"repository": {"type": "string"}, "source_root": {"type": "string"}, "ignore_rules": {"type": "array", "items": {"type": "string"}}, "extract_symbols": {"type": "boolean"}, "embedding": {"type": "boolean"}, "batch_size": {"type": "integer", "maximum": 256}, "idempotency_key": {"type": "string"}}, "required": ["source_root"]},
+        "fn": tool_ingest_submit,
+    },
+    {
+        "name": "fornix__ingest_status",
+        "description": "Read a workspace-scoped ingestion job and checkpoint.",
+        "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]},
+        "fn": tool_ingest_status,
+    },
+    {
+        "name": "fornix__ingest_resume",
+        "description": "Advance one bounded deterministic ingestion batch.",
+        "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}, "batch_size": {"type": "integer", "maximum": 256}, "worker_id": {"type": "string"}}, "required": ["job_id"]},
+        "fn": tool_ingest_resume,
+    },
+    {
+        "name": "fornix__ingest_cancel",
+        "description": "Durably cancel an ingestion job without deleting source history.",
+        "inputSchema": {"type": "object", "properties": {"job_id": {"type": "string"}}, "required": ["job_id"]},
+        "fn": tool_ingest_cancel,
+    },
+    {
+        "name": "fornix__retrieve",
+        "description": "Run deterministic bounded retrieval without model or tool side effects.",
+        "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}, "max_items": {"type": "integer", "maximum": 100}, "max_bytes": {"type": "integer", "maximum": 1048576}, "max_tokens": {"type": "integer", "maximum": 65536}, "idempotency_key": {"type": "string"}}, "required": ["query"]},
+        "fn": tool_retrieve,
+    },
+    {
+        "name": "fornix__run_get",
+        "description": "Inspect a durable agent run.",
+        "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}}, "required": ["run_id"]},
+        "fn": tool_run_get,
+    },
+    {
+        "name": "fornix__run_replay",
+        "description": "Replay an agent run from its durable event history without remote effects.",
+        "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}}, "required": ["run_id"]},
+        "fn": tool_run_replay,
+    },
+    {
+        "name": "fornix__artifact_disclose",
+        "description": "Read a bounded gist/detail/raw artifact disclosure by hash or id.",
+        "inputSchema": {"type": "object", "properties": {"artifact_id": {"type": "integer"}, "content_hash": {"type": "string"}, "level": {"type": "string", "enum": ["gist", "detail", "raw"]}, "max_bytes": {"type": "integer", "maximum": 1048576}, "max_tokens": {"type": "integer", "maximum": 65536}}, "additionalProperties": False},
+        "fn": tool_artifact_disclose,
+    },
+    {
+        "name": "fornix__evidence_disclose",
+        "description": "Read bounded workspace-scoped evidence with provenance-safe disclosure.",
+        "inputSchema": {"type": "object", "properties": {"evidence_id": {"type": "integer"}, "source_reference": {"type": "string"}, "level": {"type": "string", "enum": ["gist", "detail", "raw"]}, "max_bytes": {"type": "integer", "maximum": 1048576}, "max_tokens": {"type": "integer", "maximum": 65536}}, "additionalProperties": False},
+        "fn": tool_evidence_disclose,
     },
 ]
 TOOL_INDEX = {t["name"]: t for t in TOOLS}

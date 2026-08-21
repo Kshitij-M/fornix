@@ -23,6 +23,7 @@ jobs:
       - run: go vet ./...
       - run: go build -trimpath -o /tmp/fornix ./cmd/fornix
       - run: go build -trimpath -o /tmp/fornix-watcher ./cmd/fornix-watcher
+      - run: go build -trimpath -o /tmp/fornix-eval ./cmd/fornix-eval
 
   python:
     name: Python helper checks
@@ -66,6 +67,8 @@ jobs:
       - run: go build -trimpath -o /tmp/fornix ./cmd/fornix
       - name: Start Fornix
         env:
+          FORNIX_AUTH_MODE: development
+          FORNIX_WORKER_ENABLED: "false"
           FORNIX_KEY: fornix-ci-test-key
           FORNIX_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
           FORNIX_LISTEN: :8201
@@ -126,6 +129,115 @@ jobs:
           FORNIX_KEY: fornix-ci-test-key
           FORNIX_PROVENANCE_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
         run: scripts/test/v0.16-provenance-smokes.sh
+      - name: Run model gateway integration tests
+        env:
+          FORNIX_TEST_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+        run: go test ./internal/store -run '^TestModelCallStore' -count=1 -v
+      - name: Run model gateway smoke
+        env:
+          FORNIX_URL: http://localhost:8201
+          FORNIX_KEY: fornix-ci-test-key
+        run: scripts/test/v0.17-model-smokes.sh
+      - name: Run tool execution integration tests
+        env:
+          FORNIX_TEST_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+        run: go test ./internal/store -run '^TestToolRunStore' -count=1 -v
+      - name: Run tool registry and execution smoke
+        env:
+          FORNIX_URL: http://localhost:8201
+          FORNIX_KEY: fornix-ci-test-key
+        run: scripts/test/v0.18-tool-smokes.sh
+      - name: Run deterministic agent-loop integration tests
+        env:
+          FORNIX_TEST_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+        run: go test ./internal/store ./internal/agentloop -run 'Test(AgentRunStore|Run)' -count=1 -v
+      - name: Run deterministic agent-loop smoke
+        env:
+          FORNIX_URL: http://localhost:8201
+          FORNIX_KEY: fornix-ci-test-key
+        run: scripts/test/v0.19-agent-smokes.sh
+      - name: Run durable agent-run scheduler integration tests
+        env:
+          FORNIX_TEST_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+        run: go test ./internal/store ./internal/scheduler -run 'TestAgentRunScheduler|TestWorker' -count=1 -v
+      - name: Run durable agent-run scheduler smoke
+        env:
+          FORNIX_URL: http://localhost:8201
+          FORNIX_KEY: fornix-ci-test-key
+        run: scripts/test/v0.20-scheduler-smokes.sh
+      - name: Run identity and authorization integration tests
+        env:
+          FORNIX_TEST_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+        run: go test ./internal/store ./internal/server -run 'Test(AuthStore|SecurityMiddleware)' -count=1 -v
+      - name: Run identity and authorization smoke
+        env:
+          FORNIX_URL: http://localhost:8201
+          FORNIX_KEY: fornix-ci-test-key
+        run: scripts/test/v0.21-identity-smokes.sh
+      - name: Run artifact storage integration tests and smoke
+        env:
+          FORNIX_TEST_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+        run: go test ./internal/store -run '^TestArtifactStore|^TestModelCallStoreTerminal' -count=1 -v
+      - name: Run artifact storage smoke
+        env:
+          FORNIX_ARTIFACT_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+          FORNIX_URL: http://localhost:8201
+          FORNIX_KEY: fornix-ci-test-key
+        run: scripts/test/v0.22-artifact-smokes.sh
+      - name: Run artifact-backed output integration tests
+        env:
+          FORNIX_TEST_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+        run: go test ./internal/store -run 'Test(ArtifactBacked|Oversized|ArtifactBackfill|EvidenceBackfill|AgentBackfill|ArtifactRetentionSweep)' -count=1 -v
+      - name: Run artifact-backed output smoke
+        env:
+          FORNIX_ARTIFACT_OUTPUT_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+          FORNIX_URL: http://localhost:8201
+          FORNIX_KEY: fornix-ci-test-key
+        run: scripts/test/v0.23-artifact-output-smokes.sh
+      - name: Run observability and offline evaluation integration tests
+        env:
+          FORNIX_TEST_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+        run: go test ./internal/store ./internal/eval -run 'Test(Observability|ModelUsage|Evaluation|Replay)' -count=1 -v
+      - name: Run observability and evaluation smoke
+        env:
+          FORNIX_OBSERVABILITY_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+          FORNIX_URL: http://localhost:8201
+          FORNIX_KEY: fornix-ci-test-key
+        run: scripts/test/v0.24-observability-smokes.sh
+      - name: Run retrieval quality integration tests
+        env:
+          FORNIX_TEST_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+        run: go test ./internal/eval -run 'Test(EvaluateRetrievalDataset|ScoreRankedEvidence|RetrievalGates)' -count=1 -v
+      - name: Run retrieval quality smoke
+        env:
+          FORNIX_EVAL_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+        run: scripts/test/v0.25-retrieval-quality-smokes.sh
+      - name: Run retrieval-surface capture integration tests
+        env:
+          FORNIX_TEST_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+        run: go test ./internal/contracts ./internal/store -run 'TestRetrievalSurface' -count=1 -v
+      - name: Run retrieval evaluation API and CLI smoke
+        env:
+          FORNIX_RETRIEVAL_EVAL_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+          FORNIX_URL: http://localhost:8201
+          FORNIX_KEY: fornix-ci-test-key
+        run: scripts/test/v0.26-retrieval-evaluation-smokes.sh
+      - name: Run operator reference workflow smoke
+        env:
+          FORNIX_URL: http://localhost:8201
+          FORNIX_KEY: fornix-ci-test-key
+          FORNIX_REFERENCE_WORKDIR: ${{ github.workspace }}/fixtures/reference-repo
+        run: scripts/test/v0.27-reference-workflow-smokes.sh
+      - name: Run resumable repository ingestion integration tests
+        env:
+          FORNIX_TEST_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+        run: go test ./internal/ingest ./internal/store -run 'Test(Ingest|Discover|Chunks|ReadAndVerify)' -count=1 -v
+      - name: Run resumable repository ingestion smoke
+        env:
+          FORNIX_URL: http://localhost:8201
+          FORNIX_KEY: fornix-ci-test-key
+          FORNIX_REFERENCE_WORKDIR: ${{ github.workspace }}/fixtures/reference-repo
+        run: scripts/test/v0.29-ingestion-smokes.sh
 
   vulnerabilities:
     name: Vulnerability scan

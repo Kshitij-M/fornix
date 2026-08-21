@@ -4,11 +4,13 @@
 set -euo pipefail
 
 PG_DSN="${FORNIX_LEASE_PG_DSN:?FORNIX_LEASE_PG_DSN is required}"
+TEST_PG_DSN="${PG_DSN/localhost/host.docker.internal}"
+TEST_PG_DSN="${TEST_PG_DSN/127.0.0.1/host.docker.internal}"
 GO_IMAGE="${GO_IMAGE:-golang:1.25.13}"
 REPO_ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 
 docker run --rm --add-host=host.docker.internal:host-gateway \
-  -e FORNIX_TEST_PG_DSN="${PG_DSN}" \
+  -e FORNIX_TEST_PG_DSN="${TEST_PG_DSN}" \
   -v "${REPO_ROOT}:/workspace" -w /workspace "${GO_IMAGE}" \
   go test ./internal/store ./internal/projection \
   -run 'TestConsumerLease|TestRunnerStaleLease|TestRunnerConcurrentConsumers' \

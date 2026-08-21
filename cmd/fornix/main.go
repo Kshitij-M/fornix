@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"os"
 	"os/signal"
 	"syscall"
 
@@ -12,6 +13,13 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] != "serve" {
+		if err := runCLI(os.Args[1:]); err != nil {
+			log.Print(err)
+			os.Exit(2)
+		}
+		return
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		log.Fatalf("configuration: %v", err)

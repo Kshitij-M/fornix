@@ -40,9 +40,10 @@ type Scope struct {
 // ActorRef identifies the principal that caused a state transition without
 // carrying credentials or bearer tokens into the event log.
 type ActorRef struct {
-	ID   string `json:"id,omitempty"`
-	Kind string `json:"kind,omitempty"`
-	Name string `json:"name,omitempty"`
+	ID          string `json:"id,omitempty"`
+	Kind        string `json:"kind,omitempty"`
+	Name        string `json:"name,omitempty"`
+	WorkspaceID string `json:"workspace_id,omitempty"`
 }
 
 // EntityRef gives a stable typed reference to a task or session.
@@ -241,7 +242,8 @@ func (a *ActorRef) normalize() error {
 	a.ID = strings.TrimSpace(a.ID)
 	a.Kind = strings.TrimSpace(a.Kind)
 	a.Name = strings.TrimSpace(a.Name)
-	if len(a.ID) > MaxEventIDLength || len(a.Kind) > 64 || len(a.Name) > 256 {
+	a.WorkspaceID = strings.TrimSpace(a.WorkspaceID)
+	if len(a.ID) > MaxEventIDLength || len(a.Kind) > 64 || len(a.Name) > 256 || len(a.WorkspaceID) > 256 {
 		return fmt.Errorf("actor reference is too large")
 	}
 	return nil

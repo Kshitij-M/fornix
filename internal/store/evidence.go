@@ -30,11 +30,12 @@ var (
 // typed provenance. It deliberately has no cache or asynchronous delivery
 // path; callers can compose its *Tx methods with event/task mutations.
 type EvidenceStore struct {
-	pool *pgxpool.Pool
+	pool      *pgxpool.Pool
+	artifacts *ArtifactStore
 }
 
 func NewEvidenceStore(pool *pgxpool.Pool) *EvidenceStore {
-	return &EvidenceStore{pool: pool}
+	return &EvidenceStore{pool: pool, artifacts: NewArtifactStore(pool)}
 }
 
 type EvidencePutInput struct {
@@ -48,6 +49,9 @@ type EvidencePutInput struct {
 	RawPayload       []byte
 	SupersedesID     *int64
 	Contradicts      []int64
+	Actor            contracts.ActorRef
+	CausationID      string
+	CorrelationID    string
 }
 
 type EvidencePutResult struct {
@@ -58,6 +62,119 @@ type EvidencePutResult struct {
 type ProvenanceEdgeResult struct {
 	Edge    contracts.ProvenanceEdge `json:"edge"`
 	Created bool                     `json:"created"`
+}
+
+// ResolvedEvidence is the integrity-checked identity used by offline
+// evaluation. It intentionally contains no raw payload.
+type ResolvedEvidence struct {
+	ID              int64
+	WorkspaceID     string
+	SourceReference string
+	EvidenceHash    string
+}
+
+// ResolveEvidenceHashes resolves content-addressed gold references against
+// authoritative evidence records. The query is workspace-scoped and every
+// matching row is checked so stale or contradictory history cannot silently
+// inflate a retrieval score.
+func (s *EvidenceStore) ResolveEvidenceHashes(ctx context.Context, workspaceID string, hashes []string) ([]ResolvedEvidence, error) {
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("evidence store is not configured")
+	}
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" {
+		return nil, fmt.Errorf("workspace_id is required")
+	}
+	wanted := make([]string, 0, len(hashes))
+	seen := make(map[string]struct{}, len(hashes))
+	for _, hash := range hashes {
+		hash = strings.ToLower(strings.TrimSpace(hash))
+		if !isEvidenceHash(hash) {
+			return nil, fmt.Errorf("%w: invalid evidence hash %q", ErrEvidenceIntegrity, hash)
+		}
+		if _, ok := seen[hash]; ok {
+			continue
+		}
+		seen[hash] = struct{}{}
+		wanted = append(wanted, hash)
+	}
+	sort.Strings(wanted)
+	if len(wanted) == 0 {
+		return nil, nil
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin evidence resolution: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	rows, err := tx.Query(ctx, `
+		SELECT e.id, e.workspace_id, e.source_reference, e.raw_payload,
+		       e.raw_size_bytes, e.evidence_hash, e.raw_artifact_id,
+		       EXISTS (SELECT 1 FROM fornix.evidence_records newer
+		               WHERE newer.workspace_id=e.workspace_id AND newer.supersedes_id=e.id),
+		       EXISTS (SELECT 1 FROM fornix.provenance_edges p
+		               WHERE p.workspace_id=e.workspace_id
+		                 AND (p.from_evidence_id=e.id OR p.to_evidence_id=e.id)
+		                 AND p.relation=$3)
+		FROM fornix.evidence_records e
+		WHERE e.workspace_id=$1 AND e.evidence_hash=ANY($2)
+		ORDER BY e.evidence_hash, e.id`, workspaceID, wanted, string(contracts.RelationContradicts))
+	if err != nil {
+		return nil, fmt.Errorf("query evidence hashes: %w", err)
+	}
+	defer rows.Close()
+	resolved := make(map[string]ResolvedEvidence, len(wanted))
+	counts := make(map[string]int, len(wanted))
+	stale := make(map[string]bool, len(wanted))
+	contradictory := make(map[string]bool, len(wanted))
+	for rows.Next() {
+		var id int64
+		var rowWorkspace, sourceReference, hash string
+		var raw []byte
+		var rawSize int64
+		var artifactID *int64
+		var isStale, isContradictory bool
+		if err := rows.Scan(&id, &rowWorkspace, &sourceReference, &raw, &rawSize, &hash, &artifactID, &isStale, &isContradictory); err != nil {
+			return nil, fmt.Errorf("scan evidence hash: %w", err)
+		}
+		if artifactID != nil {
+			raw, err = readArtifactRawForEvidenceTx(ctx, tx, workspaceID, *artifactID)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if err := verifyEvidence(hash, raw, rawSize); err != nil {
+			return nil, err
+		}
+		counts[hash]++
+		stale[hash] = stale[hash] || isStale
+		contradictory[hash] = contradictory[hash] || isContradictory
+		if _, ok := resolved[hash]; !ok {
+			resolved[hash] = ResolvedEvidence{ID: id, WorkspaceID: rowWorkspace, SourceReference: sourceReference, EvidenceHash: hash}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read evidence hashes: %w", err)
+	}
+	for _, hash := range wanted {
+		if counts[hash] == 0 {
+			return nil, fmt.Errorf("%w: evidence hash %s is not present in workspace %s", ErrEvidenceNotFound, hash, workspaceID)
+		}
+		if stale[hash] {
+			return nil, fmt.Errorf("%w: evidence hash %s is superseded", ErrEvidenceIntegrity, hash)
+		}
+		if contradictory[hash] {
+			return nil, fmt.Errorf("%w: evidence hash %s is contradicted", ErrEvidenceIntegrity, hash)
+		}
+	}
+	out := make([]ResolvedEvidence, 0, len(wanted))
+	for _, hash := range wanted {
+		out = append(out, resolved[hash])
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit evidence resolution: %w", err)
+	}
+	return out, nil
 }
 
 const (
@@ -101,23 +218,45 @@ func (s *EvidenceStore) PutTx(ctx context.Context, tx pgx.Tx, input EvidencePutI
 
 	var record contracts.SourceRecord
 	var raw []byte
+	inlineRaw := normalized.RawPayload
+	var rawArtifactID *int64
+	var rawArtifactRef *contracts.ArtifactRef
+	if len(normalized.RawPayload) > contracts.MaxEvidenceRawBytes {
+		if s.artifacts == nil {
+			return EvidencePutResult{}, fmt.Errorf("artifact store is not configured")
+		}
+		artifact, artifactErr := s.artifacts.PutTx(ctx, tx, ArtifactPutInput{
+			WorkspaceID: normalized.WorkspaceID, Kind: "evidence-raw", MediaType: normalized.MediaType,
+			Raw: normalized.RawPayload, Manifest: contracts.ArtifactManifest{Gist: normalized.Gist, Metadata: map[string]string{
+				"source_reference": normalized.SourceReference, "kind": normalized.Kind,
+			}}, SourceKind: "evidence", SourceID: evidenceArtifactSourceID(normalized), Role: "raw",
+			IdempotencyKey: "evidence-raw:" + evidenceArtifactSourceID(normalized), Actor: normalized.Actor,
+			CausationID: normalized.CausationID, CorrelationID: normalized.CorrelationID,
+		})
+		if artifactErr != nil {
+			return EvidencePutResult{}, fmt.Errorf("store evidence raw artifact: %w", artifactErr)
+		}
+		rawArtifactID = &artifact.Artifact.ID
+		rawArtifactRef = &artifact.Reference
+		inlineRaw = []byte(evidenceArtifactMarker(artifact.Reference))
+	}
 	var inserted bool
 	err = tx.QueryRow(ctx, `
 		INSERT INTO fornix.evidence_records(
 			workspace_id, source_reference, deduplication_key, kind, media_type,
-			gist, detail, raw_payload, raw_size_bytes, evidence_hash, supersedes_id
-		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+			gist, detail, raw_payload, raw_size_bytes, evidence_hash, supersedes_id, raw_artifact_id
+		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 		ON CONFLICT (workspace_id, source_reference, deduplication_key) DO NOTHING
 		RETURNING id, workspace_id, source_reference, deduplication_key, kind,
 			media_type, gist, detail, raw_payload, raw_size_bytes, evidence_hash,
-			supersedes_id, created_at`,
+			supersedes_id, raw_artifact_id, created_at`,
 		normalized.WorkspaceID, normalized.SourceReference, normalized.DeduplicationKey,
 		normalized.Kind, normalized.MediaType, normalized.Gist, normalized.Detail,
-		normalized.RawPayload, len(normalized.RawPayload), rawHash, normalized.SupersedesID,
+		inlineRaw, len(normalized.RawPayload), rawHash, normalized.SupersedesID, rawArtifactID,
 	).Scan(&record.ID, &record.WorkspaceID, &record.SourceReference,
 		&record.DeduplicationKey, &record.Kind, &record.MediaType, &record.Gist,
 		&record.Detail, &raw, &record.RawSizeBytes, &record.EvidenceHash,
-		&record.SupersedesID, &record.CreatedAt)
+		&record.SupersedesID, &rawArtifactID, &record.CreatedAt)
 	if err == nil {
 		inserted = true
 	} else if !errors.Is(err, pgx.ErrNoRows) {
@@ -126,7 +265,7 @@ func (s *EvidenceStore) PutTx(ctx context.Context, tx pgx.Tx, input EvidencePutI
 		if err := tx.QueryRow(ctx, `
 			SELECT id, workspace_id, source_reference, deduplication_key, kind,
 				media_type, gist, detail, raw_payload, raw_size_bytes, evidence_hash,
-				supersedes_id, created_at
+				supersedes_id, raw_artifact_id, created_at
 			FROM fornix.evidence_records
 			WHERE workspace_id=$1 AND source_reference=$2 AND deduplication_key=$3
 			FOR SHARE`, normalized.WorkspaceID, normalized.SourceReference,
@@ -134,8 +273,15 @@ func (s *EvidenceStore) PutTx(ctx context.Context, tx pgx.Tx, input EvidencePutI
 			&record.SourceReference, &record.DeduplicationKey, &record.Kind,
 			&record.MediaType, &record.Gist, &record.Detail, &raw,
 			&record.RawSizeBytes, &record.EvidenceHash, &record.SupersedesID,
-			&record.CreatedAt); err != nil {
+			&rawArtifactID, &record.CreatedAt); err != nil {
 			return EvidencePutResult{}, fmt.Errorf("read duplicate evidence: %w", err)
+		}
+		if rawArtifactID != nil {
+			loaded, loadErr := readArtifactRawForEvidenceTx(ctx, tx, normalized.WorkspaceID, *rawArtifactID)
+			if loadErr != nil {
+				return EvidencePutResult{}, loadErr
+			}
+			raw = loaded
 		}
 		if err := verifyEvidence(record.EvidenceHash, raw, record.RawSizeBytes); err != nil {
 			return EvidencePutResult{}, err
@@ -146,10 +292,25 @@ func (s *EvidenceStore) PutTx(ctx context.Context, tx pgx.Tx, input EvidencePutI
 			!bytes.Equal(raw, normalized.RawPayload) {
 			return EvidencePutResult{}, fmt.Errorf("%w for workspace=%q source_reference=%q", ErrEvidenceConflict, normalized.WorkspaceID, normalized.SourceReference)
 		}
+		if rawArtifactID != nil {
+			ref, refErr := readArtifactRefBySource(ctx, tx, normalized.WorkspaceID, "evidence", evidenceArtifactSourceID(normalized), "raw")
+			if refErr != nil {
+				return EvidencePutResult{}, refErr
+			}
+			record.RawArtifact = &ref
+		}
 		record.IntegrityVerified = true
 		return EvidencePutResult{Record: record, Created: false}, nil
 	}
 
+	if rawArtifactID != nil {
+		loaded, loadErr := readArtifactRawForEvidenceTx(ctx, tx, normalized.WorkspaceID, *rawArtifactID)
+		if loadErr != nil {
+			return EvidencePutResult{}, loadErr
+		}
+		raw = loaded
+		record.RawArtifact = rawArtifactRef
+	}
 	if err := verifyEvidence(record.EvidenceHash, raw, record.RawSizeBytes); err != nil {
 		return EvidencePutResult{}, err
 	}
@@ -405,8 +566,10 @@ func normalizeEvidenceInput(input EvidencePutInput) (EvidencePutInput, string, e
 	if input.MediaType == "" {
 		input.MediaType = defaultEvidenceMediaType
 	}
-	if len(input.RawPayload) == 0 || len(input.RawPayload) > contracts.MaxEvidenceRawBytes {
-		return EvidencePutInput{}, "", fmt.Errorf("%w: raw payload must be between 1 and %d bytes", ErrInvalidEvidence, contracts.MaxEvidenceRawBytes)
+	input.CausationID = strings.TrimSpace(input.CausationID)
+	input.CorrelationID = strings.TrimSpace(input.CorrelationID)
+	if len(input.RawPayload) == 0 || len(input.RawPayload) > contracts.MaxArtifactBytes {
+		return EvidencePutInput{}, "", fmt.Errorf("%w: raw payload must be between 1 and %d bytes", ErrInvalidEvidence, contracts.MaxArtifactBytes)
 	}
 	if len(input.Gist) > contracts.MaxEvidenceGistBytes || len(input.Detail) > contracts.MaxEvidenceDetailBytes {
 		return EvidencePutInput{}, "", fmt.Errorf("%w: derived disclosure is too large", ErrInvalidEvidence)
@@ -419,28 +582,65 @@ func normalizeEvidenceInput(input EvidencePutInput) (EvidencePutInput, string, e
 	return input, hex.EncodeToString(digest[:]), nil
 }
 
+func evidenceArtifactSourceID(input EvidencePutInput) string {
+	identity := input.WorkspaceID + "\x00" + input.SourceReference + "\x00" + input.DeduplicationKey
+	return contracts.ArtifactContentHash([]byte(identity))
+}
+
+func evidenceArtifactMarker(ref contracts.ArtifactRef) string {
+	return fmt.Sprintf("[fornix-artifact id=%d sha256=%s bytes=%d]", ref.ArtifactID, ref.ContentHash, ref.ByteSize)
+}
+
+func readArtifactRawForEvidenceTx(ctx context.Context, tx pgx.Tx, workspaceID string, artifactID int64) ([]byte, error) {
+	artifact, err := readArtifactTx(ctx, tx, workspaceID, artifactID, false)
+	if err != nil {
+		return nil, fmt.Errorf("read evidence raw artifact: %w", err)
+	}
+	raw, err := readArtifactRawTx(ctx, tx, artifact)
+	if err != nil {
+		return nil, fmt.Errorf("read evidence raw artifact bytes: %w", err)
+	}
+	if err := verifyArtifactBytes(artifact, raw, nil); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
 func getEvidenceForDisclosureTx(ctx context.Context, tx pgx.Tx, request contracts.DisclosureRequest) (contracts.SourceRecord, []byte, error) {
 	if request.EvidenceID > 0 {
 		return getEvidenceTx(ctx, tx, request.WorkspaceID, request.EvidenceID)
 	}
 	var record contracts.SourceRecord
 	var raw []byte
+	var rawArtifactID *int64
 	err := tx.QueryRow(ctx, `
 		SELECT id, workspace_id, source_reference, deduplication_key, kind,
 			media_type, gist, detail, raw_payload, raw_size_bytes, evidence_hash,
-			supersedes_id, created_at
+			supersedes_id, raw_artifact_id, created_at
 		FROM fornix.evidence_records
 		WHERE workspace_id=$1 AND source_reference=$2
 		ORDER BY id DESC LIMIT 1`, request.WorkspaceID, request.SourceReference).
 		Scan(&record.ID, &record.WorkspaceID, &record.SourceReference,
 			&record.DeduplicationKey, &record.Kind, &record.MediaType, &record.Gist,
 			&record.Detail, &raw, &record.RawSizeBytes, &record.EvidenceHash,
-			&record.SupersedesID, &record.CreatedAt)
+			&record.SupersedesID, &rawArtifactID, &record.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return contracts.SourceRecord{}, nil, ErrEvidenceNotFound
 	}
 	if err != nil {
 		return contracts.SourceRecord{}, nil, fmt.Errorf("read evidence: %w", err)
+	}
+	if rawArtifactID != nil {
+		loaded, loadErr := readArtifactRawForEvidenceTx(ctx, tx, record.WorkspaceID, *rawArtifactID)
+		if loadErr != nil {
+			return contracts.SourceRecord{}, nil, loadErr
+		}
+		raw = loaded
+		ref, refErr := readArtifactRefBySource(ctx, tx, record.WorkspaceID, "evidence", evidenceArtifactSourceID(EvidencePutInput{WorkspaceID: record.WorkspaceID, SourceReference: record.SourceReference, DeduplicationKey: record.DeduplicationKey}), "raw")
+		if refErr != nil {
+			return contracts.SourceRecord{}, nil, refErr
+		}
+		record.RawArtifact = &ref
 	}
 	if err := verifyEvidence(record.EvidenceHash, raw, record.RawSizeBytes); err != nil {
 		return contracts.SourceRecord{}, nil, err
@@ -455,22 +655,35 @@ func getEvidenceTx(ctx context.Context, tx pgx.Tx, workspaceID string, id int64)
 	}
 	var record contracts.SourceRecord
 	var raw []byte
+	var rawArtifactID *int64
 	err := tx.QueryRow(ctx, `
 		SELECT id, workspace_id, source_reference, deduplication_key, kind,
 			media_type, gist, detail, raw_payload, raw_size_bytes, evidence_hash,
-			supersedes_id, created_at
+			supersedes_id, raw_artifact_id, created_at
 		FROM fornix.evidence_records
 		WHERE workspace_id=$1 AND id=$2
 		FOR SHARE`, workspaceID, id).
 		Scan(&record.ID, &record.WorkspaceID, &record.SourceReference,
 			&record.DeduplicationKey, &record.Kind, &record.MediaType, &record.Gist,
 			&record.Detail, &raw, &record.RawSizeBytes, &record.EvidenceHash,
-			&record.SupersedesID, &record.CreatedAt)
+			&record.SupersedesID, &rawArtifactID, &record.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return contracts.SourceRecord{}, nil, ErrEvidenceNotFound
 	}
 	if err != nil {
 		return contracts.SourceRecord{}, nil, fmt.Errorf("read evidence: %w", err)
+	}
+	if rawArtifactID != nil {
+		loaded, loadErr := readArtifactRawForEvidenceTx(ctx, tx, record.WorkspaceID, *rawArtifactID)
+		if loadErr != nil {
+			return contracts.SourceRecord{}, nil, loadErr
+		}
+		raw = loaded
+		ref, refErr := readArtifactRefBySource(ctx, tx, record.WorkspaceID, "evidence", evidenceArtifactSourceID(EvidencePutInput{WorkspaceID: record.WorkspaceID, SourceReference: record.SourceReference, DeduplicationKey: record.DeduplicationKey}), "raw")
+		if refErr != nil {
+			return contracts.SourceRecord{}, nil, refErr
+		}
+		record.RawArtifact = &ref
 	}
 	if err := verifyEvidence(record.EvidenceHash, raw, record.RawSizeBytes); err != nil {
 		return contracts.SourceRecord{}, nil, err
@@ -488,6 +701,18 @@ func verifyEvidence(expectedHash string, raw []byte, expectedSize int64) error {
 		return fmt.Errorf("%w: evidence_hash mismatch", ErrEvidenceIntegrity)
 	}
 	return nil
+}
+
+func isEvidenceHash(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	for _, character := range value {
+		if !((character >= '0' && character <= '9') || (character >= 'a' && character <= 'f')) {
+			return false
+		}
+	}
+	return true
 }
 
 func readIDsTx(ctx context.Context, tx pgx.Tx, query string, args ...any) ([]int64, error) {

@@ -21,8 +21,15 @@ import (
 // Store owns read-only retrieval. It deliberately does not cache, mutate
 // projections, or invoke a model: PostgreSQL and the request are the inputs.
 type Store struct {
-	pool *pgxpool.Pool
+	pool     *pgxpool.Pool
+	recorder SurfaceRecorder
 }
+
+// SurfaceRecorder receives the redacted result after the read-only retrieval
+// snapshot commits. It is an accounting/evaluation boundary; a capture error
+// fails the request so callers cannot mistake an unrecorded result for a
+// replayable one.
+type SurfaceRecorder func(context.Context, contracts.RetrievalRequest, Result, time.Duration) error
 
 type Result struct {
 	Plan  contracts.RetrievalPlan  `json:"plan"`
@@ -42,7 +49,14 @@ type candidateSet struct {
 
 func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 
+func (s *Store) SetSurfaceRecorder(recorder SurfaceRecorder) {
+	if s != nil {
+		s.recorder = recorder
+	}
+}
+
 func (s *Store) Retrieve(ctx context.Context, request contracts.RetrievalRequest) (Result, error) {
+	started := time.Now()
 	plan, normalized, err := BuildPlan(request)
 	if err != nil {
 		return Result{}, err
@@ -112,8 +126,12 @@ func (s *Store) Retrieve(ctx context.Context, request contracts.RetrievalRequest
 		trace.Duplicates += duplicates
 		trace.Stages = append(trace.Stages, stageTrace)
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return Result{}, fmt.Errorf("commit retrieval snapshot: %w", err)
+	// Retrieval is strictly read-only. Roll back the repeatable-read snapshot
+	// after all bounded reads so an optional stage failure cannot turn a
+	// degraded, auditable result into pgx's ErrTxCommitRollback. The snapshot
+	// has already served its purpose; no authoritative state is written here.
+	if err := tx.Rollback(ctx); err != nil {
+		return Result{}, fmt.Errorf("release retrieval snapshot: %w", err)
 	}
 
 	items := make([]contracts.ContextItem, 0, len(set.byKey))
@@ -130,7 +148,13 @@ func (s *Store) Retrieve(ctx context.Context, request contracts.RetrievalRequest
 			trace.TruncatedItems++
 		}
 	}
-	return Result{Plan: plan, Trace: trace, Pack: pack}, nil
+	result := Result{Plan: plan, Trace: trace, Pack: pack}
+	if s.recorder != nil {
+		if err := s.recorder(ctx, normalized, result, time.Since(started)); err != nil {
+			return Result{}, fmt.Errorf("record retrieval surface: %w", err)
+		}
+	}
+	return result, nil
 }
 
 func (s *Store) structured(ctx context.Context, tx pgx.Tx, request contracts.RetrievalRequest, limit int) ([]candidate, int, error) {

@@ -29,7 +29,7 @@ func (s *server) handleEvidencePut(w http.ResponseWriter, r *http.Request) {
 		DeduplicationKey: input.DeduplicationKey, Kind: input.Kind,
 		MediaType: input.MediaType, Gist: input.Gist, Detail: input.Detail,
 		RawPayload: append([]byte(nil), input.RawPayload...), SupersedesID: input.SupersedesID,
-		Contradicts: input.Contradicts,
+		Contradicts: input.Contradicts, Actor: requestActor(r), CausationID: requestIDFromRequest(r), CorrelationID: requestIDFromRequest(r),
 	})
 	if err != nil {
 		writeEvidenceErr(w, err)

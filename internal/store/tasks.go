@@ -78,6 +78,7 @@ type TaskCreateInput struct {
 type TaskClaimInput struct {
 	WorkspaceID string
 	SessionID   string
+	ActorID     string
 	LeaseTTL    time.Duration
 }
 
@@ -207,7 +208,7 @@ func (s *TaskStore) Create(ctx context.Context, input TaskCreateInput) (Task, co
 	if err != nil {
 		return Task{}, contracts.EventEnvelope{}, err
 	}
-	event.Actor = contracts.ActorRef{ID: input.CreatedBy, Kind: "principal"}
+	event.Actor = contracts.ActorRef{ID: input.CreatedBy, Kind: "principal", WorkspaceID: workspaceID}
 	appended, err := s.events.AppendTx(ctx, tx, event)
 	if err != nil {
 		return Task{}, contracts.EventEnvelope{}, fmt.Errorf("append task.created: %w", err)
@@ -325,9 +326,13 @@ func (s *TaskStore) ClaimNext(ctx context.Context, input TaskClaimInput) (TaskCl
 			WHERE workspace_id=$1 AND id=$2`, workspaceID, sessionID, task.ID); err != nil {
 			return TaskClaimResult{}, fmt.Errorf("mark task session busy: %w", err)
 		}
+		actorID := strings.TrimSpace(input.ActorID)
+		if actorID == "" {
+			actorID = sessionID
+		}
 		event, err := newTaskEvent("task.claimed", map[string]any{
 			"task_id": task.ID, "session_id": sessionID, "fence": fence, "takeover": takeover,
-		}, workspaceID, task.ID, sessionID, sessionID, []contracts.StateDelta{
+		}, workspaceID, task.ID, sessionID, actorID, []contracts.StateDelta{
 			taskStatusDelta(task.ID, contracts.TaskStatusClaimed),
 			taskStringDelta(task.ID, "assigned_session", sessionID),
 		})
@@ -975,7 +980,11 @@ func newTaskEvent(eventType string, payload any, workspaceID string, taskID int6
 		event.Session = &contracts.EntityRef{ID: strings.TrimSpace(sessionID), Kind: "session", WorkspaceID: event.Scope.WorkspaceID}
 	}
 	if strings.TrimSpace(actorID) != "" {
-		event.Actor = contracts.ActorRef{ID: strings.TrimSpace(actorID), Kind: "session"}
+		kind := "principal"
+		if strings.TrimSpace(actorID) == strings.TrimSpace(sessionID) {
+			kind = "session"
+		}
+		event.Actor = contracts.ActorRef{ID: strings.TrimSpace(actorID), Kind: kind, WorkspaceID: workspaceID}
 	}
 	event.StateDeltas = deltas
 	return event, nil

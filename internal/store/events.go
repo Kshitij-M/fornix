@@ -211,6 +211,7 @@ type ReadRequest struct {
 	AfterSequence uint64
 	ToSequence    uint64
 	EventType     string
+	RunID         string
 	TaskID        string
 	SessionID     string
 	Limit         int
@@ -261,6 +262,10 @@ func readAfter(ctx context.Context, queryer eventQueryer, request ReadRequest) (
 	if eventType := strings.TrimSpace(request.EventType); eventType != "" {
 		args = append(args, eventType)
 		query += fmt.Sprintf(" AND event_type = $%d", len(args))
+	}
+	if runID := strings.TrimSpace(request.RunID); runID != "" {
+		args = append(args, runID)
+		query += fmt.Sprintf(" AND (payload->>'run_id') = $%d", len(args))
 	}
 	if taskID := strings.TrimSpace(request.TaskID); taskID != "" {
 		args = append(args, taskID)

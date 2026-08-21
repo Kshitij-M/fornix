@@ -31,20 +31,85 @@ task coordination, retrieval, and code indexing.
 - Immutable workspace-scoped evidence records with computed raw hashes,
   append-only typed provenance edges, supersession/contradiction metadata,
   bounded deterministic traversal, and gist/detail/raw disclosure budgets.
+- Typed model gateway with explicit provider registry, deterministic fake,
+  Ollama embedding compatibility, opt-in OpenAI-compatible chat, stable failure
+  classification, bounded retries/budgets, pre-content fallback, redacted
+  evidence, and durable idempotent model-call metadata.
+- Explicit deterministic tool registry with structured-argv local execution,
+  deny-by-default scoped policy, durable approval decisions, bounded timeout,
+  output, argument, and environment budgets, task-fence admission, idempotent
+  tool-run metadata, and typed lifecycle events.
+- Deterministic bounded agent loop with durable run checkpoints, persisted
+  context hashes, model/tool sequencing, hard turn/token/byte/time/cost/tool
+  budgets, durable cancellation/approval/retry states, task-fence admission,
+  idempotent run creation, and run-scoped event replay.
+- Postgres-backed agent-run queue selection with deterministic ordering,
+  workspace/run worker leases, monotonic fences, heartbeats, expiry/takeover,
+  cancellation exclusion, automatic due-retry/approved-approval resumption,
+  and atomic lease-renewed checkpoint commits.
 - Docker-backed Go/Python checks, Postgres integration tests, CI, and smoke
   tests.
+- Workspace-scoped identities, deterministic RBAC, fail-closed authorization,
+  API-key hashing/expiry/revocation/rotation, credential-reference lifecycle,
+  append-only authorization audit, and authenticated actor propagation.
+- Workspace-scoped content-addressed artifacts with deterministic chunking,
+  immutable raw-byte enforcement, concurrent per-workspace deduplication,
+  append-only references/provenance, model-call response linking, bounded
+  gist/detail/raw disclosure, integrity verification, and retention tombstones.
+- Transactional artifact-backed tool, evidence, and agent output integration
+  with bounded compatibility markers, idempotent source links, task-fence
+  admission, dry-run/resumable backfill, two-phase archive/delete sweeps,
+  corruption reports, and storage/deduplication metrics.
+- Durable workspace-scoped observations, trace spans, cost ledger entries,
+  fixed-dimension metrics, model/tool/retrieval/agent/artifact/approval/retry/
+  scheduler instrumentation, and authenticated read-only metrics snapshots.
+  Offline evaluation replays durable checkpoints and history only, supports
+  bounded dry runs, deterministic quality gates, and artifact-backed reports.
+- Deterministic retrieval-quality evaluation resolves gold hashes against
+  integrity-checked workspace evidence and records hit@k, reciprocal rank,
+  precision, recall, nDCG, rank drift, context-hash, abstention, latency, SQL,
+  cost, and baseline-regression results without external effects.
+- Normal retrieval requests can append a redacted workspace-scoped retrieval
+  surface. Authenticated operators can register datasets, page through
+  recordings, run bounded durable or dry-run evaluations, compare baselines,
+  and read metrics/gates/reports. The offline `fornix-eval` CLI is deterministic
+  and consumes recorded surfaces only.
+- The authenticated Go operator CLI, `/v1/operator/*` HTTP routes, and MCP
+  compatibility shim now share workspace bootstrap, identity/role/API-key
+  lifecycle, bounded ingest metadata, task/run inspection, disclosure, metrics,
+  and reference-workflow semantics.
 
 ## Production gaps
 
-- One shared bearer key; no tenant-aware identities, roles, scoped credentials,
-  rotation, revocation, or audit policy.
+- No OAuth/SSO, external KMS/secret-manager provider, or Postgres row-level
+  security policy. The operator identity/API-key surface is intentionally
+  bounded; local compatibility still requires explicit development mode.
 - Not every mutation path emits typed events yet.
-- No content-addressed artifact store for large outputs, raw prompt/tool
-  capture, or general memory compiler.
-- Evidence raw bytes are currently bounded Postgres payloads; there is no
-  object-backed large-artifact disclosure or retention-tier compactor yet.
-- No backup/restore drill, high-availability plan, capacity benchmark, metrics
-  exporter, or operational backpressure policy.
+- Not every historical inline prompt/tool/evidence payload has been migrated to
+  artifact references, and there is no general memory compiler yet. Task 14
+  backfill is producer-specific, bounded, and operator-triggered. The artifact
+  plane is Postgres-only and does not yet provide external object storage or
+  resumable uploads.
+- The agent loop is currently a single-run bounded orchestrator with a
+  single-node pull worker. It does not provide multi-agent sub-run graphs or a
+  general sandbox provider. The current local process seam cannot enforce
+  complete network/filesystem isolation on every host. Remote model calls and
+  external tool processes remain at-least-once at their network/process
+  boundaries even when provider or run idempotency keys are supplied.
+- Evidence raw bytes remain bounded inline for backward compatibility; model
+  response evidence now has a transactional artifact reference. Tool/agent
+  output migration, object-backed cold tiers, and a retention compactor remain
+  follow-up work.
+- No backup/restore drill, high-availability plan, capacity benchmark, metric
+  exporter/collector, metric retention compactor, or operational backpressure
+  policy. The Task 15 endpoint is a bounded Postgres snapshot, not a
+  Prometheus/OTel replacement.
+- No background evaluation scheduler, general historical import pipeline, or
+  full multi-tenant administration UX. Recorded surfaces require binary gold
+  evidence labels and the current CLI/API intentionally uses redacted hashes
+  rather than raw prompts or rendered context. The reference workflow now
+  consumes a durable bounded repository ingest job; automatic ingest scheduling
+  and full parser-quality indexing remain future work.
 - The projection runtime is an internal pull API; no background subscriber or
   public replay API is provided yet.
 - Lease transitions are current coordination state rather than an append-only
@@ -61,6 +126,19 @@ make smoke-leases
 make smoke-tasks
 make smoke-retrieval
 make smoke-provenance
+make smoke-model
+make smoke-tools
+make smoke-agent
+make smoke-scheduler
+make smoke-identity
+make smoke-artifacts
+make smoke-artifact-output
+make smoke-observability
+make smoke-retrieval-quality
+make smoke-retrieval-evaluation
+make smoke-reference-workflow
+make smoke-reference-openai
+make smoke-ingestion
 ```
 
 Postgres-backed results and measured latency/storage/replay throughput are

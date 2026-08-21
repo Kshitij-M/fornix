@@ -1,11 +1,9 @@
 package server
 
 import (
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -22,10 +20,14 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgvector "github.com/pgvector/pgvector-go"
 
+	"github.com/omaveda/fornix/internal/agentloop"
 	"github.com/omaveda/fornix/internal/config"
 	"github.com/omaveda/fornix/internal/contracts"
+	"github.com/omaveda/fornix/internal/model"
 	"github.com/omaveda/fornix/internal/retrieval"
+	"github.com/omaveda/fornix/internal/scheduler"
 	"github.com/omaveda/fornix/internal/store"
+	"github.com/omaveda/fornix/internal/tool"
 	"github.com/omaveda/fornix/internal/version"
 )
 
@@ -33,16 +35,35 @@ const embeddingDim = 768
 const embeddingModel = "nomic-embed-text"
 
 type server struct {
-	pool            *pgxpool.Pool
-	events          *store.EventStore
-	evidence        *store.EvidenceStore
-	tasks           *store.TaskStore
-	retrieval       *retrieval.Store
-	apiKey          string
-	ollamaURL       string
-	httpClient      *http.Client
-	maxBodyBytes    int64
-	shutdownTimeout time.Duration
+	pool              *pgxpool.Pool
+	events            *store.EventStore
+	evidence          *store.EvidenceStore
+	artifacts         *store.ArtifactStore
+	ingests           *store.IngestStore
+	tasks             *store.TaskStore
+	retrieval         *retrieval.Store
+	retrievalSurfaces *store.RetrievalSurfaceStore
+	modelRegistry     *model.Registry
+	modelGateway      *model.Gateway
+	modelCalls        *store.ModelCallStore
+	operator          *store.OperatorStore
+	observability     *store.ObservabilityStore
+	evaluations       *store.EvaluationStore
+	toolRegistry      *tool.Registry
+	toolExecutor      *tool.Executor
+	toolRuns          *store.ToolRunStore
+	agentRuns         *store.AgentRunStore
+	auth              *store.AuthStore
+	agentLoop         *agentloop.Orchestrator
+	agentWorker       *scheduler.Worker
+	apiKey            string
+	bootstrapKey      string
+	authMode          string
+	workerEnabled     bool
+	ollamaURL         string
+	httpClient        *http.Client
+	maxBodyBytes      int64
+	shutdownTimeout   time.Duration
 }
 
 func New(ctx context.Context, cfg config.Config) (*server, error) {
@@ -65,18 +86,149 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 		return nil, fmt.Errorf("apply migrations: %w", err)
 	}
 	events := store.NewEventStore(pool)
-	return &server{
-		pool:            pool,
-		events:          events,
-		evidence:        store.NewEvidenceStore(pool),
-		tasks:           store.NewTaskStore(pool, events),
-		retrieval:       retrieval.NewStore(pool),
+	modelCalls := store.NewModelCallStore(pool)
+	observability := store.NewObservabilityStore(pool)
+	evaluations := store.NewEvaluationStore(pool)
+	retrievalSurfaces := store.NewRetrievalSurfaceStore(pool)
+	authStore := store.NewAuthStore(pool)
+	operatorStore := store.NewOperatorStore(pool, events)
+	modelRegistry := model.NewRegistry()
+	ollamaProvider, err := model.NewOllamaProvider(model.OllamaConfig{
+		Endpoint: contracts.ModelEndpoint{
+			ID: "ollama", Provider: "ollama", BaseURL: cfg.OllamaURL,
+			DefaultModel: embeddingModel, Enabled: true, AllowPrivate: true,
+		},
+		EmbeddingModel: embeddingModel, EmbeddingDim: embeddingDim,
+		HTTPClient: &http.Client{Timeout: 30 * time.Second}, Timeout: 30 * time.Second,
+	})
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("configure Ollama provider: %w", err)
+	}
+	if err := modelRegistry.Register(ollamaProvider); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("register Ollama provider: %w", err)
+	}
+	if err := modelRegistry.Register(model.NewFakeProvider(model.FakeConfig{})); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("register fake model provider: %w", err)
+	}
+	if cfg.OpenAIEnabled {
+		openAIProvider, providerErr := model.NewOpenAIProvider(model.OpenAIConfig{
+			Endpoint: contracts.ModelEndpoint{
+				ID: "openai", Provider: "openai", BaseURL: cfg.OpenAIBaseURL,
+				DefaultModel: cfg.OpenAIModel, CredentialRef: cfg.OpenAICredentialRef,
+				Enabled: true, AllowPrivate: cfg.OpenAIAllowPrivate,
+			},
+			RequireAPIKey: true, Timeout: cfg.OpenAITimeout,
+			ResolveCredential: func(ref string) (string, error) { return os.Getenv(ref), nil },
+		})
+		if providerErr != nil {
+			pool.Close()
+			return nil, fmt.Errorf("configure OpenAI provider: %w", providerErr)
+		}
+		if err := modelRegistry.Register(openAIProvider); err != nil {
+			pool.Close()
+			return nil, fmt.Errorf("register OpenAI provider: %w", err)
+		}
+	}
+	toolRegistry := tool.NewRegistry()
+	if err := toolRegistry.Register(contracts.ToolDefinition{
+		ID: "fornix.echo", Name: "echo", Version: "1", Capability: "process.echo",
+		Description: "bounded deterministic argument echo for smoke and offline development",
+		Executable:  "/bin/echo", Enabled: true, Sandbox: contracts.DefaultSandboxProfile(),
+	}); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("register built-in tool: %w", err)
+	}
+	repositorySandbox := contracts.DefaultSandboxProfile()
+	repositorySandbox.ReadOnlyWorkdir = true
+	if err := toolRegistry.Register(contracts.ToolDefinition{
+		ID: "fornix.repository.read", Name: "repository.read", Version: "1", Capability: "repository.read",
+		Description: "read a bounded repository file through structured argv", Executable: "/bin/cat", Enabled: true,
+		Sandbox: repositorySandbox,
+	}); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("register repository tool: %w", err)
+	}
+	toolPolicy, err := tool.NewPolicy([]contracts.ToolPolicyRule{{
+		ID: "builtin-default-echo", Priority: 100, WorkspaceID: contracts.DefaultWorkspaceID,
+		ToolID: "fornix.echo", Capability: "process.echo", Mode: contracts.ToolModeAutomatic,
+		Enabled: true, Sandbox: contracts.DefaultSandboxProfile(),
+	}})
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("configure tool policy: %w", err)
+	}
+	toolRuns := store.NewToolRunStore(pool, events)
+	agentRuns := store.NewAgentRunStore(pool, events)
+	modelCalls.SetObservability(observability)
+	toolRuns.SetObservability(observability)
+	agentRuns.SetObservability(observability)
+	modelGateway := model.NewGateway(modelRegistry, modelCalls)
+	toolExecutor := &tool.Executor{Registry: toolRegistry, Policy: toolPolicy, Store: toolRuns, Fence: toolRuns}
+	retrievalStore := retrieval.NewStore(pool)
+	retrievalStore.SetSurfaceRecorder(func(captureCtx context.Context, request contracts.RetrievalRequest, result retrieval.Result, duration time.Duration) error {
+		return captureRetrievalSurface(captureCtx, retrievalSurfaces, request, result, duration)
+	})
+	srv := &server{
+		pool:              pool,
+		events:            events,
+		evidence:          store.NewEvidenceStore(pool),
+		artifacts:         store.NewArtifactStore(pool),
+		tasks:             store.NewTaskStore(pool, events),
+		retrieval:         retrievalStore,
+		retrievalSurfaces: retrievalSurfaces,
+		modelRegistry:     modelRegistry,
+		modelGateway:      modelGateway,
+		modelCalls:        modelCalls,
+		operator:          operatorStore,
+		observability:     observability,
+		evaluations:       evaluations,
+		toolRegistry:      toolRegistry,
+		toolRuns:          toolRuns,
+		toolExecutor:      toolExecutor,
+		agentRuns:         agentRuns,
+		auth:              authStore,
+		agentLoop: func() *agentloop.Orchestrator {
+			loop := agentloop.New(agentRuns, modelGateway, toolExecutor)
+			loop.Approvals = toolRuns
+			return loop
+		}(),
 		apiKey:          cfg.APIKey,
+		bootstrapKey:    cfg.BootstrapKey,
+		authMode:        cfg.AuthMode,
+		workerEnabled:   cfg.WorkerEnabled,
 		ollamaURL:       cfg.OllamaURL,
 		httpClient:      &http.Client{Timeout: 30 * time.Second},
 		maxBodyBytes:    cfg.MaxBodyBytes,
 		shutdownTimeout: cfg.ShutdownTimeout,
-	}, nil
+	}
+	srv.ingests = store.NewIngestStore(pool, events, srv.artifacts)
+	srv.ingests.SetEmbedder(func(embedCtx context.Context, text string) ([]float32, error) {
+		return srv.embed(embedCtx, text)
+	})
+	// Restore workspace-specific read-only repository admission rules from the
+	// durable workspace registry. The rule is only an in-process fast path; all
+	// requests still require authenticated workspace authorization.
+	if page, listErr := operatorStore.ListWorkspaces(ctx, 100, ""); listErr == nil {
+		for _, workspace := range page.Items {
+			root := workspace.ToolRoot
+			if root == "" {
+				continue
+			}
+			_ = toolPolicy.RegisterWorkspaceTool(workspace.ID, "fornix.repository.read", "repository.read", root)
+		}
+	}
+	srv.agentWorker = scheduler.NewWorker(agentRuns, srv.agentLoop, contracts.NewID("server-worker"))
+	srv.agentLoop.Retriever = agentloop.ContextRetrieverFunc(func(ctx context.Context, request contracts.RetrievalRequest) (contracts.ContextPack, error) {
+		result, err := srv.retrieval.Retrieve(ctx, request)
+		if err != nil {
+			return contracts.ContextPack{}, err
+		}
+		return result.Pack, nil
+	})
+	return srv, nil
 }
 
 func (s *server) Close() {
@@ -88,7 +240,7 @@ func (s *server) Close() {
 func (s *server) Run(ctx context.Context, listen string) error {
 	httpServer := &http.Server{
 		Addr:              listen,
-		Handler:           withRequestMiddleware(s.routes(), s.maxBodyBytes),
+		Handler:           withRequestMiddleware(s.securityMiddleware(s.routes()), s.maxBodyBytes),
 		ReadHeaderTimeout: 5 * time.Second,
 		ReadTimeout:       90 * time.Second,
 		WriteTimeout:      90 * time.Second,
@@ -100,6 +252,13 @@ func (s *server) Run(ctx context.Context, listen string) error {
 	defer cancelBackground()
 	go s.sessionsReaper(bgCtx)
 	go s.federationPoller(bgCtx)
+	if s.workerEnabled {
+		go func() {
+			if err := s.agentWorker.Run(bgCtx, ""); err != nil && !errors.Is(err, context.Canceled) {
+				log.Printf("agent run worker stopped: %v", err)
+			}
+		}()
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -273,6 +432,17 @@ type taskCompleteReq struct {
 	IdempotencyKey string `json:"idempotency_key,omitempty"`
 }
 
+type agentRunCancelReq struct {
+	WorkspaceID string `json:"workspace_id,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+}
+
+type agentRunExternalReq struct {
+	WorkspaceID string `json:"workspace_id,omitempty"`
+	Reason      string `json:"reason,omitempty"`
+	Output      string `json:"output,omitempty"`
+}
+
 // ---------- v0.7 federation types ----------
 
 type federationPeerReq struct {
@@ -317,45 +487,12 @@ type routerRecommendation struct {
 	SampleSize  int     `json:"sample_size"`
 }
 
-// ---------- Ollama embedding ----------
-
-type ollamaEmbedReq struct {
-	Model  string `json:"model"`
-	Prompt string `json:"prompt"`
-}
-
-type ollamaEmbedResp struct {
-	Embedding []float32 `json:"embedding"`
-}
-
 func (s *server) embed(ctx context.Context, text string) ([]float32, error) {
-	// nomic-embed-text 8192-token ctx ~= 30KB; cap at 6KB to keep headroom
-	if len(text) > 2000 {
-		text = text[:2000]
+	provider, ok := s.modelRegistry.Lookup("ollama")
+	if !ok {
+		return nil, fmt.Errorf("ollama provider is not registered")
 	}
-	body, _ := json.Marshal(ollamaEmbedReq{Model: embeddingModel, Prompt: text})
-	req, err := http.NewRequestWithContext(ctx, "POST", s.ollamaURL+"/api/embeddings", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := s.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("ollama %d: %s", resp.StatusCode, string(b))
-	}
-	var er ollamaEmbedResp
-	if err := json.NewDecoder(resp.Body).Decode(&er); err != nil {
-		return nil, err
-	}
-	if len(er.Embedding) != embeddingDim {
-		return nil, fmt.Errorf("ollama returned %d dim, expected %d", len(er.Embedding), embeddingDim)
-	}
-	return er.Embedding, nil
+	return provider.Embed(ctx, model.EmbeddingRequest{Model: embeddingModel, Text: text, MaxInputBytes: 2000})
 }
 
 // ---------- helpers ----------
@@ -376,14 +513,15 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 }
 
 func (s *server) requireAuth(r *http.Request) bool {
-	header := r.Header.Get("Authorization")
-	if !strings.HasPrefix(header, "Bearer ") {
+	if _, ok := principalFromRequest(r); ok {
+		return true
+	}
+	principal, err := s.authenticateRequest(r)
+	if err != nil {
 		return false
 	}
-	provided := strings.TrimSpace(strings.TrimPrefix(header, "Bearer "))
-	expectedDigest := sha256.Sum256([]byte(s.apiKey))
-	providedDigest := sha256.Sum256([]byte(provided))
-	return subtle.ConstantTimeCompare(expectedDigest[:], providedDigest[:]) == 1
+	*r = *withPrincipal(r, principal)
+	return validateRequestWorkspace(r, principal) == nil
 }
 
 func excerpt(content string, n int) string {
@@ -415,6 +553,7 @@ func withRequestMiddleware(next http.Handler, maxBodyBytes int64) http.Handler {
 		}
 		w.Header().Set("X-Request-ID", requestID)
 		r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+		r = r.WithContext(context.WithValue(r.Context(), requestIDContextKey, requestID))
 		next.ServeHTTP(w, r)
 	})
 }
@@ -442,7 +581,320 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"db":              dbStatus,
 		"embedding_model": embeddingModel,
 		"embedding_dim":   embeddingDim,
+		"model_providers": s.modelRegistry.Names(),
 	})
+}
+
+func (s *server) handleModelComplete(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuth(r) {
+		writeErr(w, http.StatusUnauthorized, "unauthorised")
+		return
+	}
+	var request contracts.ModelRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid model request: "+shortError(err, 160))
+		return
+	}
+	request.WorkspaceID = requestWorkspace(r, request.WorkspaceID)
+	if request.IdempotencyKey == "" {
+		request.IdempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	}
+	request.Actor = requestActor(r)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	defer cancel()
+	response, err := s.modelGateway.Complete(ctx, request)
+	if err != nil {
+		s.observeModelRequest(ctx, request)
+		writeModelError(w, err)
+		return
+	}
+	s.observeModelRequest(ctx, request)
+	writeJSON(w, http.StatusOK, response)
+}
+
+func (s *server) handleToolExecute(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuth(r) {
+		writeErr(w, http.StatusUnauthorized, "unauthorised")
+		return
+	}
+	var request contracts.ToolRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid tool request: "+shortError(err, 160))
+		return
+	}
+	request.WorkspaceID = requestWorkspace(r, request.WorkspaceID)
+	if request.IdempotencyKey == "" {
+		request.IdempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	}
+	request.Actor = requestActor(r)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	defer cancel()
+	outcome, err := s.toolExecutor.Execute(ctx, request)
+	s.observeToolOutcome(ctx, outcome)
+	if err != nil {
+		var failureErr *tool.FailureError
+		if errors.As(err, &failureErr) {
+			writeJSON(w, toolHTTPStatus(failureErr.Failure.Code), map[string]any{
+				"outcome": outcome, "error": failureErr.Failure.Message, "code": failureErr.Failure.Code,
+			})
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, shortError(err, 320))
+		return
+	}
+	writeJSON(w, http.StatusOK, outcome)
+}
+
+func (s *server) handleToolApprovalDecision(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuth(r) {
+		writeErr(w, http.StatusUnauthorized, "unauthorised")
+		return
+	}
+	approvalID := strings.TrimPrefix(r.URL.Path, "/v1/tools/approvals/")
+	approvalID = strings.TrimSuffix(approvalID, "/decide")
+	if strings.TrimSpace(approvalID) == "" {
+		writeErr(w, http.StatusBadRequest, "approval id required")
+		return
+	}
+	var decision contracts.ApprovalDecision
+	if err := json.NewDecoder(r.Body).Decode(&decision); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid approval decision: "+shortError(err, 160))
+		return
+	}
+	decision.ApprovalID = approvalID
+	decision.WorkspaceID = requestWorkspace(r, decision.WorkspaceID)
+	decision.Actor = requestActor(r)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	approval, err := s.toolRuns.DecideApproval(ctx, decision)
+	if err != nil {
+		status := http.StatusConflict
+		if errors.Is(err, store.ErrToolApprovalMissing) {
+			status = http.StatusNotFound
+		}
+		writeErr(w, status, shortError(err, 320))
+		return
+	}
+	writeJSON(w, http.StatusOK, approval)
+}
+
+func (s *server) handleAgentRunCreate(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuth(r) {
+		writeErr(w, http.StatusUnauthorized, "unauthorised")
+		return
+	}
+	var request contracts.AgentRunRequest
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid agent run request: "+shortError(err, 160))
+		return
+	}
+	request.WorkspaceID = requestWorkspace(r, request.WorkspaceID)
+	if request.IdempotencyKey == "" {
+		request.IdempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	}
+	request.Actor = requestActor(r)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	defer cancel()
+	run, deduplicated, err := s.agentLoop.Create(ctx, request)
+	if err != nil {
+		writeAgentRunError(w, err)
+		return
+	}
+	decision, runErr := s.agentLoop.Run(ctx, run.WorkspaceID, run.ID)
+	s.observeAgentOutcome(ctx, decision.Run)
+	if runErr != nil {
+		writeJSON(w, agentRunHTTPStatus(runErr), map[string]any{"run": run, "decision": decision, "deduplicated": deduplicated, "error": shortError(runErr, 320)})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"run": decision.Run, "decision": decision, "deduplicated": deduplicated})
+}
+
+func (s *server) handleAgentRunAdvance(w http.ResponseWriter, r *http.Request, runID string) {
+	if !s.requireAuth(r) {
+		writeErr(w, http.StatusUnauthorized, "unauthorised")
+		return
+	}
+	workspaceID := requestWorkspace(r, r.URL.Query().Get("workspace_id"))
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
+	defer cancel()
+	decision, err := s.agentLoop.Advance(ctx, workspaceID, runID)
+	s.observeAgentOutcome(ctx, decision.Run)
+	if err != nil {
+		writeJSON(w, agentRunHTTPStatus(err), map[string]any{"decision": decision, "error": shortError(err, 320)})
+		return
+	}
+	writeJSON(w, http.StatusOK, decision)
+}
+
+func (s *server) handleAgentRunGet(w http.ResponseWriter, r *http.Request, runID string) {
+	if !s.requireAuth(r) {
+		writeErr(w, http.StatusUnauthorized, "unauthorised")
+		return
+	}
+	run, err := s.agentRuns.Get(r.Context(), requestWorkspace(r, r.URL.Query().Get("workspace_id")), runID)
+	if err != nil {
+		writeAgentRunError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, run)
+}
+
+func (s *server) handleAgentRunCancel(w http.ResponseWriter, r *http.Request, runID string) {
+	if !s.requireAuth(r) {
+		writeErr(w, http.StatusUnauthorized, "unauthorised")
+		return
+	}
+	var request agentRunCancelReq
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid cancellation request: "+shortError(err, 160))
+		return
+	}
+	workspaceRef := request.WorkspaceID
+	if strings.TrimSpace(workspaceRef) == "" {
+		workspaceRef = r.URL.Query().Get("workspace_id")
+	}
+	workspaceID := requestWorkspace(r, workspaceRef)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	decision, err := s.agentLoop.Cancel(ctx, workspaceID, runID, request.Reason)
+	s.observeAgentOutcome(ctx, decision.Run)
+	if err != nil {
+		writeJSON(w, agentRunHTTPStatus(err), map[string]any{"decision": decision, "error": shortError(err, 320)})
+		return
+	}
+	writeJSON(w, http.StatusOK, decision)
+}
+
+func (s *server) handleAgentRunExternal(w http.ResponseWriter, r *http.Request, runID, operation string) {
+	if !s.requireAuth(r) {
+		writeErr(w, http.StatusUnauthorized, "unauthorised")
+		return
+	}
+	var request agentRunExternalReq
+	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid external completion request: "+shortError(err, 160))
+		return
+	}
+	workspaceRef := request.WorkspaceID
+	if strings.TrimSpace(workspaceRef) == "" {
+		workspaceRef = r.URL.Query().Get("workspace_id")
+	}
+	workspaceID := requestWorkspace(r, workspaceRef)
+	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+	defer cancel()
+	var (
+		decision contracts.LoopDecision
+		err      error
+	)
+	if operation == "wait" {
+		decision, err = s.agentLoop.WaitExternal(ctx, workspaceID, runID, request.Reason)
+	} else {
+		decision, err = s.agentLoop.CompleteExternal(ctx, workspaceID, runID, request.Output)
+	}
+	s.observeAgentOutcome(ctx, decision.Run)
+	if err != nil {
+		writeJSON(w, agentRunHTTPStatus(err), map[string]any{"decision": decision, "error": shortError(err, 320)})
+		return
+	}
+	writeJSON(w, http.StatusOK, decision)
+}
+
+func (s *server) handleAgentRunReplay(w http.ResponseWriter, r *http.Request, runID string) {
+	if !s.requireAuth(r) {
+		writeErr(w, http.StatusUnauthorized, "unauthorised")
+		return
+	}
+	from, _ := strconv.ParseUint(strings.TrimSpace(r.URL.Query().Get("from")), 10, 64)
+	limit, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("limit")))
+	if limit <= 0 {
+		limit = 500
+	}
+	events, err := s.agentRuns.Replay(r.Context(), requestWorkspace(r, r.URL.Query().Get("workspace_id")), runID, from, limit)
+	if err != nil {
+		writeAgentRunError(w, err)
+		return
+	}
+	response := map[string]any{"run_id": runID, "events": events, "count": len(events)}
+	if checkpoint, checkpointErr := s.agentRuns.ReplayCheckpoint(r.Context(), requestWorkspace(r, r.URL.Query().Get("workspace_id")), runID, from, limit); checkpointErr == nil {
+		response["checkpoint"] = checkpoint
+	}
+	writeJSON(w, http.StatusOK, response)
+}
+
+func writeAgentRunError(w http.ResponseWriter, err error) {
+	writeJSON(w, agentRunHTTPStatus(err), map[string]string{"error": shortError(err, 320)})
+}
+
+func agentRunHTTPStatus(err error) int {
+	switch {
+	case errors.Is(err, store.ErrAgentRunMissing):
+		return http.StatusNotFound
+	case errors.Is(err, store.ErrAgentRunConflict), errors.Is(err, store.ErrAgentRunTerminal), errors.Is(err, store.ErrAgentRunCancelled):
+		return http.StatusConflict
+	case errors.Is(err, store.ErrAgentRunStale):
+		return http.StatusGone
+	case errors.Is(err, agentloop.ErrLoopWaiting):
+		return http.StatusAccepted
+	default:
+		return http.StatusBadGateway
+	}
+}
+
+func toolHTTPStatus(code string) int {
+	switch code {
+	case contracts.ToolFailureInvalidRequest, contracts.ToolFailureArgumentLimit, contracts.ToolFailureEnvironmentLimit, contracts.ToolFailureWorkdirDenied:
+		return http.StatusBadRequest
+	case contracts.ToolFailureUnauthorized, contracts.ToolFailureApprovalDenied, contracts.ToolFailureApprovalExpired:
+		return http.StatusForbidden
+	case contracts.ToolFailureApprovalRequired:
+		return http.StatusAccepted
+	case contracts.ToolFailureInProgress, contracts.ToolFailureConflict, contracts.ToolFailureStaleFence:
+		return http.StatusConflict
+	case contracts.ToolFailureTimeout:
+		return http.StatusGatewayTimeout
+	case contracts.ToolFailureOutputLimit:
+		return http.StatusRequestEntityTooLarge
+	default:
+		return http.StatusBadGateway
+	}
+}
+
+func writeModelError(w http.ResponseWriter, err error) {
+	status := http.StatusBadGateway
+	message := shortError(err, 320)
+	var failureErr *model.FailureError
+	if errors.As(err, &failureErr) {
+		message = excerpt(failureErr.Failure.Message, 320)
+		switch failureErr.Failure.Code {
+		case contracts.ModelFailureAuthentication:
+			status = http.StatusUnauthorized
+		case contracts.ModelFailureRateLimit:
+			status = http.StatusTooManyRequests
+		case contracts.ModelFailureQuota:
+			status = http.StatusPaymentRequired
+		case contracts.ModelFailureInvalidRequest, contracts.ModelFailureContextWindow, contracts.ModelFailureBudget:
+			status = http.StatusBadRequest
+		case contracts.ModelFailureTimeout:
+			status = http.StatusGatewayTimeout
+		case contracts.ModelFailureCancelled:
+			status = http.StatusRequestTimeout
+		}
+	} else if errors.Is(err, model.ErrModelCallInFlight) {
+		status = http.StatusConflict
+		message = "model call is already in progress"
+	}
+	writeJSON(w, status, map[string]any{"error": message, "code": modelErrorCode(err)})
+}
+
+func modelErrorCode(err error) string {
+	var failureErr *model.FailureError
+	if errors.As(err, &failureErr) {
+		return failureErr.Failure.Code
+	}
+	if errors.Is(err, model.ErrModelCallInFlight) {
+		return contracts.ModelFailureInProgress
+	}
+	return "model_execution"
 }
 
 func (s *server) handleLiveness(w http.ResponseWriter, _ *http.Request) {
@@ -1280,6 +1732,9 @@ func (s *server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "invalid json")
 		return
 	}
+	if principal, ok := principalFromRequest(r); ok {
+		req.CreatedBy = principal.ID
+	}
 	if req.Title == "" || req.Brief == "" || req.CreatedBy == "" {
 		writeErr(w, 400, "title, brief, created_by required")
 		return
@@ -1320,7 +1775,7 @@ func (s *server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 	workspaceID := requestWorkspace(r, req.WorkspaceID)
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	result, err := s.tasks.ClaimNext(ctx, store.TaskClaimInput{WorkspaceID: workspaceID, SessionID: req.SessionID, LeaseTTL: time.Duration(req.LeaseTTLMS) * time.Millisecond})
+	result, err := s.tasks.ClaimNext(ctx, store.TaskClaimInput{WorkspaceID: workspaceID, SessionID: req.SessionID, ActorID: requestActor(r).ID, LeaseTTL: time.Duration(req.LeaseTTLMS) * time.Millisecond})
 	if err != nil {
 		if errors.Is(err, store.ErrTaskNoReady) {
 			w.WriteHeader(http.StatusNoContent)
@@ -1360,7 +1815,7 @@ func (s *server) handleTaskComplete(w http.ResponseWriter, r *http.Request, id i
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	if strings.TrimSpace(req.Status) == contracts.TaskStatusFailed {
-		result, err := s.tasks.Fail(ctx, store.TaskFailureInput{WorkspaceID: workspaceID, TaskID: id, OwnerID: ownerID, Fence: fence, Error: req.Result, FailureClass: contracts.FailureUnknown, Retryable: boolPtr(false), IdempotencyKey: req.IdempotencyKey, ActorID: ownerID, Payload: body})
+		result, err := s.tasks.Fail(ctx, store.TaskFailureInput{WorkspaceID: workspaceID, TaskID: id, OwnerID: ownerID, Fence: fence, Error: req.Result, FailureClass: contracts.FailureUnknown, Retryable: boolPtr(false), IdempotencyKey: req.IdempotencyKey, ActorID: requestActor(r).ID, Payload: body})
 		if err != nil {
 			writeTaskStoreErr(w, err)
 			return
@@ -1368,7 +1823,7 @@ func (s *server) handleTaskComplete(w http.ResponseWriter, r *http.Request, id i
 		writeTaskMutationResponse(w, id, result)
 		return
 	}
-	result, err := s.tasks.Complete(ctx, store.TaskOutcomeInput{WorkspaceID: workspaceID, TaskID: id, OwnerID: ownerID, Fence: fence, Result: req.Result, Status: req.Status, IdempotencyKey: req.IdempotencyKey, ActorID: ownerID, Payload: body})
+	result, err := s.tasks.Complete(ctx, store.TaskOutcomeInput{WorkspaceID: workspaceID, TaskID: id, OwnerID: ownerID, Fence: fence, Result: req.Result, Status: req.Status, IdempotencyKey: req.IdempotencyKey, ActorID: requestActor(r).ID, Payload: body})
 	if err != nil {
 		writeTaskStoreErr(w, err)
 		return
@@ -1401,6 +1856,19 @@ func (s *server) handleTasksList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"tasks": tasks, "count": len(tasks), "workspace_id": workspaceID})
 }
 
+func (s *server) handleTaskGet(w http.ResponseWriter, r *http.Request, id int64) {
+	if !s.requireAuth(r) {
+		writeErr(w, http.StatusUnauthorized, "unauthorised")
+		return
+	}
+	task, err := s.tasks.Get(r.Context(), requestWorkspace(r, r.URL.Query().Get("workspace_id")), id)
+	if err != nil {
+		writeTaskStoreErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, task)
+}
+
 func (s *server) handleTaskRenew(w http.ResponseWriter, r *http.Request, id int64) {
 	if !s.requireAuth(r) {
 		writeErr(w, 401, "unauthorised")
@@ -1420,7 +1888,7 @@ func (s *server) handleTaskRenew(w http.ResponseWriter, r *http.Request, id int6
 	ownerID, fence := taskOwnerAndFence(r, req.SessionID, req.Fence)
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	result, err := s.tasks.Renew(ctx, workspaceID, id, ownerID, fence, time.Duration(req.LeaseTTLMS)*time.Millisecond, ownerID)
+	result, err := s.tasks.Renew(ctx, workspaceID, id, ownerID, fence, time.Duration(req.LeaseTTLMS)*time.Millisecond, requestActor(r).ID)
 	if err != nil {
 		writeTaskStoreErr(w, err)
 		return
@@ -1464,7 +1932,7 @@ func (s *server) handleTaskFail(w http.ResponseWriter, r *http.Request, id int64
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	result, err := s.tasks.Fail(ctx, store.TaskFailureInput{WorkspaceID: workspaceID, TaskID: id, OwnerID: ownerID, Fence: fence, Error: req.Error, FailureClass: req.FailureClass, Retryable: req.Retryable, RetryAfter: retryAfter, IdempotencyKey: req.IdempotencyKey, ActorID: ownerID, Payload: body})
+	result, err := s.tasks.Fail(ctx, store.TaskFailureInput{WorkspaceID: workspaceID, TaskID: id, OwnerID: ownerID, Fence: fence, Error: req.Error, FailureClass: req.FailureClass, Retryable: req.Retryable, RetryAfter: retryAfter, IdempotencyKey: req.IdempotencyKey, ActorID: requestActor(r).ID, Payload: body})
 	if err != nil {
 		writeTaskStoreErr(w, err)
 		return
@@ -1499,7 +1967,7 @@ func (s *server) handleTaskCancel(w http.ResponseWriter, r *http.Request, id int
 	ownerID, fence := taskOwnerAndFence(r, req.SessionID, req.Fence)
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	result, err := s.tasks.Cancel(ctx, store.TaskCancelInput{WorkspaceID: requestWorkspace(r, req.WorkspaceID), TaskID: id, OwnerID: ownerID, Fence: fence, Reason: req.Reason, IdempotencyKey: req.IdempotencyKey, ActorID: ownerID, Payload: body})
+	result, err := s.tasks.Cancel(ctx, store.TaskCancelInput{WorkspaceID: requestWorkspace(r, req.WorkspaceID), TaskID: id, OwnerID: ownerID, Fence: fence, Reason: req.Reason, IdempotencyKey: req.IdempotencyKey, ActorID: requestActor(r).ID, Payload: body})
 	if err != nil {
 		writeTaskStoreErr(w, err)
 		return
@@ -1512,6 +1980,9 @@ func writeTaskMutationResponse(w http.ResponseWriter, id int64, result store.Tas
 }
 
 func requestWorkspace(r *http.Request, bodyWorkspace string) string {
+	if principal, ok := principalFromRequest(r); ok && !principal.Development {
+		return principal.WorkspaceID
+	}
 	workspaceID := strings.TrimSpace(bodyWorkspace)
 	if workspaceID == "" {
 		workspaceID = strings.TrimSpace(r.Header.Get("X-Workspace-ID"))
@@ -1941,12 +2412,146 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("/healthz", s.handleLiveness)
 	mux.HandleFunc("/readyz", s.handleReadiness)
 	mux.HandleFunc("/v1/health", s.handleHealth)
+	mux.HandleFunc("/v1/operator/workspaces/bootstrap", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleOperatorBootstrap(w, r)
+	})
+	mux.HandleFunc("/v1/operator/workspaces/", s.handleOperatorWorkspaces)
+	mux.HandleFunc("/v1/operator/workspaces", s.handleOperatorWorkspaces)
+	mux.HandleFunc("/v1/operator/identities/", s.handleOperatorIdentities)
+	mux.HandleFunc("/v1/operator/identities", s.handleOperatorIdentities)
+	mux.HandleFunc("/v1/operator/roles/", s.handleOperatorRoles)
+	mux.HandleFunc("/v1/operator/roles", s.handleOperatorRoles)
+	mux.HandleFunc("/v1/operator/api-keys/", s.handleOperatorAPIKeys)
+	mux.HandleFunc("/v1/operator/api-keys", s.handleOperatorAPIKeys)
+	mux.HandleFunc("/v1/operator/ingests/", s.handleOperatorIngest)
+	mux.HandleFunc("/v1/operator/ingests", s.handleOperatorIngests)
+	mux.HandleFunc("/v1/operator/ingest/dry-run", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleIngestDryRun(w, r)
+	})
+	mux.HandleFunc("/v1/operator/ingest/jobs/", s.handleIngestJob)
+	mux.HandleFunc("/v1/operator/ingest/jobs", s.handleIngestJobs)
+	mux.HandleFunc("/v1/observability/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeErr(w, http.StatusMethodNotAllowed, "GET only")
+			return
+		}
+		s.handleObservabilityMetrics(w, r)
+	})
+	mux.HandleFunc("/v1/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeErr(w, http.StatusMethodNotAllowed, "GET only")
+			return
+		}
+		s.handleObservabilityMetrics(w, r)
+	})
+	mux.HandleFunc("/v1/model/complete", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleModelComplete(w, r)
+	})
+	mux.HandleFunc("/v1/tools/execute", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleToolExecute(w, r)
+	})
+	mux.HandleFunc("/v1/tools/approvals/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/decide") {
+			writeErr(w, http.StatusMethodNotAllowed, "POST /decide only")
+			return
+		}
+		s.handleToolApprovalDecision(w, r)
+	})
+	mux.HandleFunc("/v1/agent/run", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleAgentRunCreate(w, r)
+	})
+	mux.HandleFunc("/v1/agent/run/", func(w http.ResponseWriter, r *http.Request) {
+		rest := strings.TrimPrefix(r.URL.Path, "/v1/agent/run/")
+		parts := strings.SplitN(rest, "/", 2)
+		if strings.TrimSpace(parts[0]) == "" {
+			writeErr(w, http.StatusNotFound, "agent run id required")
+			return
+		}
+		if len(parts) == 1 && r.Method == http.MethodGet {
+			s.handleAgentRunGet(w, r, parts[0])
+			return
+		}
+		if len(parts) != 2 || r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST /advance, /cancel, or /replay only")
+			return
+		}
+		switch parts[1] {
+		case "advance":
+			s.handleAgentRunAdvance(w, r, parts[0])
+		case "cancel":
+			s.handleAgentRunCancel(w, r, parts[0])
+		case "external/wait":
+			s.handleAgentRunExternal(w, r, parts[0], "wait")
+		case "external/complete":
+			s.handleAgentRunExternal(w, r, parts[0], "complete")
+		case "replay":
+			s.handleAgentRunReplay(w, r, parts[0])
+		default:
+			writeErr(w, http.StatusNotFound, "unknown agent run operation")
+		}
+	})
 	mux.HandleFunc("/v1/retrieve", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != "POST" {
 			writeErr(w, 405, "POST only")
 			return
 		}
 		s.handleRetrieve(w, r)
+	})
+	mux.HandleFunc("/v1/evaluations/datasets", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleEvaluationDatasetCreate(w, r)
+	})
+	mux.HandleFunc("/v1/evaluations/retrieval/surfaces", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			s.handleRetrievalSurfaceList(w, r)
+		case http.MethodPost:
+			s.handleRetrievalSurfaceRegister(w, r)
+		default:
+			writeErr(w, http.StatusMethodNotAllowed, "GET or POST only")
+		}
+	})
+	mux.HandleFunc("/v1/evaluations/retrieval/runs", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleRetrievalEvaluationRun(w, r)
+	})
+	mux.HandleFunc("/v1/evaluations/runs/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeErr(w, http.StatusMethodNotAllowed, "GET only")
+			return
+		}
+		id := strings.TrimPrefix(r.URL.Path, "/v1/evaluations/runs/")
+		if id == "" || strings.Contains(id, "/") {
+			writeErr(w, http.StatusNotFound, "evaluation run id required")
+			return
+		}
+		s.handleEvaluationRunGet(w, r, id)
 	})
 	mux.HandleFunc("/v1/evidence", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -1975,6 +2580,55 @@ func (s *server) routes() http.Handler {
 			return
 		}
 		s.handleEvidenceProvenance(w, r)
+	})
+	mux.HandleFunc("/v1/artifacts", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleArtifactPut(w, r)
+	})
+	mux.HandleFunc("/v1/artifacts/disclose", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleArtifactDisclosure(w, r)
+	})
+	mux.HandleFunc("/v1/artifacts/provenance", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleArtifactProvenance(w, r)
+	})
+	mux.HandleFunc("/v1/artifacts/backfill", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleArtifactBackfill(w, r)
+	})
+	mux.HandleFunc("/v1/artifacts/retention", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleArtifactRetention(w, r)
+	})
+	mux.HandleFunc("/v1/artifacts/integrity", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleArtifactIntegrity(w, r)
+	})
+	mux.HandleFunc("/v1/artifacts/metrics", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeErr(w, http.StatusMethodNotAllowed, "GET only")
+			return
+		}
+		s.handleArtifactMetrics(w, r)
 	})
 	mux.HandleFunc("/v1/memo/search", s.handleSearch)
 	mux.HandleFunc("/v1/memo/backfill", s.handleBackfillEmbeddings)
@@ -2082,6 +2736,15 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("/v1/task/", func(w http.ResponseWriter, r *http.Request) {
 		rest := strings.TrimPrefix(r.URL.Path, "/v1/task/")
 		parts := strings.SplitN(rest, "/", 2)
+		if len(parts) == 1 && r.Method == http.MethodGet {
+			id, err := strconv.ParseInt(parts[0], 10, 64)
+			if err != nil {
+				writeErr(w, http.StatusBadRequest, "bad id")
+				return
+			}
+			s.handleTaskGet(w, r, id)
+			return
+		}
 		if len(parts) == 2 && (parts[1] == "complete" || parts[1] == "renew" || parts[1] == "fail" || parts[1] == "cancel") {
 			id, err := strconv.ParseInt(parts[0], 10, 64)
 			if err != nil {
