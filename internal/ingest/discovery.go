@@ -17,17 +17,22 @@ import (
 	"github.com/omaveda/fornix/internal/contracts"
 )
 
+// DiscoveredFile contains the immutable manifest entry and bytes observed in
+// one discovery snapshot.
 type DiscoveredFile struct {
 	File    contracts.IngestFile
 	Content []byte
 }
 
+// SkippedFile records a bounded, auditable reason a path was not indexed.
 type SkippedFile struct {
 	Path     string `json:"path"`
 	Reason   string `json:"reason"`
 	ByteSize int64  `json:"byte_size,omitempty"`
 }
 
+// DiscoveryResult is the sorted source snapshot consumed by durable ingest
+// batches and its stable manifest identity.
 type DiscoveryResult struct {
 	Files        []DiscoveredFile
 	Skipped      []SkippedFile
@@ -152,6 +157,8 @@ func Discover(ctx context.Context, source contracts.RepositorySource) (Discovery
 	return result, nil
 }
 
+// ValidateConfiguredRoot ensures a source root is a real directory inside the
+// configured mount before discovery or resume reads it.
 func ValidateConfiguredRoot(sourceRoot, mountRoot string) error {
 	if strings.TrimSpace(sourceRoot) == "" || strings.TrimSpace(mountRoot) == "" || !filepath.IsAbs(sourceRoot) || !filepath.IsAbs(mountRoot) {
 		return fmt.Errorf("source and mount roots must be absolute")

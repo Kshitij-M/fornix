@@ -195,6 +195,8 @@ func (s *EventStore) RenewConsumerLease(
 	return updated, nil
 }
 
+// RenewConsumerLeaseTx renews the exact owner and fencing token inside the
+// caller's transaction; stale or expired owners cannot extend themselves.
 func (s *EventStore) RenewConsumerLeaseTx(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -241,6 +243,8 @@ func (s *EventStore) ReleaseConsumerLease(ctx context.Context, lease contracts.C
 	return nil
 }
 
+// ReleaseConsumerLeaseTx releases the exact lease inside the caller's
+// transaction while preserving its monotonic fence history.
 func (s *EventStore) ReleaseConsumerLeaseTx(ctx context.Context, tx pgx.Tx, lease contracts.ConsumerLease) error {
 	if _, err := s.ValidateConsumerLeaseTx(ctx, tx, lease); err != nil {
 		return err

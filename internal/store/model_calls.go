@@ -29,12 +29,14 @@ type ModelCallStore struct {
 	observability *ObservabilityStore
 }
 
+// SetObservability attaches the usage and cost ledger to terminal call writes.
 func (s *ModelCallStore) SetObservability(observer *ObservabilityStore) {
 	if s != nil {
 		s.observability = observer
 	}
 }
 
+// NewModelCallStore creates the durable model-call ledger.
 func NewModelCallStore(pool *pgxpool.Pool) *ModelCallStore {
 	return &ModelCallStore{pool: pool, artifacts: NewArtifactStore(pool)}
 }
@@ -47,6 +49,8 @@ func (s *ModelCallStore) SetArtifactFailureHook(hook func(string) error) {
 	}
 }
 
+// Start reserves one idempotent model call before external provider execution.
+// A completed duplicate is replayable; an in-flight duplicate fails closed.
 func (s *ModelCallStore) Start(ctx context.Context, request contracts.ModelRequest, requestEvidence []byte) (model.CallStart, error) {
 	if s == nil || s.pool == nil {
 		return model.CallStart{}, fmt.Errorf("model call store is not configured")
@@ -123,6 +127,7 @@ func (s *ModelCallStore) Start(ctx context.Context, request contracts.ModelReque
 	return model.CallStart{Record: record}, nil
 }
 
+// Attempt increments the durable attempt counter for a running call.
 func (s *ModelCallStore) Attempt(ctx context.Context, workspaceID, requestID string) error {
 	if s == nil || s.pool == nil {
 		return fmt.Errorf("model call store is not configured")
@@ -145,6 +150,8 @@ func (s *ModelCallStore) Attempt(ctx context.Context, workspaceID, requestID str
 	return nil
 }
 
+// Finish commits the terminal model result, redacted evidence, artifact link,
+// and usage/cost observations atomically.
 func (s *ModelCallStore) Finish(ctx context.Context, result contracts.ModelCallResult) error {
 	if s == nil || s.pool == nil {
 		return fmt.Errorf("model call store is not configured")
@@ -287,6 +294,7 @@ func (s *ModelCallStore) Finish(ctx context.Context, result contracts.ModelCallR
 	return fmt.Errorf("model call finish did not update a running record")
 }
 
+// Get reads a model call by workspace and idempotency key.
 func (s *ModelCallStore) Get(ctx context.Context, workspaceID, idempotencyKey string) (contracts.ModelCallRecord, error) {
 	if s == nil || s.pool == nil {
 		return contracts.ModelCallRecord{}, fmt.Errorf("model call store is not configured")

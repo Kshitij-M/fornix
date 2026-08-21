@@ -23,8 +23,12 @@ var (
 	ErrEvalNotFound        = errors.New("evaluation record not found")
 )
 
+// ObservabilityStore persists bounded, redacted observations, spans, costs,
+// and metrics. It attributes work to authoritative source records but does not
+// replace those records as the system of truth.
 type ObservabilityStore struct{ pool *pgxpool.Pool }
 
+// NewObservabilityStore constructs an observability store over pool.
 func NewObservabilityStore(pool *pgxpool.Pool) *ObservabilityStore {
 	return &ObservabilityStore{pool: pool}
 }
@@ -51,6 +55,8 @@ func (s *ObservabilityStore) ObserveModelCall(ctx context.Context, call contract
 	return err
 }
 
+// ObserveToolRun attributes one tool run's bounded duration and output work to
+// append-only observation and cost records.
 func (s *ObservabilityStore) ObserveToolRun(ctx context.Context, run contracts.ToolRun) error {
 	outputBytes := int64(0)
 	if run.Result != nil {
@@ -67,6 +73,8 @@ func (s *ObservabilityStore) ObserveToolRun(ctx context.Context, run contracts.T
 	return err
 }
 
+// ObserveRetrieval records a deterministic retrieval plan's database work,
+// budgets, and outcome without persisting the raw query.
 func (s *ObservabilityStore) ObserveRetrieval(ctx context.Context, request contracts.RetrievalRequest, trace contracts.RetrievalTrace) error {
 	requestHash, err := request.Hash()
 	if err != nil {
@@ -80,6 +88,8 @@ func (s *ObservabilityStore) ObserveRetrieval(ctx context.Context, request contr
 	return err
 }
 
+// ObserveAgentRun attributes an agent run's bounded context, token, and cost
+// totals while leaving transitions authoritative in the run store.
 func (s *ObservabilityStore) ObserveAgentRun(ctx context.Context, run contracts.AgentRun) error {
 	observation := contracts.RunObservation{WorkspaceID: run.WorkspaceID, IdempotencyKey: "agent-observation:" + run.ID, Kind: contracts.ObservationAgent, Component: "agent_loop", Operation: "run", Outcome: run.State, Actor: run.Actor, Task: run.Task, Session: run.Session, CausationID: run.CausationID, CorrelationID: run.CorrelationID, SourceKind: "agent_run", SourceID: run.ID, StartedAt: run.CreatedAt, InputTokens: run.InputTokens, OutputTokens: run.OutputTokens, TotalTokens: run.TotalTokens, CostUSD: run.Cost.TotalCostUSD, CostKnown: strings.TrimSpace(run.Cost.Source) != "", InputBytes: int64(run.ContextBytes)}
 	if run.FinishedAt != nil {
@@ -89,6 +99,8 @@ func (s *ObservabilityStore) ObserveAgentRun(ctx context.Context, run contracts.
 	return err
 }
 
+// ObserveArtifact records storage work and deduplication metrics for one
+// artifact operation.
 func (s *ObservabilityStore) ObserveArtifact(ctx context.Context, metrics contracts.ArtifactStorageMetrics, operation string) error {
 	observation := contracts.RunObservation{WorkspaceID: metrics.WorkspaceID, IdempotencyKey: fmt.Sprintf("artifact-observation:%s:%s:%d:%d:%d", operation, metrics.WorkspaceID, metrics.Artifacts, metrics.ChunkBytes, metrics.LogicalBytes), Kind: contracts.ObservationArtifact, Component: "artifact_store", Operation: operation, Outcome: contracts.OutcomeSucceeded, SourceKind: "artifact_metrics", SourceID: metrics.WorkspaceID, StartedAt: time.Now().UTC(), ArtifactBytes: metrics.ChunkBytes, OutputBytes: metrics.LogicalBytes, Metadata: map[string]string{"dedup_ratio": fmt.Sprintf("%.6f", metrics.DedupRatio)}}
 	if _, _, err := s.RecordObservation(ctx, observation); err != nil {
@@ -134,6 +146,9 @@ func retrievalQueries(trace contracts.RetrievalTrace) int {
 	return total
 }
 
+// RecordObservation appends one redacted observation idempotently. Duplicate
+// delivery returns the canonical stored record rather than creating a second
+// effect; a payload mismatch is a conflict.
 func (s *ObservabilityStore) RecordObservation(ctx context.Context, observation contracts.RunObservation) (contracts.RunObservation, bool, error) {
 	if s == nil || s.pool == nil {
 		return contracts.RunObservation{}, false, fmt.Errorf("observability store is not configured")
@@ -245,6 +260,7 @@ func (s *ObservabilityStore) recordCostTx(ctx context.Context, tx pgx.Tx, entry 
 	return nil
 }
 
+// RecordSpan appends one bounded trace span idempotently.
 func (s *ObservabilityStore) RecordSpan(ctx context.Context, span contracts.TraceSpan) (contracts.TraceSpan, bool, error) {
 	if s == nil || s.pool == nil {
 		return contracts.TraceSpan{}, false, fmt.Errorf("observability store is not configured")
@@ -274,6 +290,8 @@ func (s *ObservabilityStore) RecordSpan(ctx context.Context, span contracts.Trac
 	return stored, tag.RowsAffected() == 0, nil
 }
 
+// RecordCost appends one cost attribution entry idempotently. Measured and
+// estimated amounts remain distinct in the durable ledger.
 func (s *ObservabilityStore) RecordCost(ctx context.Context, entry contracts.CostLedgerEntry) (contracts.CostLedgerEntry, bool, error) {
 	if s == nil || s.pool == nil {
 		return contracts.CostLedgerEntry{}, false, fmt.Errorf("observability store is not configured")
@@ -313,6 +331,7 @@ func (s *ObservabilityStore) RecordCost(ctx context.Context, entry contracts.Cos
 	return stored, tag.RowsAffected() == 0, nil
 }
 
+// RecordMetric appends one bounded-dimension metric sample idempotently.
 func (s *ObservabilityStore) RecordMetric(ctx context.Context, sample contracts.MetricSample) (contracts.MetricSample, bool, error) {
 	if s == nil || s.pool == nil {
 		return contracts.MetricSample{}, false, fmt.Errorf("observability store is not configured")
@@ -340,6 +359,8 @@ func (s *ObservabilityStore) RecordMetric(ctx context.Context, sample contracts.
 	return stored, tag.RowsAffected() == 0, nil
 }
 
+// Snapshot returns a bounded workspace-scoped aggregate over the requested
+// time window. Raw prompts, credentials, and unbounded labels are not exposed.
 func (s *ObservabilityStore) Snapshot(ctx context.Context, workspaceID string, since, until time.Time) (contracts.ObservabilitySnapshot, error) {
 	workspaceID = strings.TrimSpace(workspaceID)
 	if workspaceID == "" {

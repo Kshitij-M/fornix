@@ -59,6 +59,8 @@ type RetrievalSurfacePage struct {
 	NextCursor string             `json:"next_cursor,omitempty"`
 }
 
+// Normalize redacts stage errors, validates evidence identities, and derives a
+// canonical payload hash without including timing or transport metadata.
 func (s *RetrievalSurface) Normalize() error {
 	if s == nil {
 		return fmt.Errorf("retrieval surface is nil")
@@ -167,6 +169,8 @@ func (s RetrievalSurface) payloadForHash() any {
 	return clone
 }
 
+// CanonicalPayloadHash returns the stable logical result hash used to compare
+// duplicate captures and offline replay.
 func (s RetrievalSurface) CanonicalPayloadHash() string {
 	return hashJSON(s.payloadForHash())
 }

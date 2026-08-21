@@ -1,3 +1,5 @@
+// Package ingest discovers repository sources and turns stable file snapshots
+// into bounded chunks and optional lightweight symbol records.
 package ingest
 
 import (
@@ -6,6 +8,8 @@ import (
 	"unicode/utf8"
 )
 
+// ChunkWindow identifies a deterministic rune and line range within one
+// source file.
 type ChunkWindow struct {
 	Index     int
 	RuneStart int
@@ -15,6 +19,7 @@ type ChunkWindow struct {
 	Text      string
 }
 
+// Chunk splits valid UTF-8 source into overlapping deterministic windows.
 func Chunk(data []byte, size, overlap int) ([]ChunkWindow, error) {
 	if size <= 0 {
 		size = 4096

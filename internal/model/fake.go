@@ -22,6 +22,8 @@ type FakeProvider struct {
 	calls        int
 }
 
+// FakeConfig scripts deterministic fake responses, stream chunks, and failure
+// classifications for offline development and replay tests.
 type FakeConfig struct {
 	Response     string
 	ToolCalls    []contracts.ModelToolCall
@@ -30,6 +32,8 @@ type FakeConfig struct {
 	Model        string
 }
 
+// NewFakeProvider creates a network-free provider whose default response is a
+// stable hash of the normalized request.
 func NewFakeProvider(cfg FakeConfig) *FakeProvider {
 	modelName := strings.TrimSpace(cfg.Model)
 	if modelName == "" {
@@ -45,6 +49,7 @@ func (p *FakeProvider) Name() string                      { return "fake" }
 func (p *FakeProvider) Aliases() []string                 { return []string{"test", "mock"} }
 func (p *FakeProvider) Endpoint() contracts.ModelEndpoint { return p.endpoint }
 
+// Complete returns the configured or request-hash-derived fake response.
 func (p *FakeProvider) Complete(_ context.Context, request contracts.ModelRequest) (contracts.ModelResponse, error) {
 	p.mu.Lock()
 	p.calls++
@@ -65,6 +70,8 @@ func (p *FakeProvider) Complete(_ context.Context, request contracts.ModelReques
 	return contracts.ModelResponse{RequestID: request.RequestID, Provider: contracts.ProviderRef{Provider: p.Name(), Model: modelFor(request, p.endpoint.DefaultModel)}, Content: content, ToolCalls: toolCalls, FinishReason: finish, Usage: usage, Cost: contracts.ModelCost{Currency: "USD", Source: "fake"}, ProviderRequestID: fmt.Sprintf("fake-%d", callNumber)}, nil
 }
 
+// Stream emits deterministic chunks and a completion event without external
+// I/O.
 func (p *FakeProvider) Stream(_ context.Context, request contracts.ModelRequest, sink StreamSink) (contracts.ModelResponse, error) {
 	p.mu.Lock()
 	p.calls++
@@ -110,6 +117,7 @@ func (p *FakeProvider) Stream(_ context.Context, request contracts.ModelRequest,
 	return response, nil
 }
 
+// Embed returns a fixed-shape deterministic vector for offline indexing tests.
 func (p *FakeProvider) Embed(_ context.Context, request EmbeddingRequest) ([]float32, error) {
 	if strings.TrimSpace(request.Text) == "" {
 		return nil, &FailureError{Failure: contracts.ModelFailure{Code: contracts.ModelFailureInvalidRequest, Message: "fake embedding text is empty", Provider: p.Name()}}
@@ -122,6 +130,7 @@ func (p *FakeProvider) Embed(_ context.Context, request EmbeddingRequest) ([]flo
 	return result, nil
 }
 
+// Calls returns the number of fake provider attempts observed so far.
 func (p *FakeProvider) Calls() int {
 	p.mu.Lock()
 	defer p.mu.Unlock()

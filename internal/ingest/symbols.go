@@ -24,6 +24,8 @@ var symbolPatterns = map[string][]symbolPattern{
 	"rs": {{"function", "rust", regexp.MustCompile(`^\s*(?:pub\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(`)}, {"struct", "rust", regexp.MustCompile(`^\s*(?:pub\s+)?struct\s+([A-Za-z_][A-Za-z0-9_]*)\b`)}, {"enum", "rust", regexp.MustCompile(`^\s*(?:pub\s+)?enum\s+([A-Za-z_][A-Za-z0-9_]*)\b`)}},
 }
 
+// Symbols performs bounded, deterministic pattern-based symbol extraction. It
+// is intentionally not a compiler and never invokes a language toolchain.
 func Symbols(path string, data []byte) []contracts.IngestSymbol {
 	ext := filepath.Ext(path)
 	if len(ext) > 0 {

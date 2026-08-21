@@ -1,3 +1,6 @@
+// Package retrieval builds deterministic, workspace-scoped context from
+// authoritative Postgres records. Expensive stages are explicit plan choices,
+// not hidden fallback behavior.
 package retrieval
 
 import (
@@ -10,6 +13,8 @@ import (
 
 const policyVersion = "retrieval-v1"
 
+// BuildPlan normalizes a request and returns the stable staged plan that will
+// govern retrieval execution.
 func BuildPlan(request contracts.RetrievalRequest) (contracts.RetrievalPlan, contracts.RetrievalRequest, error) {
 	normalized, err := request.Normalize()
 	if err != nil {
@@ -60,6 +65,7 @@ func BuildPlan(request contracts.RetrievalRequest) (contracts.RetrievalPlan, con
 	return plan, normalized, nil
 }
 
+// PlanHash returns the deterministic identity of a retrieval plan.
 func PlanHash(plan contracts.RetrievalPlan) string {
 	b, err := json.Marshal(plan)
 	if err != nil {

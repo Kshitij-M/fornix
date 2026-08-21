@@ -107,6 +107,8 @@ type SandboxProfile struct {
 	ReadOnlyWorkdir    bool   `json:"read_only_workdir"`
 }
 
+// DefaultSandboxProfile returns the bounded local-process defaults. It does
+// not claim kernel isolation or network control.
 func DefaultSandboxProfile() SandboxProfile {
 	return SandboxProfile{
 		Backend: "local-process", TimeoutMS: int(DefaultToolTimeout / time.Millisecond),
@@ -116,6 +118,8 @@ func DefaultSandboxProfile() SandboxProfile {
 	}
 }
 
+// Normalize validates process limits and rejects settings the local executor
+// cannot enforce safely.
 func (p *SandboxProfile) Normalize() error {
 	if p.Backend == "" {
 		p.Backend = "local-process"
@@ -183,6 +187,8 @@ type ToolDefinition struct {
 	Enabled         bool           `json:"enabled"`
 }
 
+// Normalize validates the registered executable and canonicalizes its
+// capability metadata before it is exposed to requests.
 func (d *ToolDefinition) Normalize() error {
 	if d == nil {
 		return fmt.Errorf("tool definition is nil")
@@ -267,6 +273,7 @@ type ToolPolicyRule struct {
 	Enabled        bool           `json:"enabled"`
 }
 
+// Normalize validates one ordered deny-by-default policy rule.
 func (r *ToolPolicyRule) Normalize() error {
 	if r == nil {
 		return fmt.Errorf("tool policy rule is nil")
@@ -303,6 +310,8 @@ func (r *ToolPolicyRule) Normalize() error {
 	return r.Sandbox.Normalize()
 }
 
+// ToolRequest is the structured, authenticated request to run one registered
+// capability. Argv is passed directly to the executable; no shell is implied.
 type ToolRequest struct {
 	SchemaVersion  int               `json:"schema_version"`
 	RequestID      string            `json:"request_id"`
@@ -326,6 +335,8 @@ type ToolRequest struct {
 	Metadata       map[string]string `json:"metadata,omitempty"`
 }
 
+// Normalize validates workspace/entity scope, argv, environment, and all
+// execution budgets before policy evaluation.
 func (r *ToolRequest) Normalize() error {
 	if r == nil {
 		return fmt.Errorf("tool request is nil")
@@ -409,6 +420,8 @@ func (r *ToolRequest) Normalize() error {
 	return nil
 }
 
+// RequestHash identifies logical tool input while excluding retry, approval,
+// and transport identities.
 func (r ToolRequest) RequestHash() (string, error) {
 	clone := r
 	clone.RequestID = ""
@@ -425,6 +438,8 @@ func (r ToolRequest) RequestHash() (string, error) {
 	return hex.EncodeToString(digest[:]), nil
 }
 
+// RedactedEvidence returns bounded request evidence with environment values
+// replaced before the request enters the durable ledger.
 func (r ToolRequest) RedactedEvidence() ([]byte, error) {
 	clone := r
 	clone.Environment = make(map[string]string, len(r.Environment))
@@ -434,6 +449,7 @@ func (r ToolRequest) RedactedEvidence() ([]byte, error) {
 	return json.Marshal(clone)
 }
 
+// ToolFailure is the stable, redacted failure shape for a tool run.
 type ToolFailure struct {
 	Code      string `json:"code"`
 	Message   string `json:"message"`
@@ -441,6 +457,8 @@ type ToolFailure struct {
 	Detail    string `json:"detail,omitempty"`
 }
 
+// ToolResult is the normalized bounded result of a tool attempt. Large output
+// is linked to artifacts by the store rather than expanded indefinitely.
 type ToolResult struct {
 	RequestID   string              `json:"request_id"`
 	RunID       string              `json:"run_id,omitempty"`
@@ -457,6 +475,8 @@ type ToolResult struct {
 	Failure     *ToolFailure        `json:"failure,omitempty"`
 }
 
+// ApprovalRequest is the durable authorization gate for interactive tool
+// execution.
 type ApprovalRequest struct {
 	ID          string     `json:"id"`
 	WorkspaceID string     `json:"workspace_id"`
@@ -474,6 +494,7 @@ type ApprovalRequest struct {
 	DecidedAt   *time.Time `json:"decided_at,omitempty"`
 }
 
+// ApprovalDecision records an authorized, auditable approval outcome.
 type ApprovalDecision struct {
 	ApprovalID  string     `json:"approval_id"`
 	WorkspaceID string     `json:"workspace_id"`
@@ -483,6 +504,8 @@ type ApprovalDecision struct {
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 }
 
+// ToolRun is the authoritative idempotent lifecycle record for one tool
+// request. Task-bound runs require the worker's current fence.
 type ToolRun struct {
 	ID               string       `json:"id"`
 	WorkspaceID      string       `json:"workspace_id"`
@@ -516,6 +539,7 @@ type ToolRun struct {
 	DurationMS       int64        `json:"duration_ms,omitempty"`
 }
 
+// Hash returns the stable result identity used to compare duplicate delivery.
 func (r ToolResult) Hash() string {
 	raw, _ := json.Marshal(struct {
 		Status   string       `json:"status"`
@@ -543,6 +567,8 @@ func uniqueSorted(values []string) []string {
 	return out
 }
 
+// IsToolTerminal reports whether a tool run accepts no further execution
+// result.
 func IsToolTerminal(status string) bool {
 	switch strings.TrimSpace(status) {
 	case ToolRunSucceeded, ToolRunFailed, ToolRunDenied, ToolRunCancelled:

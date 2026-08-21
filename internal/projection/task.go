@@ -34,6 +34,8 @@ type TaskProjection struct {
 	batchSize  int
 }
 
+// NewTaskProjection constructs the task-state subscriber with bounded batch
+// processing.
 func NewTaskProjection(consumerID string, batchSize int) *TaskProjection {
 	consumerID = strings.TrimSpace(consumerID)
 	if consumerID == "" {
@@ -45,14 +47,18 @@ func NewTaskProjection(consumerID string, batchSize int) *TaskProjection {
 	}
 }
 
+// Name returns the stable projection identity used in operator and checkpoint
+// records.
 func (p *TaskProjection) Name() string {
 	return TaskProjectionName
 }
 
+// ConsumerID returns the durable workspace-scoped checkpoint identity.
 func (p *TaskProjection) ConsumerID() string {
 	return p.consumerID
 }
 
+// BatchSize returns the bounded number of events processed per transaction.
 func (p *TaskProjection) BatchSize() int {
 	return p.batchSize
 }
@@ -166,6 +172,8 @@ func (p *TaskProjection) Apply(ctx context.Context, tx pgx.Tx, event contracts.E
 	return ApplyResult{Handled: true, Applied: true}, nil
 }
 
+// Reset clears the derived task rows for one workspace so a rebuild can replay
+// immutable events from sequence zero without touching authoritative tasks.
 func (p *TaskProjection) Reset(ctx context.Context, tx pgx.Tx, workspaceID string) error {
 	if tx == nil {
 		return errors.New("task projection transaction is nil")
@@ -194,6 +202,8 @@ type TaskState struct {
 	StateHash         string
 }
 
+// ReadTaskStateTx reads one derived task state inside the caller's transaction
+// and enforces the workspace key.
 func ReadTaskStateTx(ctx context.Context, tx pgx.Tx, workspaceID, taskID string) (TaskState, bool, error) {
 	workspaceID, taskID, err := validateTaskKey(workspaceID, taskID)
 	if err != nil {
@@ -202,6 +212,8 @@ func ReadTaskStateTx(ctx context.Context, tx pgx.Tx, workspaceID, taskID string)
 	return readTaskState(ctx, tx, workspaceID, taskID, false)
 }
 
+// SnapshotHashTx returns a stable hash of all derived task states in a
+// workspace, useful for incremental-versus-rebuild comparisons.
 func SnapshotHashTx(ctx context.Context, tx pgx.Tx, workspaceID string) (string, error) {
 	if tx == nil {
 		return "", errors.New("task projection transaction is nil")

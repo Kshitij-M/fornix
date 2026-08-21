@@ -1,5 +1,7 @@
 # Loop 1 completion: working baseline
 
+Status: complete historical qualification record.
+
 The first loop made Fornix reproducibly runnable as a single-node development
 baseline.
 

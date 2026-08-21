@@ -15,6 +15,8 @@ import (
 	"github.com/omaveda/fornix/internal/contracts"
 )
 
+// RunStore is the durable idempotent lifecycle boundary for tool runs and
+// approvals.
 type RunStore interface {
 	Reserve(ctx context.Context, req contracts.ToolRequest, mode string) (contracts.ToolRun, bool, error)
 	SetAwaitingApproval(ctx context.Context, run contracts.ToolRun, approval contracts.ApprovalRequest) (contracts.ToolRun, error)
@@ -25,16 +27,22 @@ type RunStore interface {
 	DecideApproval(ctx context.Context, decision contracts.ApprovalDecision) (contracts.ApprovalRequest, error)
 }
 
+// FenceValidator rejects task-bound execution from stale workers.
 type FenceValidator interface {
 	ValidateTaskFence(ctx context.Context, req contracts.ToolRequest) error
 }
 
+// ProcessExecutor is the local or future sandbox implementation behind the
+// policy and durable lifecycle.
 type ProcessExecutor interface {
 	Run(ctx context.Context, def contracts.ToolDefinition, req contracts.ToolRequest) (contracts.ToolResult, error)
 }
 
+// LocalExecutor runs a registered executable with structured argv and bounded
+// process output. It is not a kernel sandbox.
 type LocalExecutor struct{}
 
+// Run executes one already-admitted tool request without invoking a shell.
 func (LocalExecutor) Run(parent context.Context, def contracts.ToolDefinition, req contracts.ToolRequest) (contracts.ToolResult, error) {
 	start := time.Now().UTC()
 	profile := def.Sandbox
@@ -179,6 +187,8 @@ type boundedOutput struct {
 	cancel   context.CancelFunc
 }
 
+// Write captures at most the configured output limit and cancels the process
+// when the child attempts to exceed it.
 func (w *boundedOutput) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -198,12 +208,14 @@ func (w *boundedOutput) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
+// Bytes returns a defensive copy of the bounded output.
 func (w *boundedOutput) Bytes() []byte {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return append([]byte(nil), w.buffer.Bytes()...)
 }
 
+// Overflow reports whether the process exceeded its output limit.
 func (w *boundedOutput) Overflow() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -258,6 +270,7 @@ func intersectStrings(left, right []string) []string {
 	return out
 }
 
+// Outcome combines durable tool-run state with a result or approval gate.
 type Outcome struct {
 	Run          contracts.ToolRun          `json:"run"`
 	Result       *contracts.ToolResult      `json:"result,omitempty"`
@@ -265,6 +278,8 @@ type Outcome struct {
 	Deduplicated bool                       `json:"deduplicated,omitempty"`
 }
 
+// Executor composes registry, deny-by-default policy, durable lifecycle, task
+// fencing, and the process implementation.
 type Executor struct {
 	Registry    *Registry
 	Policy      *Policy
@@ -283,6 +298,8 @@ func (e *Executor) Definition(name string) (contracts.ToolDefinition, bool) {
 	return e.Registry.Lookup(name)
 }
 
+// Execute admits and runs one tool request. Duplicate durable requests replay
+// their existing outcome; remote or local execution is otherwise at-least-once.
 func (e *Executor) Execute(ctx context.Context, req contracts.ToolRequest) (Outcome, error) {
 	if e == nil || e.Registry == nil || e.Policy == nil || e.Store == nil {
 		return Outcome{}, fmt.Errorf("tool executor is not configured")

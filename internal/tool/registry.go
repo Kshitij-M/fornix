@@ -1,3 +1,5 @@
+// Package tool defines Fornix's deny-by-default capability registry, policy
+// evaluator, and bounded structured-argv execution boundary.
 package tool
 
 import (
@@ -17,10 +19,12 @@ type Registry struct {
 	aliases map[string]string
 }
 
+// NewRegistry creates an empty capability registry.
 func NewRegistry() *Registry {
 	return &Registry{tools: map[string]contracts.ToolDefinition{}, aliases: map[string]string{}}
 }
 
+// Register adds a normalized tool definition and rejects alias collisions.
 func (r *Registry) Register(def contracts.ToolDefinition) error {
 	if r == nil {
 		return fmt.Errorf("tool registry is nil")
@@ -46,6 +50,7 @@ func (r *Registry) Register(def contracts.ToolDefinition) error {
 	return nil
 }
 
+// Lookup returns a defensive copy of a registered definition by ID or name.
 func (r *Registry) Lookup(name string) (contracts.ToolDefinition, bool) {
 	if r == nil {
 		return contracts.ToolDefinition{}, false
@@ -60,6 +65,7 @@ func (r *Registry) Lookup(name string) (contracts.ToolDefinition, bool) {
 	return cloneDefinition(def), ok
 }
 
+// Names returns registered tool IDs in stable order.
 func (r *Registry) Names() []string {
 	if r == nil {
 		return nil

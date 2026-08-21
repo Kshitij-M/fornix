@@ -63,6 +63,8 @@ type Task struct {
 	CancelledAt          *time.Time `json:"cancelled_at,omitempty"`
 }
 
+// TaskCreateInput contains the bounded, workspace-scoped fields needed to
+// create a task and its direct dependencies.
 type TaskCreateInput struct {
 	WorkspaceID          string
 	Title                string
@@ -75,6 +77,8 @@ type TaskCreateInput struct {
 	Payload              json.RawMessage
 }
 
+// TaskClaimInput identifies the session and actor requesting a fenced task
+// lease.
 type TaskClaimInput struct {
 	WorkspaceID string
 	SessionID   string
@@ -82,6 +86,8 @@ type TaskClaimInput struct {
 	LeaseTTL    time.Duration
 }
 
+// TaskClaimResult returns the claimed task, its fencing lease, and the durable
+// claim event.
 type TaskClaimResult struct {
 	Task     Task                         `json:"task"`
 	Lease    contracts.TaskExecutionLease `json:"lease"`
@@ -89,6 +95,8 @@ type TaskClaimResult struct {
 	Takeover bool                         `json:"takeover"`
 }
 
+// TaskOutcomeInput describes a successful task mutation. OwnerID and Fence are
+// checked transactionally before the event and task row can change.
 type TaskOutcomeInput struct {
 	WorkspaceID    string
 	TaskID         int64
@@ -101,6 +109,8 @@ type TaskOutcomeInput struct {
 	Payload        json.RawMessage
 }
 
+// TaskFailureInput describes a classified task failure and optional bounded
+// retry schedule under the current worker fence.
 type TaskFailureInput struct {
 	WorkspaceID    string
 	TaskID         int64
@@ -115,6 +125,7 @@ type TaskFailureInput struct {
 	Payload        json.RawMessage
 }
 
+// TaskCancelInput requests durable cancellation from the current task owner.
 type TaskCancelInput struct {
 	WorkspaceID    string
 	TaskID         int64
@@ -126,6 +137,8 @@ type TaskCancelInput struct {
 	Payload        json.RawMessage
 }
 
+// TaskMutationResult returns the canonical task state and lifecycle event after
+// an idempotent mutation.
 type TaskMutationResult struct {
 	Task           Task                          `json:"task"`
 	Lease          *contracts.TaskExecutionLease `json:"lease,omitempty"`
@@ -134,6 +147,7 @@ type TaskMutationResult struct {
 	RetryScheduled bool                          `json:"retry_scheduled,omitempty"`
 }
 
+// TaskRenewResult returns the renewed task lease and its lifecycle event.
 type TaskRenewResult struct {
 	Lease contracts.TaskExecutionLease `json:"lease"`
 	Event contracts.EventEnvelope      `json:"event"`
@@ -147,6 +161,8 @@ type TaskStore struct {
 	beforeCommit func() error // test-only crash boundary; nil in production
 }
 
+// NewTaskStore constructs the task mutation boundary and supplies a default
+// event store when events is nil.
 func NewTaskStore(pool *pgxpool.Pool, events *EventStore) *TaskStore {
 	if events == nil {
 		events = NewEventStore(pool)
@@ -154,6 +170,8 @@ func NewTaskStore(pool *pgxpool.Pool, events *EventStore) *TaskStore {
 	return &TaskStore{pool: pool, events: events}
 }
 
+// Create inserts a task and its dependency edges atomically with the creation
+// event. Dependencies are workspace-local and missing references fail closed.
 func (s *TaskStore) Create(ctx context.Context, input TaskCreateInput) (Task, contracts.EventEnvelope, error) {
 	workspaceID := normalizeWorkspace(input.WorkspaceID)
 	input.Title = strings.TrimSpace(input.Title)
@@ -358,6 +376,8 @@ func (s *TaskStore) ClaimNext(ctx context.Context, input TaskClaimInput) (TaskCl
 	return TaskClaimResult{}, ErrTaskNoReady
 }
 
+// Renew extends a task lease only for its current owner and fencing token. A
+// stale, expired, released, or cross-workspace lease cannot advance.
 func (s *TaskStore) Renew(ctx context.Context, workspaceID string, taskID int64, ownerID string, fence uint64, ttl time.Duration, actorID string) (TaskRenewResult, error) {
 	workspaceID = normalizeWorkspace(workspaceID)
 	if err := contracts.ValidateTaskLeaseIdentity(workspaceID, ownerID, taskID); err != nil || fence == 0 {
@@ -413,6 +433,9 @@ func (s *TaskStore) Renew(ctx context.Context, workspaceID string, taskID int64,
 	return TaskRenewResult{Lease: lease, Event: appended.Event}, nil
 }
 
+// Complete commits a successful task outcome, completion event, and lease
+// release under the supplied fence. Duplicate idempotency keys return the
+// canonical prior effect.
 func (s *TaskStore) Complete(ctx context.Context, input TaskOutcomeInput) (TaskMutationResult, error) {
 	status := strings.TrimSpace(input.Status)
 	if status == "" {
@@ -496,6 +519,8 @@ func (s *TaskStore) completeOrProgress(ctx context.Context, input TaskOutcomeInp
 	return TaskMutationResult{Task: updated, Event: storedEvent}, nil
 }
 
+// Fail classifies a task failure and either schedules a bounded retry or moves
+// the task to a terminal dead-letter state, atomically with its event.
 func (s *TaskStore) Fail(ctx context.Context, input TaskFailureInput) (TaskMutationResult, error) {
 	workspaceID := normalizeWorkspace(input.WorkspaceID)
 	class := strings.TrimSpace(input.FailureClass)
@@ -598,6 +623,8 @@ func (s *TaskStore) Fail(ctx context.Context, input TaskFailureInput) (TaskMutat
 	return TaskMutationResult{Task: updated, Event: storedEvent, RetryScheduled: willRetry}, nil
 }
 
+// Cancel durably terminates a task under its current fence and prevents later
+// worker mutations from proceeding.
 func (s *TaskStore) Cancel(ctx context.Context, input TaskCancelInput) (TaskMutationResult, error) {
 	workspaceID := normalizeWorkspace(input.WorkspaceID)
 	tx, err := s.pool.Begin(ctx)
@@ -660,6 +687,7 @@ func (s *TaskStore) Cancel(ctx context.Context, input TaskCancelInput) (TaskMuta
 	return TaskMutationResult{Task: updated, Event: storedEvent}, nil
 }
 
+// Get reads one task from the workspace-scoped compatibility read model.
 func (s *TaskStore) Get(ctx context.Context, workspaceID string, taskID int64) (Task, error) {
 	task, err := readTask(ctx, s.pool, normalizeWorkspace(workspaceID), taskID)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -668,6 +696,8 @@ func (s *TaskStore) Get(ctx context.Context, workspaceID string, taskID int64) (
 	return task, err
 }
 
+// List returns a bounded deterministic task view filtered within one
+// workspace.
 func (s *TaskStore) List(ctx context.Context, workspaceID, status, assigned, since string, limit int) ([]Task, error) {
 	workspaceID = normalizeWorkspace(workspaceID)
 	if limit <= 0 || limit > 500 {

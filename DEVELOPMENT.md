@@ -29,6 +29,7 @@ make vet
 make build
 make python-install
 make python-check
+make docs-check
 make check
 make verify
 make hooks-install
@@ -71,10 +72,14 @@ make hooks-install
 
 The pre-commit hook runs staged whitespace checks, Go formatting, Python
 syntax checks, and shell syntax checks. The pre-push hook runs `make verify`,
-which includes formatting, unit tests, race tests, vet, Python checks, and
-binary builds. Docker is used automatically for the pinned Go toolchain when
-Go is not installed locally. Hooks fail closed when a required toolchain is
-unavailable.
+which includes formatting, unit tests, race tests, vet, Python checks,
+documentation link/status checks, and binary builds. Docker is used
+automatically for the pinned Go toolchain when Go is not installed locally.
+Hooks fail closed when a required toolchain is unavailable.
+
+`make docs-check` validates that Markdown files have a readable top-level
+heading, architecture notes declare their status, local links resolve, and
+developer-specific absolute paths do not leak into public documentation.
 
 To remove the repository-local hook override:
 

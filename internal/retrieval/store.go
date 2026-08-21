@@ -31,6 +31,8 @@ type Store struct {
 // replayable one.
 type SurfaceRecorder func(context.Context, contracts.RetrievalRequest, Result, time.Duration) error
 
+// Result contains the plan, redacted execution trace, and bounded context pack
+// produced by one repeatable-read retrieval snapshot.
 type Result struct {
 	Plan  contracts.RetrievalPlan  `json:"plan"`
 	Trace contracts.RetrievalTrace `json:"trace"`
@@ -47,14 +49,19 @@ type candidateSet struct {
 	byKey map[string]candidate
 }
 
+// NewStore creates a retrieval store backed solely by the supplied Postgres
+// pool.
 func NewStore(pool *pgxpool.Pool) *Store { return &Store{pool: pool} }
 
+// SetSurfaceRecorder registers the append-only redacted capture hook.
 func (s *Store) SetSurfaceRecorder(recorder SurfaceRecorder) {
 	if s != nil {
 		s.recorder = recorder
 	}
 }
 
+// Retrieve executes the staged plan inside a repeatable-read, read-only
+// snapshot and compiles a bounded deterministic context pack.
 func (s *Store) Retrieve(ctx context.Context, request contracts.RetrievalRequest) (Result, error) {
 	started := time.Now()
 	plan, normalized, err := BuildPlan(request)

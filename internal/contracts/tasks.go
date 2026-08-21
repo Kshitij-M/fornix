@@ -44,11 +44,14 @@ type TaskExecutionLease struct {
 	ReleasedAt  *time.Time `json:"released_at,omitempty"`
 }
 
+// TaskExecutionResult reports the fenced task lease returned by a claim.
 type TaskExecutionResult struct {
 	Lease    TaskExecutionLease `json:"lease"`
 	Takeover bool               `json:"takeover"`
 }
 
+// ValidateTaskLeaseIdentity rejects incomplete task ownership identities
+// before a worker can claim or mutate a task.
 func ValidateTaskLeaseIdentity(workspaceID, ownerID string, taskID int64) error {
 	if strings.TrimSpace(workspaceID) == "" {
 		return fmt.Errorf("workspace_id is required")
@@ -62,6 +65,7 @@ func ValidateTaskLeaseIdentity(workspaceID, ownerID string, taskID int64) error 
 	return nil
 }
 
+// IsTaskTerminal reports whether a task may accept no further worker outcome.
 func IsTaskTerminal(status string) bool {
 	switch strings.TrimSpace(status) {
 	case TaskStatusDone, TaskStatusFailed, TaskStatusCancelled, TaskStatusDeadLetter:
@@ -71,6 +75,8 @@ func IsTaskTerminal(status string) bool {
 	}
 }
 
+// IsFailureClass reports whether a failure can be classified by the task
+// retry/dead-letter policy.
 func IsFailureClass(value string) bool {
 	switch strings.TrimSpace(value) {
 	case FailureTransient, FailureTimeout, FailureRateLimited, FailurePermanent, FailureDependency, FailureUnknown:

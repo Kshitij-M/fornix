@@ -29,12 +29,19 @@ var (
 	ErrCredentialRevoked   = errors.New("credential reference is revoked")
 )
 
+// AuthStore is the Postgres authority for workspace identities, RBAC bindings,
+// API-key authentication, and provider credential references. Secrets are
+// accepted only at creation/rotation and are never reconstructed from storage.
 type AuthStore struct {
 	pool *pgxpool.Pool
 }
 
+// NewAuthStore constructs an identity and authorization store over pool.
 func NewAuthStore(pool *pgxpool.Pool) *AuthStore { return &AuthStore{pool: pool} }
 
+// CreateIdentity creates an active or explicitly disabled/revoked identity in a
+// workspace and optionally binds its normalized permissions through a default
+// role. The workspace is part of every database lookup.
 func (s *AuthStore) CreateIdentity(ctx context.Context, input contracts.IdentityInput) (contracts.Identity, error) {
 	if s == nil || s.pool == nil {
 		return contracts.Identity{}, fmt.Errorf("identity store is not configured")
@@ -97,6 +104,8 @@ func (s *AuthStore) CreateIdentity(ctx context.Context, input contracts.Identity
 	return identity, nil
 }
 
+// GrantRole upserts a workspace-scoped role and binds it to an identity after
+// verifying that both records belong to the requested workspace.
 func (s *AuthStore) GrantRole(ctx context.Context, workspaceID, identityID, name string, permissions []contracts.Permission, grantedBy string) (contracts.Role, error) {
 	workspaceID, identityID, name = strings.TrimSpace(workspaceID), strings.TrimSpace(identityID), strings.TrimSpace(name)
 	if workspaceID == "" || identityID == "" || name == "" {
@@ -142,6 +151,9 @@ func (s *AuthStore) GrantRole(ctx context.Context, workspaceID, identityID, name
 	return role, nil
 }
 
+// CreateAPIKey creates a hashed API key and returns its bearer token exactly
+// once. Callers must deliver the returned token securely; it is not recoverable
+// from the database.
 func (s *AuthStore) CreateAPIKey(ctx context.Context, input contracts.APIKeyInput) (contracts.APIKey, string, error) {
 	workspaceID, identityID := strings.TrimSpace(input.WorkspaceID), strings.TrimSpace(input.IdentityID)
 	if workspaceID == "" || identityID == "" {
@@ -187,6 +199,8 @@ func (s *AuthStore) CreateAPIKey(ctx context.Context, input contracts.APIKeyInpu
 	return key, token, nil
 }
 
+// RotateAPIKey revokes an active key and atomically issues its replacement.
+// Authentication of the old token stops when the transaction commits.
 func (s *AuthStore) RotateAPIKey(ctx context.Context, workspaceID, keyID string, expiresAt *time.Time) (contracts.APIKey, string, error) {
 	workspaceID, keyID = strings.TrimSpace(workspaceID), strings.TrimSpace(keyID)
 	if workspaceID == "" || keyID == "" {
@@ -232,6 +246,7 @@ func (s *AuthStore) RotateAPIKey(ctx context.Context, workspaceID, keyID string,
 	return key, token, nil
 }
 
+// RevokeAPIKey invalidates an active workspace API key.
 func (s *AuthStore) RevokeAPIKey(ctx context.Context, workspaceID, keyID string) error {
 	result, err := s.pool.Exec(ctx, `UPDATE fornix.api_keys SET status='revoked', revoked_at=clock_timestamp() WHERE workspace_id=$1 AND id=$2 AND status='active'`, strings.TrimSpace(workspaceID), strings.TrimSpace(keyID))
 	if err != nil {
@@ -260,6 +275,9 @@ func parseAPIKey(token string) (string, string, bool) {
 	return keyID, secret, true
 }
 
+// Authenticate verifies an API key in constant time and returns its current
+// workspace-scoped principal and permissions. Revoked, expired, and disabled
+// credentials fail closed.
 func (s *AuthStore) Authenticate(ctx context.Context, token string) (contracts.Principal, error) {
 	keyID, secret, ok := parseAPIKey(token)
 	if !ok || s == nil || s.pool == nil {
@@ -338,6 +356,9 @@ func (s *AuthStore) Authenticate(ctx context.Context, token string) (contracts.P
 	return principal, nil
 }
 
+// Authorize deterministically evaluates one capability and records the decision
+// in the workspace audit trail. A denied decision is returned with
+// ErrAuthorizationDenied so callers cannot accidentally continue.
 func (s *AuthStore) Authorize(ctx context.Context, principal contracts.Principal, requestID string, permission contracts.Permission, resource, method, path string) (contracts.AuthorizationDecision, error) {
 	if s == nil || s.pool == nil {
 		return contracts.AuthorizationDecision{}, fmt.Errorf("authorization store is not configured")
@@ -388,6 +409,9 @@ func (s *AuthStore) Authorize(ctx context.Context, principal contracts.Principal
 	return existing, nil
 }
 
+// CreateCredentialRef stores a workspace-scoped indirection to a provider
+// secret. The referenced secret material remains outside Fornix's durable
+// records.
 func (s *AuthStore) CreateCredentialRef(ctx context.Context, input contracts.CredentialRefInput) (contracts.CredentialRef, error) {
 	workspaceID, provider, name, reference := strings.TrimSpace(input.WorkspaceID), strings.TrimSpace(input.Provider), strings.TrimSpace(input.Name), strings.TrimSpace(input.Reference)
 	if workspaceID == "" || provider == "" || name == "" || reference == "" {
@@ -404,6 +428,8 @@ func (s *AuthStore) CreateCredentialRef(ctx context.Context, input contracts.Cre
 	return ref, nil
 }
 
+// RotateCredentialRef supersedes a credential reference and advances its
+// version without overwriting the prior audit history.
 func (s *AuthStore) RotateCredentialRef(ctx context.Context, workspaceID, id, reference string, expiresAt *time.Time) (contracts.CredentialRef, error) {
 	workspaceID, id, reference = strings.TrimSpace(workspaceID), strings.TrimSpace(id), strings.TrimSpace(reference)
 	if workspaceID == "" || id == "" || reference == "" {
@@ -441,6 +467,8 @@ func (s *AuthStore) RotateCredentialRef(ctx context.Context, workspaceID, id, re
 	return ref, nil
 }
 
+// CredentialRefForUse returns the newest active, unexpired reference for a
+// workspace/provider/name tuple.
 func (s *AuthStore) CredentialRefForUse(ctx context.Context, workspaceID, provider, name string) (contracts.CredentialRef, error) {
 	var ref contracts.CredentialRef
 	err := s.pool.QueryRow(ctx, `
@@ -458,6 +486,8 @@ func (s *AuthStore) CredentialRefForUse(ctx context.Context, workspaceID, provid
 	return ref, nil
 }
 
+// RevokeCredentialRef marks an active credential reference unusable while
+// retaining its metadata for audit and rotation lineage.
 func (s *AuthStore) RevokeCredentialRef(ctx context.Context, workspaceID, id string) error {
 	result, err := s.pool.Exec(ctx, `UPDATE fornix.credential_references SET status='revoked',revoked_at=clock_timestamp(),updated_at=clock_timestamp() WHERE workspace_id=$1 AND id=$2 AND status='active'`, strings.TrimSpace(workspaceID), strings.TrimSpace(id))
 	if err != nil {
@@ -469,6 +499,7 @@ func (s *AuthStore) RevokeCredentialRef(ctx context.Context, workspaceID, id str
 	return nil
 }
 
+// GetIdentity reads one identity only when it belongs to workspaceID.
 func (s *AuthStore) GetIdentity(ctx context.Context, workspaceID, id string) (contracts.Identity, error) {
 	var identity contracts.Identity
 	err := s.pool.QueryRow(ctx, `SELECT 1,id,workspace_id,subject,kind,display_name,status,created_at,updated_at FROM fornix.identities WHERE workspace_id=$1 AND id=$2`, strings.TrimSpace(workspaceID), strings.TrimSpace(id)).Scan(&identity.SchemaVersion, &identity.ID, &identity.WorkspaceID, &identity.Subject, &identity.Kind, &identity.DisplayName, &identity.Status, &identity.CreatedAt, &identity.UpdatedAt)
@@ -478,6 +509,7 @@ func (s *AuthStore) GetIdentity(ctx context.Context, workspaceID, id string) (co
 	return identity, err
 }
 
+// ListIdentities returns a bounded, ID-ordered page of workspace identities.
 func (s *AuthStore) ListIdentities(ctx context.Context, workspaceID string, limit int, cursor string) (IdentityPage, error) {
 	limit = boundedOperatorLimit(limit)
 	rows, err := s.pool.Query(ctx, `SELECT 1,id,workspace_id,subject,kind,display_name,status,created_at,updated_at FROM fornix.identities WHERE workspace_id=$1 AND id>$2 ORDER BY id LIMIT $3`, strings.TrimSpace(workspaceID), strings.TrimSpace(cursor), limit+1)
@@ -500,6 +532,8 @@ func (s *AuthStore) ListIdentities(ctx context.Context, workspaceID string, limi
 	return page, rows.Err()
 }
 
+// DisableIdentity prevents an identity and its authentication path from being
+// used for subsequent requests without deleting its audit history.
 func (s *AuthStore) DisableIdentity(ctx context.Context, workspaceID, id string) error {
 	result, err := s.pool.Exec(ctx, `UPDATE fornix.identities SET status='disabled',updated_at=clock_timestamp() WHERE workspace_id=$1 AND id=$2 AND status='active'`, strings.TrimSpace(workspaceID), strings.TrimSpace(id))
 	if err != nil {
@@ -511,6 +545,7 @@ func (s *AuthStore) DisableIdentity(ctx context.Context, workspaceID, id string)
 	return nil
 }
 
+// ListRoles returns a bounded, ID-ordered page of roles in one workspace.
 func (s *AuthStore) ListRoles(ctx context.Context, workspaceID string, limit int, cursor string) (RolePage, error) {
 	limit = boundedOperatorLimit(limit)
 	rows, err := s.pool.Query(ctx, `SELECT 1,id,workspace_id,name,permissions,created_at,updated_at FROM fornix.roles WHERE workspace_id=$1 AND id>$2 ORDER BY id LIMIT $3`, strings.TrimSpace(workspaceID), strings.TrimSpace(cursor), limit+1)
@@ -537,6 +572,8 @@ func (s *AuthStore) ListRoles(ctx context.Context, workspaceID string, limit int
 	return page, rows.Err()
 }
 
+// UnbindRole removes one workspace-scoped identity/role binding while leaving
+// the identity and role records available for audit.
 func (s *AuthStore) UnbindRole(ctx context.Context, workspaceID, identityID, roleID string) error {
 	result, err := s.pool.Exec(ctx, `DELETE FROM fornix.identity_role_bindings WHERE workspace_id=$1 AND identity_id=$2 AND role_id=$3`, strings.TrimSpace(workspaceID), strings.TrimSpace(identityID), strings.TrimSpace(roleID))
 	if err != nil {
@@ -548,6 +585,8 @@ func (s *AuthStore) UnbindRole(ctx context.Context, workspaceID, identityID, rol
 	return nil
 }
 
+// ListAPIKeys returns bounded key metadata without returning token hashes or
+// bearer secrets.
 func (s *AuthStore) ListAPIKeys(ctx context.Context, workspaceID string, limit int, cursor string) (APIKeyPage, error) {
 	limit = boundedOperatorLimit(limit)
 	rows, err := s.pool.Query(ctx, `SELECT 1,id,workspace_id,identity_id,prefix,status,expires_at,revoked_at,created_at,last_used_at FROM fornix.api_keys WHERE workspace_id=$1 AND id>$2 ORDER BY id LIMIT $3`, strings.TrimSpace(workspaceID), strings.TrimSpace(cursor), limit+1)

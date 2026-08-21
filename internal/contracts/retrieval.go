@@ -24,6 +24,8 @@ const (
 
 const embeddingDimension = 768
 
+// RetrievalStage names one deterministic retrieval tier. Stages are ordered
+// from low-cost structured lookup to explicitly gated vector search.
 type RetrievalStage string
 
 const (
@@ -67,6 +69,8 @@ type RetrievalBudget struct {
 	MaxTokens int `json:"max_tokens"`
 }
 
+// RetrievalStagePlan describes one planned retrieval stage and its admission
+// reason without executing the query.
 type RetrievalStagePlan struct {
 	Name           RetrievalStage `json:"name"`
 	Enabled        bool           `json:"enabled"`
@@ -74,6 +78,7 @@ type RetrievalStagePlan struct {
 	Reason         string         `json:"reason,omitempty"`
 }
 
+// RetrievalPlan is the deterministic, hashable execution plan for a request.
 type RetrievalPlan struct {
 	SchemaVersion int                  `json:"schema_version"`
 	Policy        string               `json:"policy"`
@@ -83,6 +88,7 @@ type RetrievalPlan struct {
 	Stages        []RetrievalStagePlan `json:"stages"`
 }
 
+// RetrievalStageTrace records bounded measurements and outcomes for one stage.
 type RetrievalStageTrace struct {
 	Name           RetrievalStage `json:"name"`
 	Status         string         `json:"status"`
@@ -95,6 +101,8 @@ type RetrievalStageTrace struct {
 	Error          string         `json:"error,omitempty"`
 }
 
+// RetrievalTrace is the redacted execution trace used for replay and cost
+// accounting; it never substitutes for authoritative source records.
 type RetrievalTrace struct {
 	PlanHash       string                `json:"plan_hash"`
 	Stages         []RetrievalStageTrace `json:"stages"`
@@ -126,6 +134,8 @@ type ContextItem struct {
 	Truncated       bool           `json:"truncated,omitempty"`
 }
 
+// ContextPack is the bounded compiled context returned to an execution step.
+// Each item retains its workspace and evidence identity for provenance.
 type ContextPack struct {
 	SchemaVersion int           `json:"schema_version"`
 	WorkspaceID   string        `json:"workspace_id"`
@@ -138,6 +148,7 @@ type ContextPack struct {
 	ContentHash   string        `json:"content_hash"`
 }
 
+// Normalize validates workspace scope, query bounds, and retrieval budgets.
 func (r RetrievalRequest) Normalize() (RetrievalRequest, error) {
 	r.WorkspaceID = strings.TrimSpace(r.WorkspaceID)
 	r.RequestID = strings.TrimSpace(r.RequestID)
@@ -230,6 +241,7 @@ func normalizeStrings(values []string) []string {
 	return result
 }
 
+// Hash returns the stable logical identity of a normalized retrieval request.
 func (r RetrievalRequest) Hash() (string, error) {
 	normalized, err := r.Normalize()
 	if err != nil {

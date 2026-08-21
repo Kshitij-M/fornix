@@ -14,6 +14,8 @@ import (
 	"github.com/omaveda/fornix/internal/contracts"
 )
 
+// OllamaConfig configures the local Ollama-compatible endpoint and embedding
+// capability. It contains endpoint metadata, not credentials.
 type OllamaConfig struct {
 	Endpoint       contracts.ModelEndpoint
 	EmbeddingModel string
@@ -22,6 +24,8 @@ type OllamaConfig struct {
 	Timeout        time.Duration
 }
 
+// OllamaProvider adapts Ollama chat and embedding endpoints to the provider
+// contract while retaining bounded response evidence.
 type OllamaProvider struct {
 	endpoint       contracts.ModelEndpoint
 	embeddingModel string
@@ -30,6 +34,8 @@ type OllamaProvider struct {
 	timeout        time.Duration
 }
 
+// NewOllamaProvider validates and constructs an Ollama provider. Network use
+// happens only when Complete, Stream, or Embed is called.
 func NewOllamaProvider(cfg OllamaConfig) (*OllamaProvider, error) {
 	endpoint := cfg.Endpoint
 	if endpoint.Provider == "" {
@@ -71,6 +77,7 @@ func (p *OllamaProvider) Name() string                      { return "ollama" }
 func (p *OllamaProvider) Aliases() []string                 { return []string{"ollama-local"} }
 func (p *OllamaProvider) Endpoint() contracts.ModelEndpoint { return p.endpoint }
 
+// Embed requests a bounded embedding from Ollama.
 func (p *OllamaProvider) Embed(ctx context.Context, request EmbeddingRequest) ([]float32, error) {
 	text := request.Text
 	limit := request.MaxInputBytes
@@ -113,6 +120,7 @@ func (p *OllamaProvider) Embed(ctx context.Context, request EmbeddingRequest) ([
 	return decoded.Embedding, nil
 }
 
+// Complete executes one bounded non-streaming Ollama chat request.
 func (p *OllamaProvider) Complete(ctx context.Context, request contracts.ModelRequest) (contracts.ModelResponse, error) {
 	modelName, messages, err := p.chatRequest(request, false)
 	if err != nil {
@@ -150,6 +158,8 @@ func (p *OllamaProvider) Complete(ctx context.Context, request contracts.ModelRe
 	return contracts.ModelResponse{Provider: contracts.ProviderRef{Provider: p.Name(), Model: modelName}, Content: decoded.Message.Content, FinishReason: "stop", Usage: usage, Cost: contracts.ModelCost{Currency: "USD", Source: "not_configured"}, WirePayload: wire}, nil
 }
 
+// Stream adapts Ollama's newline-delimited response stream to provider-neutral
+// events and stops at the configured output/evidence limits.
 func (p *OllamaProvider) Stream(ctx context.Context, request contracts.ModelRequest, sink StreamSink) (contracts.ModelResponse, error) {
 	modelName, messages, err := p.chatRequest(request, true)
 	if err != nil {

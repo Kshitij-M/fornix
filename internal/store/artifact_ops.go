@@ -419,6 +419,8 @@ func recordArtifactLifecycleTx(ctx context.Context, tx pgx.Tx, workspaceID strin
 	return err
 }
 
+// VerifyBatch checks a bounded page of artifacts and returns a resumable
+// integrity cursor.
 func (s *ArtifactStore) VerifyBatch(ctx context.Context, request contracts.ArtifactIntegrityRequest) (contracts.ArtifactIntegrityReport, error) {
 	if s == nil || s.pool == nil {
 		return contracts.ArtifactIntegrityReport{}, fmt.Errorf("artifact store is not configured")
@@ -503,6 +505,8 @@ func (s *ArtifactStore) VerifyBatch(ctx context.Context, request contracts.Artif
 	return report, nil
 }
 
+// Metrics returns workspace-scoped logical, physical, reference, and
+// deduplication storage measurements.
 func (s *ArtifactStore) Metrics(ctx context.Context, workspaceID string) (contracts.ArtifactStorageMetrics, error) {
 	if s == nil || s.pool == nil {
 		return contracts.ArtifactStorageMetrics{}, fmt.Errorf("artifact store is not configured")

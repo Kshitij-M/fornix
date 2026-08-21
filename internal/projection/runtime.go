@@ -1,3 +1,6 @@
+// Package projection applies immutable control events to rebuildable,
+// workspace-scoped read models. Projection writes and checkpoints commit in a
+// single Postgres transaction under a consumer fence.
 package projection
 
 import (
@@ -41,6 +44,8 @@ type Subscriber interface {
 	BatchSize() int
 }
 
+// Runner owns one durable projection subscriber and coordinates lease-fenced,
+// transactional batch application against the shared event store.
 type Runner struct {
 	events     *store.EventStore
 	subscriber Subscriber
@@ -48,6 +53,7 @@ type Runner struct {
 	leaseTTL   time.Duration
 }
 
+// NewRunner creates a projection runner with a generated process owner.
 func NewRunner(events *store.EventStore, subscriber Subscriber) (*Runner, error) {
 	return NewRunnerWithOwner(events, subscriber, contracts.NewID("consumer"), contracts.DefaultConsumerLeaseTTL)
 }
@@ -81,22 +87,29 @@ func NewRunnerWithOwner(events *store.EventStore, subscriber Subscriber, ownerID
 	return &Runner{events: events, subscriber: subscriber, ownerID: ownerID, leaseTTL: leaseTTL}, nil
 }
 
+// OwnerID returns the process identity used for consumer lease validation.
 func (r *Runner) OwnerID() string {
 	return r.ownerID
 }
 
+// AcquireLease obtains or reuses this runner's workspace-scoped consumer
+// lease.
 func (r *Runner) AcquireLease(ctx context.Context, workspaceID string) (contracts.ConsumerLeaseResult, error) {
 	return r.events.AcquireConsumerLease(ctx, workspaceID, r.subscriber.ConsumerID(), r.ownerID, r.leaseTTL)
 }
 
+// RenewLease extends the exact current lease; stale owners fail closed.
 func (r *Runner) RenewLease(ctx context.Context, lease contracts.ConsumerLease, ttl time.Duration) (contracts.ConsumerLease, error) {
 	return r.events.RenewConsumerLease(ctx, lease, ttl)
 }
 
+// ReleaseLease relinquishes the exact current lease without moving the
+// projection checkpoint backwards.
 func (r *Runner) ReleaseLease(ctx context.Context, lease contracts.ConsumerLease) error {
 	return r.events.ReleaseConsumerLease(ctx, lease)
 }
 
+// BatchResult reports one atomic projection application and checkpoint step.
 type BatchResult struct {
 	Projection       string
 	ConsumerID       string
@@ -111,8 +124,11 @@ type BatchResult struct {
 	Duration         time.Duration
 }
 
+// RunHook is a test seam executed after writes and before the transaction
+// commits, allowing crash-boundary verification.
 type RunHook func(BatchResult) error
 
+// RunBatch acquires the consumer lease and processes one bounded event batch.
 func (r *Runner) RunBatch(ctx context.Context, workspaceID string) (BatchResult, error) {
 	acquired, err := r.AcquireLease(ctx, workspaceID)
 	if err != nil {
@@ -213,6 +229,8 @@ func (r *Runner) runBatchWithLease(ctx context.Context, lease contracts.Consumer
 	return result, nil
 }
 
+// RebuildResult reports a projection reset and deterministic catch-up from
+// sequence zero.
 type RebuildResult struct {
 	Projection      string
 	ConsumerID      string

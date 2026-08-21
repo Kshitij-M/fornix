@@ -23,6 +23,9 @@ func RedactJSON(value any) ([]byte, error) {
 	return RedactBytes(encoded), nil
 }
 
+// RedactBytes masks credential-shaped values and secret-looking JSON fields,
+// then applies the bounded evidence limit used by model/tool persistence.
+// Callers must invoke it before logging, event append, or evidence storage.
 func RedactBytes(value []byte) []byte {
 	if len(value) == 0 {
 		return nil

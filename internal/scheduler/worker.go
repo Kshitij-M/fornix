@@ -1,3 +1,5 @@
+// Package scheduler runs durable agent work by claiming due Postgres rows and
+// fencing every checkpoint with a workspace-scoped lease.
 package scheduler
 
 import (
@@ -13,6 +15,8 @@ import (
 	"github.com/omaveda/fornix/internal/store"
 )
 
+// ErrWorkerNotConfigured indicates that a worker lacks its Postgres store,
+// orchestrator, or stable owner identity.
 var ErrWorkerNotConfigured = errors.New("agent run worker is not configured")
 
 // Result records one bounded pull/reconcile attempt. A false Claimed result
@@ -38,6 +42,7 @@ type Worker struct {
 	PollInterval      time.Duration
 }
 
+// NewWorker creates a pull worker with bounded lease and polling defaults.
 func NewWorker(runs *store.AgentRunStore, orchestrator *agentloop.Orchestrator, ownerID string) *Worker {
 	ownerID = strings.TrimSpace(ownerID)
 	if ownerID == "" {

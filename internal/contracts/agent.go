@@ -1,3 +1,7 @@
+// Package contracts contains the versioned data contracts shared by Fornix's
+// control plane, providers, execution workers, and operator surfaces.
+// Contracts keep workspace scope, provenance, budgets, and replay identities
+// explicit at every durable boundary.
 package contracts
 
 import (
@@ -90,6 +94,8 @@ const (
 	AgentEventExternalCompleted = "agent.external_completed"
 )
 
+// AgentBudget bounds one agent run. The limits are admission controls, not
+// estimates: an implementation must stop before it commits work beyond them.
 type AgentBudget struct {
 	MaxTurns        int     `json:"max_turns"`
 	MaxModelSteps   int     `json:"max_model_steps"`
@@ -101,6 +107,7 @@ type AgentBudget struct {
 	MaxToolAttempts int     `json:"max_tool_attempts"`
 }
 
+// DefaultAgentBudget returns the conservative offline defaults for a run.
 func DefaultAgentBudget() AgentBudget {
 	return AgentBudget{
 		MaxTurns: DefaultAgentMaxTurns, MaxModelSteps: DefaultAgentMaxSteps,
@@ -110,6 +117,8 @@ func DefaultAgentBudget() AgentBudget {
 	}
 }
 
+// Normalize fills omitted limits and rejects values outside the supported
+// execution envelope.
 func (b *AgentBudget) Normalize() error {
 	defaults := DefaultAgentBudget()
 	if b.MaxTurns == 0 {
@@ -142,6 +151,8 @@ func (b *AgentBudget) Normalize() error {
 	return nil
 }
 
+// AgentRunRequest is the authenticated, idempotent input used to reserve an
+// agent run. A task-bound request must carry the worker's current fence.
 type AgentRunRequest struct {
 	SchemaVersion  int                   `json:"schema_version"`
 	RunID          string                `json:"run_id,omitempty"`
@@ -163,6 +174,8 @@ type AgentRunRequest struct {
 	Metadata       map[string]string     `json:"metadata,omitempty"`
 }
 
+// Normalize assigns request identities, validates workspace references, and
+// applies bounded defaults before the request can reach durable storage.
 func (r *AgentRunRequest) Normalize() error {
 	if r == nil {
 		return fmt.Errorf("agent run request is nil")
@@ -248,6 +261,8 @@ func normalizeAgentProvider(p *ProviderRef) error {
 	return nil
 }
 
+// RequestHash identifies logical run input while excluding transport and
+// retry identities, so the same idempotent request has the same hash.
 func (r AgentRunRequest) RequestHash() (string, error) {
 	clone := r
 	clone.RunID, clone.RequestID, clone.IdempotencyKey, clone.CausationID, clone.CorrelationID = "", "", "", "", ""
@@ -259,6 +274,8 @@ func (r AgentRunRequest) RequestHash() (string, error) {
 	return hex.EncodeToString(d[:]), nil
 }
 
+// PendingToolCall records a tool request that must be resumed from the last
+// committed checkpoint rather than inferred from an in-memory loop.
 type PendingToolCall struct {
 	ID          string          `json:"id"`
 	ToolID      string          `json:"tool_id"`
@@ -268,6 +285,8 @@ type PendingToolCall struct {
 	LastFailure *LoopFailure    `json:"last_failure,omitempty"`
 }
 
+// LoopFailure is the redacted, deterministic failure shape persisted in run
+// state. ContentEmitted prevents unsafe retry or provider fallback.
 type LoopFailure struct {
 	Code           string `json:"code"`
 	Message        string `json:"message"`
@@ -277,6 +296,7 @@ type LoopFailure struct {
 	Attempt        int    `json:"attempt,omitempty"`
 }
 
+// Normalize validates the stable failure code and message fields.
 func (f *LoopFailure) Normalize() error {
 	if f == nil {
 		return fmt.Errorf("loop failure is nil")
@@ -288,6 +308,8 @@ func (f *LoopFailure) Normalize() error {
 	return nil
 }
 
+// ModelStep records one model attempt and its observed usage. Remote model
+// execution remains at-least-once; this record makes that boundary explicit.
 type ModelStep struct {
 	ID             string         `json:"id"`
 	RequestID      string         `json:"request_id"`
@@ -303,6 +325,8 @@ type ModelStep struct {
 	FinishedAt     time.Time      `json:"finished_at,omitempty"`
 }
 
+// ToolStep records one durable tool attempt, including approval and failure
+// state needed for crash recovery and duplicate delivery.
 type ToolStep struct {
 	ID             string       `json:"id"`
 	ToolID         string       `json:"tool_id"`
@@ -317,6 +341,7 @@ type ToolStep struct {
 	FinishedAt     time.Time    `json:"finished_at,omitempty"`
 }
 
+// AgentTurn is the bounded unit of model and tool work within an agent run.
 type AgentTurn struct {
 	Number     int         `json:"number"`
 	ModelSteps []ModelStep `json:"model_steps,omitempty"`
@@ -326,6 +351,8 @@ type AgentTurn struct {
 	Cost       ModelCost   `json:"cost"`
 }
 
+// LoopState is the compact deterministic state-machine view used in a
+// checkpoint. It intentionally excludes large history and raw outputs.
 type LoopState struct {
 	RunID        string            `json:"run_id"`
 	WorkspaceID  string            `json:"workspace_id"`
@@ -339,6 +366,8 @@ type LoopState struct {
 	NextRetryAt  *time.Time        `json:"next_retry_at,omitempty"`
 }
 
+// LoopCheckpoint is the replay anchor committed with the corresponding event
+// sequence and state hash.
 type LoopCheckpoint struct {
 	RunID         string    `json:"run_id"`
 	Version       int64     `json:"version"`
@@ -349,6 +378,8 @@ type LoopCheckpoint struct {
 	CommittedAt   time.Time `json:"committed_at"`
 }
 
+// AgentRun is the authoritative durable state of one bounded agent workflow.
+// Postgres owns state transitions; projections and replay views are derived.
 type AgentRun struct {
 	ID                 string                `json:"id"`
 	WorkspaceID        string                `json:"workspace_id"`
@@ -398,6 +429,8 @@ type AgentRun struct {
 	FinishedAt         *time.Time            `json:"finished_at,omitempty"`
 }
 
+// LoopDecision describes the next deterministic action selected from an
+// AgentRun and its current checkpoint.
 type LoopDecision struct {
 	Action     string         `json:"action"`
 	Run        AgentRun       `json:"run"`
@@ -407,14 +440,20 @@ type LoopDecision struct {
 	Failure    *LoopFailure   `json:"failure,omitempty"`
 }
 
+// StateSnapshot returns the compact state representation used for checkpoint
+// hashes and replay comparisons.
 func (r AgentRun) StateSnapshot() LoopState {
 	return LoopState{RunID: r.ID, WorkspaceID: r.WorkspaceID, State: r.State, Phase: r.Phase, Turn: r.Turn, Step: r.Step, ContextHash: r.ContextHash, PendingTools: clonePendingTools(r.PendingTools), Termination: r.Termination, NextRetryAt: cloneTime(r.NextRetryAt)}
 }
 
+// Checkpoint builds the canonical checkpoint representation for the run's
+// current committed state.
 func (r AgentRun) Checkpoint() LoopCheckpoint {
 	return LoopCheckpoint{RunID: r.ID, Version: r.StateVersion, EventSequence: r.EventSequence, State: r.StateSnapshot(), StateHash: r.StateHash, HistoryHash: historyHash(r.History), CommittedAt: r.UpdatedAt}
 }
 
+// ComputeStateHash returns the stable hash of state, history, output, usage,
+// and cost fields that affect deterministic replay.
 func (r AgentRun) ComputeStateHash() string {
 	canonical, _ := json.Marshal(struct {
 		State struct {
@@ -470,6 +509,7 @@ func cloneTime(value *time.Time) *time.Time {
 	return &copy
 }
 
+// IsAgentTerminal reports whether no further loop transition is permitted.
 func IsAgentTerminal(state string) bool {
 	switch strings.TrimSpace(state) {
 	case AgentRunSucceeded, AgentRunFailed, AgentRunCancelled, AgentRunDeadLetter:

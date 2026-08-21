@@ -1,3 +1,7 @@
+// Package server exposes Fornix's authenticated HTTP control-plane surface.
+// Handlers enforce workspace authorization at the boundary and delegate
+// authoritative state, idempotency, and replay behavior to Postgres-backed
+// stores.
 package server
 
 import (
@@ -66,6 +70,9 @@ type server struct {
 	shutdownTimeout   time.Duration
 }
 
+// New validates configuration, applies durable migrations, and composes the
+// authenticated control-plane services. It does not start listening; callers
+// use Run for the server lifecycle.
 func New(ctx context.Context, cfg config.Config) (*server, error) {
 	poolCfg, err := pgxpool.ParseConfig(cfg.DSN)
 	if err != nil {
@@ -232,12 +239,17 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 	return srv, nil
 }
 
+// Close releases the Postgres pool. It is safe for callers to use during
+// shutdown after Run returns.
 func (s *server) Close() {
 	if s.pool != nil {
 		s.pool.Close()
 	}
 }
 
+// Run serves the HTTP API until the context is canceled or the listener fails.
+// Middleware applies authentication, workspace scoping, bounded request
+// bodies, and authorization before handlers mutate durable state.
 func (s *server) Run(ctx context.Context, listen string) error {
 	httpServer := &http.Server{
 		Addr:              listen,

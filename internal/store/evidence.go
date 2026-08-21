@@ -34,10 +34,13 @@ type EvidenceStore struct {
 	artifacts *ArtifactStore
 }
 
+// NewEvidenceStore creates the workspace-scoped immutable evidence store.
 func NewEvidenceStore(pool *pgxpool.Pool) *EvidenceStore {
 	return &EvidenceStore{pool: pool, artifacts: NewArtifactStore(pool)}
 }
 
+// EvidencePutInput is the write boundary for immutable raw evidence. The
+// store computes the evidence hash rather than trusting caller input.
 type EvidencePutInput struct {
 	WorkspaceID      string
 	SourceReference  string
@@ -54,11 +57,14 @@ type EvidencePutInput struct {
 	CorrelationID    string
 }
 
+// EvidencePutResult returns the canonical evidence record and creation flag.
 type EvidencePutResult struct {
 	Record  contracts.SourceRecord `json:"record"`
 	Created bool                   `json:"created"`
 }
 
+// ProvenanceEdgeResult returns a canonical immutable graph edge and creation
+// flag.
 type ProvenanceEdgeResult struct {
 	Edge    contracts.ProvenanceEdge `json:"edge"`
 	Created bool                     `json:"created"`
@@ -182,6 +188,7 @@ const (
 	defaultEvidenceMediaType = "application/octet-stream"
 )
 
+// Put inserts or reuses immutable evidence and commits its provenance links.
 func (s *EvidenceStore) Put(ctx context.Context, input EvidencePutInput) (EvidencePutResult, error) {
 	if s == nil || s.pool == nil {
 		return EvidencePutResult{}, fmt.Errorf("evidence store is not configured")
@@ -335,6 +342,7 @@ func (s *EvidenceStore) PutTx(ctx context.Context, tx pgx.Tx, input EvidencePutI
 	return EvidencePutResult{Record: record, Created: inserted}, nil
 }
 
+// AddEdge inserts or reuses a validated workspace-local provenance edge.
 func (s *EvidenceStore) AddEdge(ctx context.Context, input contracts.ProvenanceEdgeInput) (ProvenanceEdgeResult, error) {
 	if s == nil || s.pool == nil {
 		return ProvenanceEdgeResult{}, fmt.Errorf("evidence store is not configured")
@@ -454,6 +462,8 @@ func (s *EvidenceStore) Traverse(ctx context.Context, request contracts.Provenan
 	return edges, nil
 }
 
+// Disclose compiles a deterministic gist/detail/raw evidence view with bounded
+// provenance traversal and integrity verification.
 func (s *EvidenceStore) Disclose(ctx context.Context, request contracts.DisclosureRequest) (contracts.DisclosureResult, error) {
 	if s == nil || s.pool == nil {
 		return contracts.DisclosureResult{}, fmt.Errorf("evidence store is not configured")

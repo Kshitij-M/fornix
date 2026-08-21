@@ -18,8 +18,12 @@ import (
 	"github.com/omaveda/fornix/internal/contracts"
 )
 
+// CredentialResolver resolves a named credential reference at call time. The
+// resolved secret must remain inside the provider boundary.
 type CredentialResolver func(string) (string, error)
 
+// OpenAIConfig configures an OpenAI-compatible endpoint. Live use is explicit
+// and credentials may be supplied directly only by trusted process setup.
 type OpenAIConfig struct {
 	Endpoint          contracts.ModelEndpoint
 	APIKey            string
@@ -29,6 +33,8 @@ type OpenAIConfig struct {
 	ResolveCredential CredentialResolver
 }
 
+// OpenAIProvider adapts chat-completions-compatible HTTP endpoints with
+// bounded retries, redaction, and optional provider idempotency headers.
 type OpenAIProvider struct {
 	endpoint          contracts.ModelEndpoint
 	apiKey            string
@@ -38,6 +44,8 @@ type OpenAIProvider struct {
 	resolveCredential CredentialResolver
 }
 
+// NewOpenAIProvider validates an OpenAI-compatible endpoint without making a
+// network request.
 func NewOpenAIProvider(cfg OpenAIConfig) (*OpenAIProvider, error) {
 	endpoint := cfg.Endpoint
 	if endpoint.Provider == "" {
@@ -77,6 +85,7 @@ func (p *OpenAIProvider) Name() string                      { return "openai" }
 func (p *OpenAIProvider) Aliases() []string                 { return []string{"openai-compatible"} }
 func (p *OpenAIProvider) Endpoint() contracts.ModelEndpoint { return p.endpoint }
 
+// Complete executes one bounded non-streaming chat-completion request.
 func (p *OpenAIProvider) Complete(ctx context.Context, request contracts.ModelRequest) (contracts.ModelResponse, error) {
 	apiKey, err := p.credential()
 	if err != nil {
@@ -130,6 +139,8 @@ func (p *OpenAIProvider) Complete(ctx context.Context, request contracts.ModelRe
 	return result, nil
 }
 
+// Stream adapts server-sent chat completion events and refuses fallback after
+// content has been emitted.
 func (p *OpenAIProvider) Stream(ctx context.Context, request contracts.ModelRequest, sink StreamSink) (contracts.ModelResponse, error) {
 	apiKey, err := p.credential()
 	if err != nil {
@@ -236,6 +247,7 @@ func (p *OpenAIProvider) Stream(ctx context.Context, request contracts.ModelRequ
 	return result, nil
 }
 
+// Embed reports that this provider has no configured embedding capability.
 func (p *OpenAIProvider) Embed(context.Context, EmbeddingRequest) ([]float32, error) {
 	return nil, &FailureError{Failure: contracts.ModelFailure{Code: contracts.ModelFailureProvider, Message: "openai embedding capability is not configured", Provider: p.Name()}}
 }

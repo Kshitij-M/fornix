@@ -1,5 +1,7 @@
 # Fornix artifact storage foundation
 
+Status: complete implementation note; retained as the Loop 13 design record.
+
 ## Decision
 
 Task 13 adds a Postgres-only, workspace-scoped content-addressed artifact

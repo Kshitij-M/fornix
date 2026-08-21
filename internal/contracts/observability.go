@@ -150,6 +150,8 @@ type MetricDimensions struct {
 	Category  string `json:"category,omitempty"`
 }
 
+// MetricSample is one bounded workspace-scoped metric observation. Dimension
+// names are fixed by MetricDimensions to prevent cardinality explosions.
 type MetricSample struct {
 	SchemaVersion  int              `json:"schema_version"`
 	ID             string           `json:"id"`
@@ -162,6 +164,7 @@ type MetricSample struct {
 	Dimensions     MetricDimensions `json:"dimensions,omitempty"`
 }
 
+// QualityGate records one deterministic pass/fail threshold evaluation.
 type QualityGate struct {
 	Name      string  `json:"name"`
 	Metric    string  `json:"metric"`
@@ -247,6 +250,8 @@ type EvalCase struct {
 	Tags                []string `json:"tags,omitempty"`
 }
 
+// EvalDataset is an immutable, versioned set of references to recorded runs
+// and evidence. It contains hashes and identities rather than raw prompts.
 type EvalDataset struct {
 	SchemaVersion int        `json:"schema_version"`
 	ID            string     `json:"id"`
@@ -266,6 +271,8 @@ const (
 	EvalRunCancelled = "cancelled"
 )
 
+// EvalRun is the durable bounded lifecycle of an offline evaluation. Replay
+// must not invoke remote models or external tools.
 type EvalRun struct {
 	SchemaVersion     int                      `json:"schema_version"`
 	ID                string                   `json:"id"`
@@ -294,6 +301,8 @@ type EvalRun struct {
 	FinishedAt        *time.Time               `json:"finished_at,omitempty"`
 }
 
+// EvalResult is the deterministic result for one evaluation case and replay
+// history. Its evidence references remain workspace-scoped.
 type EvalResult struct {
 	SchemaVersion    int                      `json:"schema_version"`
 	ID               string                   `json:"id"`
@@ -317,6 +326,7 @@ type EvalResult struct {
 	CreatedAt        time.Time                `json:"created_at,omitempty"`
 }
 
+// MetricAggregate is a bounded read model used in operator snapshots.
 type MetricAggregate struct {
 	Component string  `json:"component,omitempty"`
 	Operation string  `json:"operation,omitempty"`
@@ -328,6 +338,8 @@ type MetricAggregate struct {
 	P95MS     int64   `json:"p95_ms,omitempty"`
 }
 
+// CostAggregate separates measured, estimated, and unknown accounting so
+// missing provider usage is never presented as exact.
 type CostAggregate struct {
 	Category       string  `json:"category"`
 	Entries        int64   `json:"entries"`
@@ -339,6 +351,8 @@ type CostAggregate struct {
 	DurationMS     int64   `json:"duration_ms,omitempty"`
 }
 
+// ObservabilitySnapshot is a workspace-scoped, bounded accounting view over a
+// time window. It is derived from append-only observations and ledger entries.
 type ObservabilitySnapshot struct {
 	SchemaVersion      int               `json:"schema_version"`
 	WorkspaceID        string            `json:"workspace_id"`
@@ -358,6 +372,8 @@ type ObservabilitySnapshot struct {
 	Costs              []CostAggregate   `json:"costs,omitempty"`
 }
 
+// Normalize validates redaction-safe dimensions, references, and accounting
+// fields before an observation is persisted.
 func (o *RunObservation) Normalize() error {
 	if o == nil {
 		return fmt.Errorf("observation is nil")
@@ -427,6 +443,7 @@ func (o RunObservation) withoutIdentity() any {
 	return o
 }
 
+// Normalize validates a trace span and bounds its fixed attributes.
 func (s *TraceSpan) Normalize() error {
 	if s == nil {
 		return fmt.Errorf("span is nil")
@@ -461,6 +478,8 @@ func (s *TraceSpan) Normalize() error {
 	return nil
 }
 
+// Normalize validates cost attribution and rejects contradictory measured or
+// estimated flags.
 func (c *CostLedgerEntry) Normalize() error {
 	if c == nil {
 		return fmt.Errorf("cost entry is nil")
@@ -501,6 +520,7 @@ func (c *CostLedgerEntry) Normalize() error {
 
 func (c CostLedgerEntry) withoutIdentity() any { c.ID, c.PayloadHash = "", ""; return c }
 
+// Normalize validates a metric sample and its bounded dimension vocabulary.
 func (m *MetricSample) Normalize() error {
 	if m == nil {
 		return fmt.Errorf("metric sample is nil")
@@ -544,6 +564,7 @@ func (d *MetricDimensions) normalize() error {
 	return nil
 }
 
+// Normalize validates and hashes a bounded, versioned evaluation dataset.
 func (d *EvalDataset) Normalize() error {
 	if d == nil {
 		return fmt.Errorf("eval dataset is nil")
@@ -608,6 +629,8 @@ func normalizeEvalCase(c *EvalCase, workspace string) error {
 	return nil
 }
 
+// Normalize validates evaluation lifecycle state, batch bounds, and workspace
+// identity before a run is stored.
 func (r *EvalRun) Normalize() error {
 	if r == nil {
 		return fmt.Errorf("eval run is nil")
@@ -654,6 +677,7 @@ func (r *EvalRun) Normalize() error {
 	return nil
 }
 
+// Normalize validates one redacted deterministic case result.
 func (r *EvalResult) Normalize() error {
 	if r == nil {
 		return fmt.Errorf("eval result is nil")
@@ -693,6 +717,7 @@ func (r *EvalResult) Normalize() error {
 	return nil
 }
 
+// Normalize validates bounded retrieval metrics before they enter a report.
 func (m *RetrievalQualityMetrics) Normalize() error {
 	if m == nil {
 		return fmt.Errorf("retrieval metrics are nil")
@@ -726,6 +751,7 @@ func (m *RetrievalQualityMetrics) Normalize() error {
 	return nil
 }
 
+// Normalize validates one deterministic baseline comparison.
 func (f *RegressionFinding) Normalize() error {
 	if f == nil {
 		return fmt.Errorf("regression is nil")
@@ -745,6 +771,7 @@ func (f *RegressionFinding) Normalize() error {
 	return nil
 }
 
+// Normalize validates the gate operator and finite threshold values.
 func (g QualityGate) Normalize() error {
 	if err := validateDimension(strings.TrimSpace(g.Name), "gate name"); err != nil {
 		return err

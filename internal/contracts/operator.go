@@ -23,6 +23,8 @@ const (
 
 var workspaceIDPattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$`)
 
+// Workspace is the top-level authorization and data-isolation boundary for
+// all durable Fornix resources.
 type Workspace struct {
 	SchemaVersion   int       `json:"schema_version"`
 	ID              string    `json:"id"`
@@ -34,6 +36,8 @@ type Workspace struct {
 	UpdatedAt       time.Time `json:"updated_at"`
 }
 
+// WorkspaceBootstrapRequest describes the idempotent operator bootstrap of a
+// workspace, its initial identity, role, and optional API key.
 type WorkspaceBootstrapRequest struct {
 	WorkspaceID     string       `json:"workspace_id"`
 	DisplayName     string       `json:"display_name,omitempty"`
@@ -50,6 +54,8 @@ type WorkspaceBootstrapRequest struct {
 	Actor           ActorRef     `json:"-"`
 }
 
+// WorkspaceBootstrapResult returns durable bootstrap records and the newly
+// issued token exactly once at the creation boundary.
 type WorkspaceBootstrapResult struct {
 	Workspace    Workspace `json:"workspace"`
 	Identity     Identity  `json:"identity"`
@@ -60,6 +66,8 @@ type WorkspaceBootstrapResult struct {
 	TokenCreated bool      `json:"token_created"`
 }
 
+// RepositoryIngestRequest is the compatibility input for registering an
+// already-discovered repository snapshot.
 type RepositoryIngestRequest struct {
 	WorkspaceID    string `json:"workspace_id"`
 	Repository     string `json:"repository"`
@@ -74,6 +82,8 @@ type RepositoryIngestRequest struct {
 	IdempotencyKey string `json:"idempotency_key"`
 }
 
+// RepositoryIngest is the durable summary of a registered repository snapshot.
+// Detailed source history belongs to the ingestion substrate.
 type RepositoryIngest struct {
 	SchemaVersion  int       `json:"schema_version"`
 	ID             string    `json:"id"`
@@ -93,6 +103,7 @@ type RepositoryIngest struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
+// OperatorAudit is the append-only redacted record of an operator action.
 type OperatorAudit struct {
 	ID             int64             `json:"id"`
 	WorkspaceID    string            `json:"workspace_id"`
@@ -106,6 +117,8 @@ type OperatorAudit struct {
 	CreatedAt      time.Time         `json:"created_at"`
 }
 
+// Normalize applies safe bootstrap defaults and validates the workspace slug,
+// permissions, and idempotency identity.
 func (r WorkspaceBootstrapRequest) Normalize() (WorkspaceBootstrapRequest, error) {
 	r.WorkspaceID = strings.TrimSpace(r.WorkspaceID)
 	if !workspaceIDPattern.MatchString(r.WorkspaceID) {
@@ -161,6 +174,7 @@ func (r WorkspaceBootstrapRequest) Normalize() (WorkspaceBootstrapRequest, error
 	return r, nil
 }
 
+// Normalize validates the compatibility repository registration input.
 func (r RepositoryIngestRequest) Normalize() (RepositoryIngestRequest, error) {
 	r.WorkspaceID = strings.TrimSpace(r.WorkspaceID)
 	r.Repository = strings.TrimSpace(r.Repository)
@@ -185,6 +199,8 @@ func (r RepositoryIngestRequest) Normalize() (RepositoryIngestRequest, error) {
 	return r, nil
 }
 
+// HashRepositoryManifest returns a stable digest over sorted path/content
+// pairs, independent of map iteration order.
 func HashRepositoryManifest(files map[string]string) string {
 	keys := make([]string, 0, len(files))
 	for key := range files {
@@ -201,6 +217,8 @@ func HashRepositoryManifest(files map[string]string) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// RequestHash identifies logical repository registration input while excluding
+// retry status, error text, and idempotency transport identity.
 func (r RepositoryIngestRequest) RequestHash() string {
 	clone := r
 	clone.IdempotencyKey, clone.Status, clone.LastError = "", "", ""

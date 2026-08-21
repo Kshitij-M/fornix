@@ -9,6 +9,8 @@ import (
 	"time"
 )
 
+// IdentitySchemaVersion is the wire/durable schema version for identity and
+// authorization contracts.
 const IdentitySchemaVersion = 1
 
 const (
@@ -66,6 +68,9 @@ var knownPermissions = map[Permission]struct{}{
 	PermissionIdentityAdmin: {}, PermissionCredentialUse: {}, PermissionEvaluationRead: {}, PermissionEvaluationRun: {}, PermissionEvaluationWrite: {}, AdminWildcard: {},
 }
 
+// Principal is the authenticated caller presented to authorization checks.
+// Its workspace and permissions are derived from durable identity state, not
+// from caller-supplied resource fields.
 type Principal struct {
 	ID            string       `json:"id"`
 	WorkspaceID   string       `json:"workspace_id"`
@@ -78,6 +83,7 @@ type Principal struct {
 	Development   bool         `json:"development,omitempty"`
 }
 
+// Normalize validates the principal identity and canonicalizes permissions.
 func (p Principal) Normalize() (Principal, error) {
 	p.ID = strings.TrimSpace(p.ID)
 	p.WorkspaceID = strings.TrimSpace(p.WorkspaceID)
@@ -96,10 +102,14 @@ func (p Principal) Normalize() (Principal, error) {
 	return p, nil
 }
 
+// Actor converts the principal into the redacted actor reference propagated
+// through events, task transitions, and audit records.
 func (p Principal) Actor() ActorRef {
 	return ActorRef{ID: p.ID, Kind: p.Kind, Name: p.DisplayName, WorkspaceID: p.WorkspaceID}
 }
 
+// Has reports whether the principal has a capability, including the explicit
+// administrator wildcard.
 func (p Principal) Has(permission Permission) bool {
 	permission = Permission(strings.ToLower(strings.TrimSpace(string(permission))))
 	for _, candidate := range p.Permissions {
@@ -110,6 +120,8 @@ func (p Principal) Has(permission Permission) bool {
 	return false
 }
 
+// Identity is a workspace-scoped durable actor record. It contains no secret
+// credential material.
 type Identity struct {
 	SchemaVersion int       `json:"schema_version"`
 	ID            string    `json:"id"`
@@ -122,6 +134,7 @@ type Identity struct {
 	UpdatedAt     time.Time `json:"updated_at"`
 }
 
+// Role binds a stable set of permissions to an identity within one workspace.
 type Role struct {
 	SchemaVersion int          `json:"schema_version"`
 	ID            string       `json:"id"`
@@ -132,6 +145,8 @@ type Role struct {
 	UpdatedAt     time.Time    `json:"updated_at"`
 }
 
+// APIKey is the non-secret representation of an API credential. Token and
+// TokenHash are transient fields and must never cross an output boundary.
 type APIKey struct {
 	SchemaVersion int        `json:"schema_version"`
 	ID            string     `json:"id"`
@@ -150,6 +165,8 @@ type APIKey struct {
 	TokenHash string `json:"-"`
 }
 
+// CredentialRef names provider credential material without storing the secret
+// itself. References are rotated and revoked as durable workspace state.
 type CredentialRef struct {
 	SchemaVersion int        `json:"schema_version"`
 	ID            string     `json:"id"`
@@ -166,6 +183,8 @@ type CredentialRef struct {
 	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
+// AuthorizationDecision is the auditable result of one deterministic
+// permission check.
 type AuthorizationDecision struct {
 	SchemaVersion int        `json:"schema_version"`
 	RequestID     string     `json:"request_id"`
@@ -179,6 +198,8 @@ type AuthorizationDecision struct {
 	DecidedAt     time.Time  `json:"decided_at"`
 }
 
+// AuditActor is the minimal non-secret actor identity stored with an audit
+// decision.
 type AuditActor struct {
 	ID          string `json:"id"`
 	WorkspaceID string `json:"workspace_id"`
@@ -186,6 +207,7 @@ type AuditActor struct {
 	APIKeyID    string `json:"api_key_id,omitempty"`
 }
 
+// IdentityInput contains the bounded fields needed to create an identity.
 type IdentityInput struct {
 	WorkspaceID string
 	Subject     string
@@ -195,12 +217,15 @@ type IdentityInput struct {
 	Permissions []Permission
 }
 
+// APIKeyInput requests a new workspace-scoped API key for an identity.
 type APIKeyInput struct {
 	WorkspaceID string
 	IdentityID  string
 	ExpiresAt   *time.Time
 }
 
+// CredentialRefInput requests a provider credential reference without the
+// credential value itself.
 type CredentialRefInput struct {
 	WorkspaceID string
 	Provider    string
@@ -209,6 +234,8 @@ type CredentialRefInput struct {
 	ExpiresAt   *time.Time
 }
 
+// NormalizePermissions validates, deduplicates, and sorts capabilities so
+// authorization decisions remain deterministic.
 func NormalizePermissions(values []Permission) ([]Permission, error) {
 	seen := make(map[Permission]struct{}, len(values))
 	out := make([]Permission, 0, len(values))
@@ -233,12 +260,16 @@ func NormalizePermissions(values []Permission) ([]Permission, error) {
 	return out, nil
 }
 
+// Hash returns the stable identity of the decision, excluding timestamps so a
+// retry of the same authorization input compares equal.
 func (d AuthorizationDecision) Hash() string {
 	value := fmt.Sprintf("%d|%s|%s|%s|%s|%s|%s|%t|%s", d.SchemaVersion, d.RequestID, d.WorkspaceID, d.Actor.ID, d.Actor.Kind, d.Actor.APIKeyID, d.Permission, d.Allowed, d.Resource)
 	digest := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(digest[:])
 }
 
+// CredentialRefFingerprint provides a non-reversible comparison value for a
+// credential reference; it is not a replacement for secret storage.
 func CredentialRefFingerprint(reference string) string {
 	digest := sha256.Sum256([]byte(strings.TrimSpace(reference)))
 	return hex.EncodeToString(digest[:])

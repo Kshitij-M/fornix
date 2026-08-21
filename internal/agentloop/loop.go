@@ -1,3 +1,6 @@
+// Package agentloop implements Fornix's bounded deterministic agent state
+// machine. Postgres commits transitions; model and tool providers remain
+// external at-least-once effects.
 package agentloop
 
 import (
@@ -37,6 +40,8 @@ type RunStore interface {
 // optional so the deterministic in-memory loop tests and direct API paths can
 // continue using the original RunStore contract; a worker-owned context fails
 // closed when this stronger boundary is unavailable.
+// OwnedRunStore extends RunStore with scheduler lease validation and fenced
+// checkpoint commits for worker-owned execution.
 type OwnedRunStore interface {
 	RunStore
 	CommitOwned(context.Context, contracts.AgentRun, contracts.AgentRun, string, any, contracts.AgentRunLease) (contracts.AgentRun, error)
@@ -56,15 +61,20 @@ func workerLeaseFromContext(ctx context.Context) (contracts.AgentRunLease, bool)
 	return lease, ok
 }
 
+// ModelGateway is the provider-neutral model execution boundary used by the
+// loop.
 type ModelGateway interface {
 	Complete(context.Context, contracts.ModelRequest, ...contracts.ProviderRef) (contracts.ModelResponse, error)
 }
 
+// ToolInvoker is the policy-checked tool execution boundary used by the loop.
 type ToolInvoker interface {
 	Execute(context.Context, contracts.ToolRequest) (tool.Outcome, error)
 	Definition(string) (contracts.ToolDefinition, bool)
 }
 
+// ApprovalReader reads durable approval state without embedding approval logic
+// in the loop.
 type ApprovalReader interface {
 	GetApproval(context.Context, string, string) (contracts.ApprovalRequest, error)
 }
@@ -72,18 +82,26 @@ type ApprovalReader interface {
 // ContextRetriever is the deterministic retrieval boundary. The loop records
 // the resulting content hash and rendered evidence in its own history before
 // admitting a model call, so retrieval is never repeated implicitly on retry.
+// ContextRetriever compiles deterministic, workspace-scoped context for a run.
 type ContextRetriever interface {
 	Retrieve(context.Context, contracts.RetrievalRequest) (contracts.ContextPack, error)
 }
 
+// ContextRetrieverFunc adapts a function to ContextRetriever for focused tests
+// and small integrations.
 type ContextRetrieverFunc func(context.Context, contracts.RetrievalRequest) (contracts.ContextPack, error)
 
+// Retrieve implements ContextRetriever.
 func (f ContextRetrieverFunc) Retrieve(ctx context.Context, request contracts.RetrievalRequest) (contracts.ContextPack, error) {
 	return f(ctx, request)
 }
 
+// Clock supplies an injectable UTC time source for deterministic scheduling
+// and crash/retry tests.
 type Clock func() time.Time
 
+// Orchestrator composes durable run state with retrieval, model, tool, and
+// approval boundaries. It never treats in-memory state as authoritative.
 type Orchestrator struct {
 	Runs      RunStore
 	Models    ModelGateway
@@ -93,10 +111,12 @@ type Orchestrator struct {
 	Now       Clock
 }
 
+// New creates an orchestrator with the production UTC clock.
 func New(runs RunStore, models ModelGateway, tools ToolInvoker) *Orchestrator {
 	return &Orchestrator{Runs: runs, Models: models, Tools: tools, Now: func() time.Time { return time.Now().UTC() }}
 }
 
+// Create reserves an idempotent durable run through the configured store.
 func (o *Orchestrator) Create(ctx context.Context, request contracts.AgentRunRequest) (contracts.AgentRun, bool, error) {
 	if o == nil || o.Runs == nil {
 		return contracts.AgentRun{}, false, ErrLoopNotConfigured
@@ -136,6 +156,8 @@ func (o *Orchestrator) Run(ctx context.Context, workspaceID, runID string) (cont
 	return o.fail(ctx, decision.Run, &contracts.LoopFailure{Code: contracts.AgentFailureBudget, Message: "agent phase budget exceeded", Phase: decision.Run.Phase}, contracts.AgentTerminationBudget)
 }
 
+// Advance commits at most one state-machine transition from the current run
+// checkpoint.
 func (o *Orchestrator) Advance(ctx context.Context, workspaceID, runID string) (contracts.LoopDecision, error) {
 	if o == nil || o.Runs == nil || o.Models == nil || o.Tools == nil {
 		return contracts.LoopDecision{}, ErrLoopNotConfigured
@@ -177,6 +199,7 @@ func (o *Orchestrator) Advance(ctx context.Context, workspaceID, runID string) (
 	return o.advanceModel(ctx, run)
 }
 
+// Cancel durably terminates a non-terminal run and prevents subsequent work.
 func (o *Orchestrator) Cancel(ctx context.Context, workspaceID, runID, reason string) (contracts.LoopDecision, error) {
 	run, err := o.Runs.Get(ctx, strings.TrimSpace(workspaceID), strings.TrimSpace(runID))
 	if err != nil {
@@ -594,6 +617,8 @@ func toolFailure(err error) *contracts.ToolFailure {
 	return nil
 }
 
+// AgentToolFailureCode namespaces a tool failure for the durable agent-loop
+// failure contract.
 func AgentToolFailureCode(code string) string { return "tool:" + strings.TrimSpace(code) }
 
 func loopFailureFromError(err error, phase string) *contracts.LoopFailure {

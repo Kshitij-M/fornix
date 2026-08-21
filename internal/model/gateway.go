@@ -22,10 +22,14 @@ type Gateway struct {
 	Sleep    func(context.Context, time.Duration) error
 }
 
+// NewGateway creates a gateway with deterministic retry timing and optional
+// durable call recording.
 func NewGateway(registry *Registry, recorder CallRecorder) *Gateway {
 	return &Gateway{Registry: registry, Recorder: recorder, Sleep: sleepContext}
 }
 
+// Complete executes a bounded non-streaming request. Existing durable results
+// are replayed; in-flight duplicates fail closed to avoid a second call.
 func (g *Gateway) Complete(ctx context.Context, request contracts.ModelRequest, fallbacks ...contracts.ProviderRef) (contracts.ModelResponse, error) {
 	request = cloneModelRequest(request)
 	if err := request.Normalize(); err != nil {

@@ -11,6 +11,8 @@ import (
 	"time"
 )
 
+// IngestSchemaVersion is the wire/durable schema version for ingestion
+// contracts.
 const IngestSchemaVersion = 1
 
 const (
@@ -52,6 +54,8 @@ type RepositorySource struct {
 	Embedding      EmbeddingPolicy `json:"embedding,omitempty"`
 }
 
+// EmbeddingPolicy makes embedding work an explicit, bounded cost decision.
+// Ingestion remains valid when no embedding provider is available.
 type EmbeddingPolicy struct {
 	Enabled         bool  `json:"enabled"`
 	MaxChunks       int   `json:"max_chunks,omitempty"`
@@ -59,6 +63,8 @@ type EmbeddingPolicy struct {
 	RequireProvider bool  `json:"require_provider,omitempty"`
 }
 
+// RepositorySourceRequest is the untrusted source configuration accepted at
+// an API boundary. The server resolves and validates its configured mount.
 type RepositorySourceRequest struct {
 	WorkspaceID    string          `json:"workspace_id,omitempty"`
 	Repository     string          `json:"repository"`
@@ -73,6 +79,8 @@ type RepositorySourceRequest struct {
 	Embedding      EmbeddingPolicy `json:"embedding,omitempty"`
 }
 
+// IngestJobRequest is an idempotent request to create or resume one durable
+// repository ingestion job.
 type IngestJobRequest struct {
 	SchemaVersion  int              `json:"schema_version,omitempty"`
 	ID             string           `json:"id,omitempty"`
@@ -90,6 +98,8 @@ type IngestJobRequest struct {
 	BatchSize      int              `json:"batch_size,omitempty"`
 }
 
+// IngestFile is the immutable manifest identity and lifecycle state of one
+// normalized repository path.
 type IngestFile struct {
 	ID               string     `json:"id"`
 	JobID            string     `json:"job_id"`
@@ -109,6 +119,8 @@ type IngestFile struct {
 	IndexedAt        *time.Time `json:"indexed_at,omitempty"`
 }
 
+// IngestChunk is a deterministic bounded source range linked to its file and
+// content hash. Its content is indexed data, not authoritative source state.
 type IngestChunk struct {
 	ID               int64  `json:"id,omitempty"`
 	WorkspaceID      string `json:"workspace_id"`
@@ -122,6 +134,8 @@ type IngestChunk struct {
 	EmbeddingSkipped bool   `json:"embedding_skipped,omitempty"`
 }
 
+// IngestSymbol is the optional deterministic symbol index entry for a source
+// file; prior hashes remain auditable when a file changes.
 type IngestSymbol struct {
 	ID          string    `json:"id"`
 	WorkspaceID string    `json:"workspace_id"`
@@ -140,6 +154,8 @@ type IngestSymbol struct {
 	CreatedAt   time.Time `json:"created_at,omitempty"`
 }
 
+// IngestCheckpoint is the transactional resume cursor for a job. It advances
+// only with the batch of indexed rows it describes.
 type IngestCheckpoint struct {
 	JobID          string    `json:"job_id"`
 	WorkspaceID    string    `json:"workspace_id"`
@@ -157,6 +173,8 @@ type IngestCheckpoint struct {
 	UpdatedAt      time.Time `json:"updated_at,omitempty"`
 }
 
+// IngestJob is the durable workspace-scoped state of one repository snapshot
+// processing attempt.
 type IngestJob struct {
 	SchemaVersion     int              `json:"schema_version"`
 	ID                string           `json:"id"`
@@ -200,6 +218,8 @@ type IngestJob struct {
 	CompletedAt       *time.Time       `json:"completed_at,omitempty"`
 }
 
+// IngestReport is the bounded, redacted summary of an ingestion job. Detailed
+// output belongs in an artifact rather than an unbounded row.
 type IngestReport struct {
 	SchemaVersion     int    `json:"schema_version"`
 	JobID             string `json:"job_id"`
@@ -228,11 +248,14 @@ type IngestReport struct {
 	LastError         string `json:"last_error,omitempty"`
 }
 
+// IngestPage is the bounded operator read shape for ingestion jobs.
 type IngestPage struct {
 	Items      []IngestJob `json:"jobs"`
 	NextCursor string      `json:"next_cursor,omitempty"`
 }
 
+// IngestBatchRequest selects one deterministic batch from an existing job and
+// carries the task fence when ingestion is task-bound.
 type IngestBatchRequest struct {
 	WorkspaceID string   `json:"workspace_id,omitempty"`
 	JobID       string   `json:"job_id"`
@@ -243,6 +266,8 @@ type IngestBatchRequest struct {
 	Actor       ActorRef `json:"actor,omitempty"`
 }
 
+// Normalize applies safe limits and canonical path/policy defaults without
+// resolving an untrusted path outside the configured mount.
 func (s RepositorySource) Normalize() (RepositorySource, error) {
 	s.Repository = strings.TrimSpace(s.Repository)
 	s.SourceRoot = strings.TrimSpace(s.SourceRoot)
@@ -298,6 +323,8 @@ func (s RepositorySource) Normalize() (RepositorySource, error) {
 	return s, nil
 }
 
+// Normalize validates the request identity, workspace references, source
+// policy, and batch bounds before durable submission.
 func (r IngestJobRequest) Normalize() (IngestJobRequest, error) {
 	if r.SchemaVersion == 0 {
 		r.SchemaVersion = IngestSchemaVersion
@@ -339,6 +366,8 @@ func (r IngestJobRequest) Normalize() (IngestJobRequest, error) {
 	return r, nil
 }
 
+// RequestHash identifies logical ingestion input while excluding transport
+// identities that may change on a retry.
 func (r IngestJobRequest) RequestHash() string {
 	clone := r
 	clone.ID, clone.RequestID, clone.IdempotencyKey = "", "", ""
@@ -347,6 +376,7 @@ func (r IngestJobRequest) RequestHash() string {
 	return hex.EncodeToString(d[:])
 }
 
+// ManifestHash returns the deterministic identity of a sorted source manifest.
 func ManifestHash(files []IngestFile) string {
 	ordered := append([]IngestFile(nil), files...)
 	sort.Slice(ordered, func(i, j int) bool { return ordered[i].Path < ordered[j].Path })
@@ -357,6 +387,7 @@ func ManifestHash(files []IngestFile) string {
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// StableHash returns the replay-comparable identity of the bounded report.
 func (r IngestReport) StableHash() string {
 	clone := r
 	clone.ReportHash = ""
@@ -366,6 +397,7 @@ func (r IngestReport) StableHash() string {
 	return hex.EncodeToString(d[:])
 }
 
+// IsIngestTerminal reports whether an ingestion job accepts no more batches.
 func IsIngestTerminal(status string) bool {
 	switch strings.TrimSpace(status) {
 	case IngestSucceeded, IngestFailed, IngestCancelled:

@@ -23,36 +23,46 @@ var (
 	ErrIngestNotFound    = errors.New("repository ingest not found")
 )
 
+// WorkspacePage is a bounded cursor page of workspace metadata.
 type WorkspacePage struct {
 	Items      []contracts.Workspace `json:"workspaces"`
 	NextCursor string                `json:"next_cursor,omitempty"`
 }
 
+// IdentityPage is a bounded cursor page of workspace identities.
 type IdentityPage struct {
 	Items      []contracts.Identity `json:"identities"`
 	NextCursor string               `json:"next_cursor,omitempty"`
 }
 
+// RolePage is a bounded cursor page of workspace roles.
 type RolePage struct {
 	Items      []contracts.Role `json:"roles"`
 	NextCursor string           `json:"next_cursor,omitempty"`
 }
 
+// APIKeyPage is a bounded cursor page of non-secret API-key metadata.
 type APIKeyPage struct {
 	Items      []contracts.APIKey `json:"api_keys"`
 	NextCursor string             `json:"next_cursor,omitempty"`
 }
 
+// IngestPage is a bounded cursor page of repository-ingest compatibility
+// records.
 type IngestPage struct {
 	Items      []contracts.RepositoryIngest `json:"ingests"`
 	NextCursor string                       `json:"next_cursor,omitempty"`
 }
 
+// OperatorStore is the Postgres authority for workspace bootstrap and bounded
+// operator-facing registration records.
 type OperatorStore struct {
 	pool   *pgxpool.Pool
 	events *EventStore
 }
 
+// NewOperatorStore constructs an operator store and supplies a default event
+// store when events is nil.
 func NewOperatorStore(pool *pgxpool.Pool, events *EventStore) *OperatorStore {
 	if events == nil {
 		events = NewEventStore(pool)
@@ -60,6 +70,9 @@ func NewOperatorStore(pool *pgxpool.Pool, events *EventStore) *OperatorStore {
 	return &OperatorStore{pool: pool, events: events}
 }
 
+// Bootstrap atomically ensures a workspace, identity, role, API key, audit
+// record, and bootstrap event. Repeating the same request is idempotent; an
+// existing bearer token is never returned from storage.
 func (s *OperatorStore) Bootstrap(ctx context.Context, request contracts.WorkspaceBootstrapRequest) (contracts.WorkspaceBootstrapResult, error) {
 	if s == nil || s.pool == nil || s.events == nil {
 		return contracts.WorkspaceBootstrapResult{}, fmt.Errorf("operator store is not configured")
@@ -219,6 +232,7 @@ func (s *OperatorStore) Bootstrap(ctx context.Context, request contracts.Workspa
 	return contracts.WorkspaceBootstrapResult{Workspace: workspace, Identity: identity, Role: role, APIKey: apiKey, APIKeyToken: token, Created: !workspaceExisted, TokenCreated: apiKeyCreated}, nil
 }
 
+// GetWorkspace reads one workspace by its authoritative identifier.
 func (s *OperatorStore) GetWorkspace(ctx context.Context, id string) (contracts.Workspace, error) {
 	if s == nil || s.pool == nil {
 		return contracts.Workspace{}, fmt.Errorf("operator store is not configured")
@@ -231,6 +245,7 @@ func (s *OperatorStore) GetWorkspace(ctx context.Context, id string) (contracts.
 	return workspace, err
 }
 
+// ListWorkspaces returns a bounded, deterministic page of workspaces.
 func (s *OperatorStore) ListWorkspaces(ctx context.Context, limit int, cursor string) (WorkspacePage, error) {
 	limit = boundedOperatorLimit(limit)
 	query := `SELECT 1,id,display_name,status,default_provider,tool_root,created_at,updated_at FROM fornix.workspaces WHERE id > $1 ORDER BY id LIMIT $2`
@@ -254,6 +269,9 @@ func (s *OperatorStore) ListWorkspaces(ctx context.Context, limit int, cursor st
 	return page, rows.Err()
 }
 
+// UpsertRepositoryIngest preserves the legacy repository-ingest surface while
+// applying workspace/idempotency checks. New ingestion work should use
+// IngestStore for durable checkpoints.
 func (s *OperatorStore) UpsertRepositoryIngest(ctx context.Context, input contracts.RepositoryIngestRequest) (contracts.RepositoryIngest, bool, error) {
 	normalized, err := input.Normalize()
 	if err != nil {
@@ -289,6 +307,7 @@ func (s *OperatorStore) UpsertRepositoryIngest(ctx context.Context, input contra
 	return record, true, nil
 }
 
+// GetRepositoryIngest reads one compatibility record within workspaceID.
 func (s *OperatorStore) GetRepositoryIngest(ctx context.Context, workspaceID, id string) (contracts.RepositoryIngest, error) {
 	var record contracts.RepositoryIngest
 	err := s.pool.QueryRow(ctx, `SELECT 1,id,workspace_id,repository,source_root,manifest_hash,request_hash,idempotency_key,status,file_count,chunk_count,symbol_count,byte_count,last_error,created_at,updated_at FROM fornix.repository_ingests WHERE workspace_id=$1 AND id=$2`, strings.TrimSpace(workspaceID), strings.TrimSpace(id)).Scan(&record.SchemaVersion, &record.ID, &record.WorkspaceID, &record.Repository, &record.SourceRoot, &record.ManifestHash, &record.RequestHash, &record.IdempotencyKey, &record.Status, &record.FileCount, &record.ChunkCount, &record.SymbolCount, &record.ByteCount, &record.LastError, &record.CreatedAt, &record.UpdatedAt)
@@ -298,6 +317,8 @@ func (s *OperatorStore) GetRepositoryIngest(ctx context.Context, workspaceID, id
 	return record, err
 }
 
+// ListRepositoryIngests returns a bounded, ID-ordered page within one
+// workspace.
 func (s *OperatorStore) ListRepositoryIngests(ctx context.Context, workspaceID string, limit int, cursor string) (IngestPage, error) {
 	limit = boundedOperatorLimit(limit)
 	rows, err := s.pool.Query(ctx, `SELECT 1,id,workspace_id,repository,source_root,manifest_hash,request_hash,idempotency_key,status,file_count,chunk_count,symbol_count,byte_count,last_error,created_at,updated_at FROM fornix.repository_ingests WHERE workspace_id=$1 AND id > $2 ORDER BY id LIMIT $3`, strings.TrimSpace(workspaceID), strings.TrimSpace(cursor), limit+1)

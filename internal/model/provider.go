@@ -1,3 +1,6 @@
+// Package model provides the provider-neutral gateway for bounded model and
+// embedding calls. It keeps credentials at the provider boundary and records
+// durable at-least-once execution through the model-call ledger.
 package model
 
 import (
@@ -51,10 +54,13 @@ type Registry struct {
 	providers map[string]Provider
 }
 
+// NewRegistry creates an empty deterministic provider registry.
 func NewRegistry() *Registry {
 	return &Registry{providers: make(map[string]Provider)}
 }
 
+// Register adds a provider and all of its aliases atomically. Collisions are
+// rejected rather than resolved by registration order.
 func (r *Registry) Register(provider Provider) error {
 	if r == nil {
 		return fmt.Errorf("%w: registry is nil", ErrProviderNotFound)
@@ -79,6 +85,8 @@ func (r *Registry) Register(provider Provider) error {
 	return nil
 }
 
+// Lookup returns the provider registered under a case-insensitive name or
+// alias.
 func (r *Registry) Lookup(name string) (Provider, bool) {
 	if r == nil {
 		return nil, false
@@ -93,6 +101,7 @@ func (r *Registry) Lookup(name string) (Provider, bool) {
 	return provider, ok
 }
 
+// Names returns canonical provider names in stable order.
 func (r *Registry) Names() []string {
 	if r == nil {
 		return nil
@@ -157,6 +166,8 @@ type FailureError struct {
 	Evidence []byte
 }
 
+// Error returns a redacted provider failure summary. Evidence is kept
+// separately and is never interpolated into this message.
 func (e *FailureError) Error() string {
 	if e == nil {
 		return "model provider failure"

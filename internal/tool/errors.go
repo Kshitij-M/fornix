@@ -16,14 +16,20 @@ var (
 	ErrStaleTaskFence   = errors.New("tool task fence is stale")
 )
 
+// FailureError carries the stable redacted failure classification returned by
+// policy, approval, execution, and durable lifecycle boundaries.
 type FailureError struct{ Failure contracts.ToolFailure }
 
+// Error returns a concise failure summary without output or secret material.
 func (e *FailureError) Error() string {
 	if e == nil {
 		return ""
 	}
 	return fmt.Sprintf("tool failure code=%s message=%s", e.Failure.Code, e.Failure.Message)
 }
+
+// Unwrap maps stable tool failure codes to sentinel errors for callers that
+// need category checks without parsing strings.
 func (e *FailureError) Unwrap() error {
 	switch e.Failure.Code {
 	case contracts.ToolFailureUnauthorized:

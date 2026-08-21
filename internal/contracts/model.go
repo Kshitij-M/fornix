@@ -284,6 +284,7 @@ func cloneModelToolDefinitionsForNormalize(tools []ModelToolDefinition) []ModelT
 	return cloned
 }
 
+// Normalize validates the JSON Schema boundary exposed to a provider.
 func (c *ModelToolDefinition) Normalize() error {
 	if c == nil {
 		return fmt.Errorf("tool definition is nil")
@@ -302,6 +303,8 @@ func (c *ModelToolDefinition) Normalize() error {
 	return nil
 }
 
+// Normalize validates a structured model tool call before it can reach the
+// tool policy and argv adapter.
 func (c *ModelToolCall) Normalize() error {
 	if c == nil {
 		return fmt.Errorf("tool call is nil")
@@ -350,6 +353,7 @@ func validateModelEntityRef(ref *EntityRef, kind, workspaceID string) error {
 	return nil
 }
 
+// Normalize fills bounded request limits and rejects impossible budgets.
 func (b *ModelBudget) Normalize() error {
 	if b.MaxInputBytes == 0 {
 		b.MaxInputBytes = MaxModelInputBytes
@@ -401,6 +405,8 @@ type ModelUsage struct {
 	Source           string `json:"source,omitempty"`
 }
 
+// Normalize validates usage and derives total tokens when a provider omits
+// them. Source identifies whether the value was measured or estimated.
 func (u *ModelUsage) Normalize() error {
 	if u.InputTokens < 0 || u.OutputTokens < 0 || u.TotalTokens < 0 || u.CacheReadTokens < 0 || u.CacheWriteTokens < 0 {
 		return fmt.Errorf("model usage cannot be negative")
@@ -415,6 +421,9 @@ func (u *ModelUsage) Normalize() error {
 	return nil
 }
 
+// ModelCost is the reconciled monetary observation for one model call. It is
+// accounting metadata, not a guarantee that a provider billed exactly this
+// amount.
 type ModelCost struct {
 	Currency      string  `json:"currency"`
 	InputCostUSD  float64 `json:"input_cost_usd"`
@@ -423,6 +432,7 @@ type ModelCost struct {
 	Source        string  `json:"source,omitempty"`
 }
 
+// Normalize applies the currency default and validates non-negative costs.
 func (c *ModelCost) Normalize() error {
 	if c.Currency == "" {
 		c.Currency = "USD"
@@ -456,6 +466,8 @@ type ModelResponse struct {
 	WirePayload json.RawMessage `json:"-"`
 }
 
+// Normalize validates and hashes a provider-neutral response while leaving
+// raw wire data outside normal serialization.
 func (r *ModelResponse) Normalize() error {
 	if r == nil {
 		return fmt.Errorf("model response is nil")
@@ -512,6 +524,8 @@ type ModelStreamEvent struct {
 	ProviderRequestID string         `json:"provider_request_id,omitempty"`
 }
 
+// HasContent reports whether an event has crossed the point after which a
+// gateway must not retry through a fallback provider.
 func (e ModelStreamEvent) HasContent() bool {
 	if e.Delta != "" {
 		return true
@@ -532,6 +546,7 @@ type ModelFailure struct {
 	ContentEmitted    bool   `json:"content_emitted"`
 }
 
+// Normalize validates the redacted, machine-readable failure classification.
 func (f ModelFailure) Normalize() (ModelFailure, error) {
 	f.Code = strings.TrimSpace(strings.ToLower(f.Code))
 	f.Message = strings.TrimSpace(f.Message)
@@ -555,6 +570,8 @@ type RetryPolicy struct {
 	RetryableCodes []string `json:"retryable_codes"`
 }
 
+// DefaultRetryPolicy returns bounded retryable failure classes with no jitter,
+// so retry schedules are reproducible during replay.
 func DefaultRetryPolicy() RetryPolicy {
 	return RetryPolicy{
 		MaxAttempts:    3,
@@ -564,6 +581,7 @@ func DefaultRetryPolicy() RetryPolicy {
 	}
 }
 
+// Normalize fills the default retry policy and canonicalizes its failure codes.
 func (p *RetryPolicy) Normalize() error {
 	if p.MaxAttempts == 0 && p.InitialDelayMS == 0 && p.MaxDelayMS == 0 && len(p.RetryableCodes) == 0 {
 		*p = DefaultRetryPolicy()
@@ -586,6 +604,7 @@ func (p *RetryPolicy) Normalize() error {
 	return nil
 }
 
+// Allows reports whether a failure class may be retried by this policy.
 func (p RetryPolicy) Allows(code string) bool {
 	code = strings.TrimSpace(strings.ToLower(code))
 	for _, candidate := range p.RetryableCodes {
@@ -630,7 +649,7 @@ type ModelCallRecord struct {
 }
 
 // ModelCallResult is the store-neutral terminal update passed to the model
-// call recorder.
+// call recorder. External provider execution remains at-least-once.
 type ModelCallResult struct {
 	WorkspaceID       string
 	RequestID         string
@@ -645,6 +664,8 @@ type ModelCallResult struct {
 	ResponseEvidence  json.RawMessage
 }
 
+// EstimateModelTokens provides a conservative, provider-independent token
+// estimate for admission and cost budgeting.
 func EstimateModelTokens(text string) int {
 	if text == "" {
 		return 0
@@ -652,6 +673,8 @@ func EstimateModelTokens(text string) int {
 	return (utf8.RuneCountInString(text) + 3) / 4
 }
 
+// EstimatedInputBytes returns the bounded input-size estimate used before a
+// provider call is admitted.
 func (r ModelRequest) EstimatedInputBytes() int {
 	value := r.Prompt
 	for _, message := range r.Messages {
@@ -660,6 +683,7 @@ func (r ModelRequest) EstimatedInputBytes() int {
 	return len(value)
 }
 
+// EstimatedInputTokens returns the provider-independent input token estimate.
 func (r ModelRequest) EstimatedInputTokens() int {
 	value := r.Prompt
 	for _, message := range r.Messages {

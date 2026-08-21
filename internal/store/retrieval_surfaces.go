@@ -34,6 +34,7 @@ type RetrievalSurfaceStore struct {
 	failureHook func(string) error
 }
 
+// NewRetrievalSurfaceStore constructs the append-only capture store.
 func NewRetrievalSurfaceStore(pool *pgxpool.Pool) *RetrievalSurfaceStore {
 	return &RetrievalSurfaceStore{pool: pool}
 }
@@ -46,6 +47,9 @@ func (s *RetrievalSurfaceStore) SetFailureHook(hook func(string) error) {
 	}
 }
 
+// Capture records one redacted retrieval surface idempotently. The capture is
+// diagnostic/evaluation history; authoritative evidence and source records stay
+// in their own stores.
 func (s *RetrievalSurfaceStore) Capture(ctx context.Context, surface contracts.RetrievalSurface) (contracts.RetrievalSurface, bool, error) {
 	if s == nil || s.pool == nil {
 		return contracts.RetrievalSurface{}, false, fmt.Errorf("retrieval surface store is not configured")
@@ -100,6 +104,7 @@ func (s *RetrievalSurfaceStore) Capture(ctx context.Context, surface contracts.R
 	return stored, commandTag.RowsAffected() == 1, nil
 }
 
+// Get reads one captured surface within workspaceID.
 func (s *RetrievalSurfaceStore) Get(ctx context.Context, workspaceID, id string) (contracts.RetrievalSurface, error) {
 	if s == nil || s.pool == nil {
 		return contracts.RetrievalSurface{}, fmt.Errorf("retrieval surface store is not configured")
@@ -159,6 +164,8 @@ func (s *RetrievalSurfaceStore) GetMany(ctx context.Context, workspaceID string,
 	return result, nil
 }
 
+// List returns a bounded page ordered by capture time and ID so evaluation and
+// operator pagination are repeatable.
 func (s *RetrievalSurfaceStore) List(ctx context.Context, workspaceID string, limit int, cursor string) (contracts.RetrievalSurfacePage, error) {
 	if s == nil || s.pool == nil {
 		return contracts.RetrievalSurfacePage{}, fmt.Errorf("retrieval surface store is not configured")

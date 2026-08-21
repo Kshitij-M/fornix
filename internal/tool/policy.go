@@ -10,6 +10,7 @@ import (
 	"github.com/omaveda/fornix/internal/contracts"
 )
 
+// PolicyDecision is the selected bounded execution mode for one request.
 type PolicyDecision struct {
 	Rule contracts.ToolPolicyRule
 	Mode string
@@ -21,6 +22,8 @@ type Policy struct {
 	rules []contracts.ToolPolicyRule
 }
 
+// NewPolicy validates and deterministically orders policy rules. The empty
+// policy denies all execution.
 func NewPolicy(rules []contracts.ToolPolicyRule) (*Policy, error) {
 	copyRules := make([]contracts.ToolPolicyRule, len(rules))
 	for i, rule := range rules {
@@ -46,6 +49,8 @@ func NewPolicy(rules []contracts.ToolPolicyRule) (*Policy, error) {
 	return &Policy{rules: copyRules}, nil
 }
 
+// Evaluate applies workspace, actor, entity, argv, environment, and workdir
+// constraints. No matching rule is an authorization failure.
 func (p *Policy) Evaluate(req contracts.ToolRequest, def contracts.ToolDefinition) (PolicyDecision, error) {
 	if p == nil {
 		return PolicyDecision{}, fmt.Errorf("%w: no policy configured", ErrUnauthorized)

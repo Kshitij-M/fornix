@@ -103,6 +103,8 @@ type ArtifactManifest struct {
 	Metadata      map[string]string `json:"metadata,omitempty"`
 }
 
+// ArtifactProvenanceLink connects immutable artifacts without changing either
+// artifact's content identity.
 type ArtifactProvenanceLink struct {
 	SchemaVersion int               `json:"schema_version"`
 	ID            int64             `json:"id"`
@@ -114,6 +116,8 @@ type ArtifactProvenanceLink struct {
 	CreatedAt     time.Time         `json:"created_at"`
 }
 
+// ArtifactDisclosureRequest selects one content-addressed artifact and a
+// bounded gist, detail, or raw view.
 type ArtifactDisclosureRequest struct {
 	SchemaVersion     int    `json:"schema_version,omitempty"`
 	WorkspaceID       string `json:"workspace_id"`
@@ -143,6 +147,8 @@ type ArtifactCreateRequest struct {
 	IdempotencyKey string           `json:"idempotency_key,omitempty"`
 }
 
+// ArtifactDisclosureResult is a budgeted view that preserves the authoritative
+// content hash and provenance references.
 type ArtifactDisclosureResult struct {
 	SchemaVersion     int                      `json:"schema_version"`
 	WorkspaceID       string                   `json:"workspace_id"`
@@ -164,6 +170,8 @@ type ArtifactDisclosureResult struct {
 	ContentViewHash   string                   `json:"content_view_hash"`
 }
 
+// RetentionPolicy describes explicit archive and deletion deadlines. Durable
+// references override deletion eligibility.
 type RetentionPolicy struct {
 	SchemaVersion int        `json:"schema_version"`
 	RetainUntil   *time.Time `json:"retain_until,omitempty"`
@@ -172,6 +180,8 @@ type RetentionPolicy struct {
 	AllowDelete   bool       `json:"allow_delete"`
 }
 
+// Normalize validates the artifact selector, disclosure level, and hard
+// disclosure budgets.
 func (r ArtifactDisclosureRequest) Normalize() (ArtifactDisclosureRequest, error) {
 	r.WorkspaceID = strings.TrimSpace(r.WorkspaceID)
 	r.ContentHash = strings.ToLower(strings.TrimSpace(r.ContentHash))
@@ -208,6 +218,7 @@ func (r ArtifactDisclosureRequest) Normalize() (ArtifactDisclosureRequest, error
 	return r, nil
 }
 
+// Normalize validates the ordering of retention, archive, and deletion dates.
 func (r RetentionPolicy) Normalize() (RetentionPolicy, error) {
 	if r.SchemaVersion == 0 {
 		r.SchemaVersion = ArtifactSchemaVersion
@@ -221,11 +232,14 @@ func (r RetentionPolicy) Normalize() (RetentionPolicy, error) {
 	return r, nil
 }
 
+// ArtifactContentHash returns the SHA-256 identity of immutable raw bytes.
 func ArtifactContentHash(raw []byte) string {
 	digest := sha256.Sum256(raw)
 	return hex.EncodeToString(digest[:])
 }
 
+// Normalize bounds derived disclosure views and computes their hashes without
+// changing the raw artifact identity.
 func (m ArtifactManifest) Normalize() (ArtifactManifest, error) {
 	if m.SchemaVersion == 0 {
 		m.SchemaVersion = ArtifactSchemaVersion
@@ -255,6 +269,7 @@ func (m ArtifactManifest) Normalize() (ArtifactManifest, error) {
 	return m, nil
 }
 
+// JSON returns the canonical normalized manifest encoding for durable storage.
 func (m ArtifactManifest) JSON() ([]byte, error) {
 	normalized, err := m.Normalize()
 	if err != nil {

@@ -14,15 +14,20 @@ import (
 	"github.com/omaveda/fornix/internal/contracts"
 )
 
+// EvaluationStore persists bounded, replay-only evaluation datasets, runs,
+// and results. It never executes an external model or tool.
 type EvaluationStore struct {
 	pool      *pgxpool.Pool
 	artifacts *ArtifactStore
 }
 
+// NewEvaluationStore creates the Postgres evaluation store.
 func NewEvaluationStore(pool *pgxpool.Pool) *EvaluationStore {
 	return &EvaluationStore{pool: pool, artifacts: NewArtifactStore(pool)}
 }
 
+// CreateDataset idempotently registers an immutable versioned evaluation
+// dataset and rejects conflicting reuse of its identity.
 func (s *EvaluationStore) CreateDataset(ctx context.Context, dataset contracts.EvalDataset) (contracts.EvalDataset, bool, error) {
 	if s == nil || s.pool == nil {
 		return contracts.EvalDataset{}, false, fmt.Errorf("evaluation store is not configured")
@@ -53,6 +58,7 @@ func (s *EvaluationStore) CreateDataset(ctx context.Context, dataset contracts.E
 	return stored, tag.RowsAffected() == 1, nil
 }
 
+// GetDataset reads a versioned dataset within one workspace.
 func (s *EvaluationStore) GetDataset(ctx context.Context, workspaceID, name string, version int) (contracts.EvalDataset, error) {
 	if s == nil || s.pool == nil {
 		return contracts.EvalDataset{}, fmt.Errorf("evaluation store is not configured")
@@ -70,6 +76,7 @@ func (s *EvaluationStore) GetDataset(ctx context.Context, workspaceID, name stri
 	return dataset, nil
 }
 
+// GetDatasetByID reads a dataset by its workspace-scoped identity.
 func (s *EvaluationStore) GetDatasetByID(ctx context.Context, workspaceID, id string) (contracts.EvalDataset, error) {
 	if s == nil || s.pool == nil {
 		return contracts.EvalDataset{}, fmt.Errorf("evaluation store is not configured")
@@ -97,6 +104,7 @@ func (s *EvaluationStore) GetDatasetByID(ctx context.Context, workspaceID, id st
 	return dataset, nil
 }
 
+// StartRun creates or replays an idempotent bounded evaluation run.
 func (s *EvaluationStore) StartRun(ctx context.Context, run contracts.EvalRun) (contracts.EvalRun, bool, error) {
 	if s == nil || s.pool == nil {
 		return contracts.EvalRun{}, false, fmt.Errorf("evaluation store is not configured")
@@ -139,6 +147,7 @@ func (s *EvaluationStore) StartRun(ctx context.Context, run contracts.EvalRun) (
 	return stored, tag.RowsAffected() == 1, nil
 }
 
+// GetRun reads one evaluation run and its optional artifact-backed report.
 func (s *EvaluationStore) GetRun(ctx context.Context, workspaceID, id string) (contracts.EvalRun, error) {
 	if s == nil || s.pool == nil {
 		return contracts.EvalRun{}, fmt.Errorf("evaluation store is not configured")
@@ -171,6 +180,8 @@ func (s *EvaluationStore) GetRun(ctx context.Context, workspaceID, id string) (c
 	return run, nil
 }
 
+// RecordResult idempotently stores one deterministic case result and updates
+// aggregate counters only for a newly inserted case.
 func (s *EvaluationStore) RecordResult(ctx context.Context, result contracts.EvalResult) (contracts.EvalResult, bool, error) {
 	if s == nil || s.pool == nil {
 		return contracts.EvalResult{}, false, fmt.Errorf("evaluation store is not configured")

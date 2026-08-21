@@ -22,6 +22,9 @@ var (
 	ErrToolRunTerminal      = errors.New("tool run is already terminal")
 )
 
+// ToolRunStore is the Postgres authority for durable tool reservations,
+// approvals, results, and artifact links. External execution remains
+// at-least-once; this store makes the durable effect idempotent and fenced.
 type ToolRunStore struct {
 	pool          *pgxpool.Pool
 	events        *EventStore
@@ -29,6 +32,7 @@ type ToolRunStore struct {
 	observability *ObservabilityStore
 }
 
+// NewToolRunStore constructs the tool-run store and its artifact boundary.
 func NewToolRunStore(pool *pgxpool.Pool, events *EventStore) *ToolRunStore {
 	if events == nil {
 		events = NewEventStore(pool)
@@ -36,6 +40,7 @@ func NewToolRunStore(pool *pgxpool.Pool, events *EventStore) *ToolRunStore {
 	return &ToolRunStore{pool: pool, events: events, artifacts: NewArtifactStore(pool)}
 }
 
+// SetObservability attaches the optional transactional observation sink.
 func (s *ToolRunStore) SetObservability(observer *ObservabilityStore) {
 	if s != nil {
 		s.observability = observer
@@ -50,6 +55,8 @@ func (s *ToolRunStore) SetArtifactFailureHook(hook func(string) error) {
 	}
 }
 
+// Reserve creates or reuses a workspace-scoped tool run keyed by request
+// identity. It records only redacted request evidence.
 func (s *ToolRunStore) Reserve(ctx context.Context, req contracts.ToolRequest, mode string) (contracts.ToolRun, bool, error) {
 	if s == nil || s.pool == nil {
 		return contracts.ToolRun{}, false, fmt.Errorf("tool run store is not configured")
@@ -118,6 +125,8 @@ func (s *ToolRunStore) Reserve(ctx context.Context, req contracts.ToolRequest, m
 	return run, false, nil
 }
 
+// CreateApproval durably places a tool run into an approval wait state with a
+// bounded expiry and auditable request identity.
 func (s *ToolRunStore) CreateApproval(ctx context.Context, run contracts.ToolRun, req contracts.ToolRequest, ttl time.Duration) (contracts.ApprovalRequest, error) {
 	if ttl <= 0 {
 		ttl = 10 * time.Minute
@@ -184,10 +193,14 @@ func (s *ToolRunStore) CreateApproval(ctx context.Context, run contracts.ToolRun
 	return approval, nil
 }
 
+// SetAwaitingApproval returns the canonical approval-waiting tool run. The
+// state transition is owned by CreateApproval and remains idempotent.
 func (s *ToolRunStore) SetAwaitingApproval(ctx context.Context, run contracts.ToolRun, approval contracts.ApprovalRequest) (contracts.ToolRun, error) {
 	return s.Get(ctx, run.WorkspaceID, run.IdempotencyKey)
 }
 
+// MarkStarted transitions a non-terminal run to execution after validating its
+// task fence.
 func (s *ToolRunStore) MarkStarted(ctx context.Context, run contracts.ToolRun) (contracts.ToolRun, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -226,6 +239,9 @@ func (s *ToolRunStore) MarkStarted(ctx context.Context, run contracts.ToolRun) (
 	return updated, nil
 }
 
+// Finish commits a tool result, redacted evidence, artifact links, lifecycle
+// event, and optional observations atomically. A stale task worker is rejected
+// before any authoritative effect is written.
 func (s *ToolRunStore) Finish(ctx context.Context, run contracts.ToolRun, result contracts.ToolResult) (contracts.ToolRun, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -411,14 +427,18 @@ func artifactReferenceFromRef(ref contracts.ArtifactRef) contracts.ArtifactRefer
 	return contracts.ArtifactReference{Ref: fmt.Sprintf("artifact:%d", ref.ArtifactID), Kind: ref.Role, SHA256: ref.ContentHash, MediaType: ref.MediaType, SizeBytes: ref.ByteSize}
 }
 
+// Get reads one tool run by workspace-scoped idempotency key.
 func (s *ToolRunStore) Get(ctx context.Context, workspaceID, idempotencyKey string) (contracts.ToolRun, error) {
 	return readToolRun(ctx, s.pool, strings.TrimSpace(workspaceID), strings.TrimSpace(idempotencyKey))
 }
 
+// GetApproval reads one approval request within its workspace.
 func (s *ToolRunStore) GetApproval(ctx context.Context, workspaceID, approvalID string) (contracts.ApprovalRequest, error) {
 	return readApproval(ctx, s.pool, strings.TrimSpace(workspaceID), strings.TrimSpace(approvalID))
 }
 
+// DecideApproval commits one approval decision idempotently and leaves the
+// request auditable for replay.
 func (s *ToolRunStore) DecideApproval(ctx context.Context, decision contracts.ApprovalDecision) (contracts.ApprovalRequest, error) {
 	decision.WorkspaceID, decision.ApprovalID, decision.Decision = strings.TrimSpace(decision.WorkspaceID), strings.TrimSpace(decision.ApprovalID), strings.ToLower(strings.TrimSpace(decision.Decision))
 	if decision.WorkspaceID == "" || decision.ApprovalID == "" {
@@ -480,6 +500,8 @@ func (s *ToolRunStore) DecideApproval(ctx context.Context, decision contracts.Ap
 	return approval, nil
 }
 
+// ValidateTaskFence verifies that a task-bound tool request still owns the
+// current workspace task fence.
 func (s *ToolRunStore) ValidateTaskFence(ctx context.Context, req contracts.ToolRequest) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -662,4 +684,6 @@ func toolRequestFromRun(run contracts.ToolRun) contracts.ToolRequest {
 func toolRequestFromApproval(a contracts.ApprovalRequest) contracts.ToolRequest {
 	return contracts.ToolRequest{SchemaVersion: contracts.ToolSchemaVersion, RequestID: a.RequestID, IdempotencyKey: a.RequestID, WorkspaceID: a.WorkspaceID, Actor: a.Actor, Task: a.Task, Session: a.Session, ToolID: a.ToolID}
 }
+
+// IsToolTerminal reports whether a tool run can no longer be advanced.
 func IsToolTerminal(status string) bool { return contracts.IsToolTerminal(status) }

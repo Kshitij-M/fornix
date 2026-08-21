@@ -7,6 +7,8 @@ const (
 	MaxArtifactOperationBatch     = 1000
 )
 
+// ArtifactBackfillRequest selects a bounded, resumable output backfill. Dry
+// runs must not create artifacts or links.
 type ArtifactBackfillRequest struct {
 	WorkspaceID   string   `json:"workspace_id"`
 	SourceKind    string   `json:"source_kind"`
@@ -18,6 +20,7 @@ type ArtifactBackfillRequest struct {
 	CorrelationID string   `json:"correlation_id,omitempty"`
 }
 
+// ArtifactBackfillResult reports one deterministic backfill page and cursor.
 type ArtifactBackfillResult struct {
 	WorkspaceID string `json:"workspace_id"`
 	SourceKind  string `json:"source_kind"`
@@ -32,6 +35,8 @@ type ArtifactBackfillResult struct {
 	Skipped     int    `json:"skipped"`
 }
 
+// ArtifactRetentionSweepRequest selects a bounded retention operation. Only
+// explicit policy and unreferenced artifacts may be changed.
 type ArtifactRetentionSweepRequest struct {
 	WorkspaceID   string    `json:"workspace_id"`
 	BatchSize     int       `json:"batch_size,omitempty"`
@@ -42,6 +47,8 @@ type ArtifactRetentionSweepRequest struct {
 	CorrelationID string    `json:"correlation_id,omitempty"`
 }
 
+// ArtifactRetentionSweepResult reports archive, deletion, blocking, and
+// integrity outcomes for one retention page.
 type ArtifactRetentionSweepResult struct {
 	WorkspaceID string `json:"workspace_id"`
 	BatchSize   int    `json:"batch_size"`
@@ -54,6 +61,7 @@ type ArtifactRetentionSweepResult struct {
 	NextCursor  string `json:"next_cursor,omitempty"`
 }
 
+// ArtifactIntegrityRequest selects a bounded artifact verification page.
 type ArtifactIntegrityRequest struct {
 	WorkspaceID string `json:"workspace_id"`
 	Cursor      int64  `json:"cursor,omitempty"`
@@ -61,6 +69,8 @@ type ArtifactIntegrityRequest struct {
 	DryRun      bool   `json:"dry_run,omitempty"`
 }
 
+// ArtifactIntegrityReport is the deterministic result of one verification
+// page, including corrupt artifact identities.
 type ArtifactIntegrityReport struct {
 	WorkspaceID string  `json:"workspace_id"`
 	Cursor      int64   `json:"cursor,omitempty"`
@@ -73,6 +83,8 @@ type ArtifactIntegrityReport struct {
 	CorruptIDs  []int64 `json:"corrupt_ids,omitempty"`
 }
 
+// ArtifactStorageMetrics separates logical bytes from deduplicated physical
+// bytes for workspace-scoped storage accounting.
 type ArtifactStorageMetrics struct {
 	WorkspaceID        string  `json:"workspace_id"`
 	Artifacts          int64   `json:"artifacts"`

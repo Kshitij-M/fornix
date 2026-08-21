@@ -29,6 +29,8 @@ type AgentRunLease struct {
 	LeaseTTLMS  int64      `json:"lease_ttl_ms,omitempty"`
 }
 
+// AgentRunLeaseResult reports whether a durable run lease was acquired,
+// reused, or taken over.
 type AgentRunLeaseResult struct {
 	Lease    AgentRunLease `json:"lease"`
 	Acquired bool          `json:"acquired"`
@@ -36,6 +38,7 @@ type AgentRunLeaseResult struct {
 	Reused   bool          `json:"reused"`
 }
 
+// AgentRunClaim combines a runnable run with its current fencing lease.
 type AgentRunClaim struct {
 	Run      AgentRun      `json:"run"`
 	Lease    AgentRunLease `json:"lease"`
@@ -43,6 +46,8 @@ type AgentRunClaim struct {
 	Reused   bool          `json:"reused"`
 }
 
+// ValidateAgentRunLeaseIdentity rejects incomplete ownership identities before
+// they can be used in a lease or fenced mutation.
 func ValidateAgentRunLeaseIdentity(workspaceID, runID, ownerID string) error {
 	if strings.TrimSpace(workspaceID) == "" {
 		return fmt.Errorf("workspace_id is required")
@@ -56,11 +61,14 @@ func ValidateAgentRunLeaseIdentity(workspaceID, runID, ownerID string) error {
 	return nil
 }
 
+// ActiveAt reports whether this exact lease is live at the supplied authority
+// time. Callers must still validate the token transactionally in Postgres.
 func (l AgentRunLease) ActiveAt(now time.Time) bool {
 	return ValidateAgentRunLeaseIdentity(l.WorkspaceID, l.RunID, l.OwnerID) == nil &&
 		l.Fence > 0 && l.ReleasedAt == nil && l.LeaseUntil.After(now)
 }
 
+// NormalizeAgentRunLeaseTTL clamps a worker renewal hint to safe bounds.
 func NormalizeAgentRunLeaseTTL(ttl time.Duration) time.Duration {
 	if ttl <= 0 {
 		ttl = DefaultAgentRunLeaseTTL

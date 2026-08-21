@@ -36,6 +36,8 @@ type ArtifactStore struct {
 	failureHook func(string) error
 }
 
+// ArtifactPutInput is the transactional content-addressed artifact write
+// request. Raw bytes are immutable and scoped to one workspace.
 type ArtifactPutInput struct {
 	WorkspaceID      string
 	Kind             string
@@ -53,6 +55,8 @@ type ArtifactPutInput struct {
 	NonAuthoritative bool
 }
 
+// ArtifactPutResult returns the canonical artifact and reference, including
+// whether this request created new durable content.
 type ArtifactPutResult struct {
 	Artifact   contracts.Artifact    `json:"artifact"`
 	Reference  contracts.ArtifactRef `json:"reference"`
@@ -60,6 +64,7 @@ type ArtifactPutResult struct {
 	RefCreated bool                  `json:"reference_created"`
 }
 
+// ArtifactProvenanceInput requests a workspace-local immutable artifact link.
 type ArtifactProvenanceInput struct {
 	WorkspaceID  string
 	FromArtifact int64
@@ -68,6 +73,7 @@ type ArtifactProvenanceInput struct {
 	Metadata     map[string]string
 }
 
+// NewArtifactStore creates the content-addressed artifact store.
 func NewArtifactStore(pool *pgxpool.Pool) *ArtifactStore {
 	return &ArtifactStore{pool: pool}
 }
@@ -81,6 +87,7 @@ func (s *ArtifactStore) SetFailureHook(hook func(string) error) {
 	}
 }
 
+// Put writes or reuses an artifact and its reference in one transaction.
 func (s *ArtifactStore) Put(ctx context.Context, input ArtifactPutInput) (ArtifactPutResult, error) {
 	if s == nil || s.pool == nil {
 		return ArtifactPutResult{}, fmt.Errorf("artifact store is not configured")
@@ -230,6 +237,8 @@ func (s *ArtifactStore) PutTx(ctx context.Context, tx pgx.Tx, input ArtifactPutI
 	return ArtifactPutResult{Artifact: artifact, Reference: ref, Created: created, RefCreated: refCreated}, nil
 }
 
+// Get reads artifact metadata by workspace and ID; raw bytes require explicit
+// bounded disclosure.
 func (s *ArtifactStore) Get(ctx context.Context, workspaceID string, artifactID int64) (contracts.Artifact, error) {
 	if s == nil || s.pool == nil {
 		return contracts.Artifact{}, fmt.Errorf("artifact store is not configured")
@@ -237,6 +246,8 @@ func (s *ArtifactStore) Get(ctx context.Context, workspaceID string, artifactID 
 	return readArtifact(ctx, s.pool, strings.TrimSpace(workspaceID), artifactID, false)
 }
 
+// GetByHash resolves an immutable artifact only inside the requested
+// workspace.
 func (s *ArtifactStore) GetByHash(ctx context.Context, workspaceID, contentHash string) (contracts.Artifact, error) {
 	if s == nil || s.pool == nil {
 		return contracts.Artifact{}, fmt.Errorf("artifact store is not configured")
@@ -256,6 +267,8 @@ func (s *ArtifactStore) GetByHash(ctx context.Context, workspaceID, contentHash 
 	return artifact, nil
 }
 
+// Disclose returns a bounded gist, detail, or raw view while preserving the
+// artifact content hash and integrity state.
 func (s *ArtifactStore) Disclose(ctx context.Context, request contracts.ArtifactDisclosureRequest) (contracts.ArtifactDisclosureResult, error) {
 	if s == nil || s.pool == nil {
 		return contracts.ArtifactDisclosureResult{}, fmt.Errorf("artifact store is not configured")
@@ -347,6 +360,7 @@ func (s *ArtifactStore) Disclose(ctx context.Context, request contracts.Artifact
 	return result, nil
 }
 
+// Verify recomputes stored chunk hashes and the canonical artifact hash.
 func (s *ArtifactStore) Verify(ctx context.Context, workspaceID string, artifactID int64) error {
 	if s == nil || s.pool == nil {
 		return fmt.Errorf("artifact store is not configured")
@@ -383,6 +397,8 @@ func (s *ArtifactStore) Verify(ctx context.Context, workspaceID string, artifact
 	return nil
 }
 
+// Archive changes only operational retention state; content and history remain
+// immutable.
 func (s *ArtifactStore) Archive(ctx context.Context, workspaceID string, artifactID int64) (contracts.Artifact, error) {
 	if s == nil || s.pool == nil {
 		return contracts.Artifact{}, fmt.Errorf("artifact store is not configured")
@@ -417,6 +433,7 @@ func (s *ArtifactStore) Archive(ctx context.Context, workspaceID string, artifac
 	return artifact, nil
 }
 
+// Delete tombstones an unreferenced artifact after retention policy permits it.
 func (s *ArtifactStore) Delete(ctx context.Context, workspaceID string, artifactID int64) (contracts.Artifact, error) {
 	if s == nil || s.pool == nil {
 		return contracts.Artifact{}, fmt.Errorf("artifact store is not configured")
@@ -463,6 +480,7 @@ func (s *ArtifactStore) Delete(ctx context.Context, workspaceID string, artifact
 	return artifact, nil
 }
 
+// AddProvenance adds or reuses an immutable workspace-local artifact link.
 func (s *ArtifactStore) AddProvenance(ctx context.Context, input ArtifactProvenanceInput) (contracts.ArtifactProvenanceLink, bool, error) {
 	if s == nil || s.pool == nil {
 		return contracts.ArtifactProvenanceLink{}, false, fmt.Errorf("artifact store is not configured")

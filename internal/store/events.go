@@ -32,6 +32,7 @@ type EventStore struct {
 	pool *pgxpool.Pool
 }
 
+// NewEventStore creates the append-only event authority over a Postgres pool.
 func NewEventStore(pool *pgxpool.Pool) *EventStore {
 	return &EventStore{pool: pool}
 }
@@ -47,6 +48,8 @@ func (s *EventStore) Begin(ctx context.Context) (pgx.Tx, error) {
 	return s.pool.Begin(ctx)
 }
 
+// AppendResult reports whether an event was appended or matched an existing
+// idempotency record.
 type AppendResult struct {
 	Event     contracts.EventEnvelope
 	Duplicate bool
@@ -206,6 +209,7 @@ func (s *EventStore) AppendTx(ctx context.Context, tx pgx.Tx, event contracts.Ev
 	return AppendResult{Event: event}, nil
 }
 
+// ReadRequest bounds a workspace-scoped event read after a sequence cursor.
 type ReadRequest struct {
 	WorkspaceID   string
 	AfterSequence uint64
@@ -217,6 +221,7 @@ type ReadRequest struct {
 	Limit         int
 }
 
+// ReadAfter reads ordered events after the requested cursor.
 func (s *EventStore) ReadAfter(ctx context.Context, request ReadRequest) ([]contracts.EventEnvelope, error) {
 	return readAfter(ctx, s.pool, request)
 }
@@ -297,6 +302,8 @@ func readAfter(ctx context.Context, queryer eventQueryer, request ReadRequest) (
 	return events, nil
 }
 
+// ReadAfterSequence is the compact workspace-scoped event read used by
+// replaying consumers.
 func (s *EventStore) ReadAfterSequence(ctx context.Context, workspaceID string, after uint64, limit int) ([]contracts.EventEnvelope, error) {
 	return s.ReadAfter(ctx, ReadRequest{WorkspaceID: workspaceID, AfterSequence: after, Limit: limit})
 }
@@ -311,6 +318,8 @@ func (s *EventStore) Replay(ctx context.Context, workspaceID string, from, to ui
 	})
 }
 
+// AdvanceCheckpoint moves a consumer cursor monotonically in its own
+// transaction. Projection runners should use the lease-protected variant.
 func (s *EventStore) AdvanceCheckpoint(ctx context.Context, workspaceID, consumerID string, sequence uint64) error {
 	tx, err := s.Begin(ctx)
 	if err != nil {
@@ -429,6 +438,7 @@ func (s *EventStore) ResetCheckpointTx(ctx context.Context, tx pgx.Tx, workspace
 	return nil
 }
 
+// Checkpoint returns the durable cursor for one workspace consumer.
 func (s *EventStore) Checkpoint(ctx context.Context, workspaceID, consumerID string) (uint64, error) {
 	var sequence int64
 	err := s.pool.QueryRow(ctx, `

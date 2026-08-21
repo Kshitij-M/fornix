@@ -1,3 +1,7 @@
+// Package store contains the Postgres authority for Fornix control state,
+// immutable event/evidence history, idempotency records, and rebuildable
+// projections. Store methods enforce workspace scope and transaction/fence
+// boundaries rather than relying on callers to do so.
 package store
 
 import (
@@ -36,10 +40,14 @@ type AgentRunStore struct {
 	beforeCommit  func() error
 }
 
+// NewAgentRunStore creates the durable agent-run store and its artifact link
+// helper.
 func NewAgentRunStore(pool *pgxpool.Pool, events *EventStore) *AgentRunStore {
 	return &AgentRunStore{pool: pool, events: events, artifacts: NewArtifactStore(pool)}
 }
 
+// SetObservability attaches the append-only observation and cost ledger used by
+// committed run transitions.
 func (s *AgentRunStore) SetObservability(observer *ObservabilityStore) {
 	if s != nil {
 		s.observability = observer
@@ -54,6 +62,8 @@ func (s *AgentRunStore) SetArtifactFailureHook(hook func(string) error) {
 	}
 }
 
+// Reserve creates an idempotent run and its creation event, or returns the
+// matching existing run without issuing a second effect.
 func (s *AgentRunStore) Reserve(ctx context.Context, request contracts.AgentRunRequest) (contracts.AgentRun, bool, error) {
 	if s == nil || s.pool == nil || s.events == nil {
 		return contracts.AgentRun{}, false, fmt.Errorf("agent run store is not configured")
@@ -159,6 +169,7 @@ func (s *AgentRunStore) Reserve(ctx context.Context, request contracts.AgentRunR
 	return run, false, nil
 }
 
+// Get reads one run only within the requested workspace.
 func (s *AgentRunStore) Get(ctx context.Context, workspaceID, runID string) (contracts.AgentRun, error) {
 	if s == nil || s.pool == nil {
 		return contracts.AgentRun{}, fmt.Errorf("agent run store is not configured")
@@ -170,6 +181,8 @@ func (s *AgentRunStore) Get(ctx context.Context, workspaceID, runID string) (con
 	return run, err
 }
 
+// Commit atomically appends a typed transition event and advances the run with
+// a state-version compare-and-swap.
 func (s *AgentRunStore) Commit(ctx context.Context, current, next contracts.AgentRun, eventType string, payload any) (contracts.AgentRun, error) {
 	return s.commit(ctx, current, next, eventType, payload, nil)
 }
@@ -399,6 +412,7 @@ func (s *AgentRunStore) commit(ctx context.Context, current, next contracts.Agen
 	return next, nil
 }
 
+// Cancel durably terminates a run through the same fenced transition path.
 func (s *AgentRunStore) Cancel(ctx context.Context, run contracts.AgentRun, reason string) (contracts.AgentRun, error) {
 	next := run
 	next.State, next.Phase, next.Termination = contracts.AgentRunCancelled, contracts.AgentPhaseModel, contracts.AgentTerminationCancelled
@@ -410,6 +424,8 @@ func (s *AgentRunStore) Cancel(ctx context.Context, run contracts.AgentRun, reas
 	return s.Commit(ctx, run, next, contracts.AgentEventCancelled, map[string]any{"run_id": run.ID, "reason": next.LastFailure.Message})
 }
 
+// Replay reads the append-only run events from a sequence boundary without
+// re-executing providers or tools.
 func (s *AgentRunStore) Replay(ctx context.Context, workspaceID, runID string, from uint64, limit int) ([]contracts.EventEnvelope, error) {
 	if s == nil || s.pool == nil {
 		return nil, fmt.Errorf("agent run store is not configured")

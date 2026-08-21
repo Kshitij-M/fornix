@@ -107,6 +107,7 @@ type ProvenanceEdge struct {
 	Direction      string             `json:"direction,omitempty"`
 }
 
+// ProvenanceEdgeInput requests one immutable, workspace-local graph edge.
 type ProvenanceEdgeInput struct {
 	WorkspaceID    string             `json:"workspace_id,omitempty"`
 	FromEvidenceID int64              `json:"from_evidence_id"`
@@ -115,6 +116,8 @@ type ProvenanceEdgeInput struct {
 	Metadata       json.RawMessage    `json:"metadata,omitempty"`
 }
 
+// ProvenanceTraversalRequest bounds traversal from one evidence node. The
+// store applies the workspace condition to every edge and node lookup.
 type ProvenanceTraversalRequest struct {
 	WorkspaceID string `json:"workspace_id"`
 	EvidenceID  int64  `json:"evidence_id"`
@@ -136,6 +139,8 @@ type DisclosureRequest struct {
 	IncludeProvenance *bool           `json:"include_provenance,omitempty"`
 }
 
+// Normalize validates disclosure identity, level, and hard byte/token/node
+// budgets before any evidence is read.
 func (r DisclosureRequest) Normalize() (DisclosureRequest, error) {
 	r.WorkspaceID = strings.TrimSpace(r.WorkspaceID)
 	if r.WorkspaceID == "" {

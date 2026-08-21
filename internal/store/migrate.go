@@ -23,6 +23,10 @@ var migrationFS embed.FS
 
 const migrationAdvisoryLockID int64 = 7_301_947
 
+// ApplyMigrations applies embedded numbered migrations in order under a
+// Postgres advisory lock. Checksums make applied migration files immutable and
+// existing catalogs are preserved for compatibility with the legacy fabric
+// schema name.
 func ApplyMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {

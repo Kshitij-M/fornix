@@ -28,6 +28,9 @@ var (
 	ErrIngestPathChanged = errors.New("ingest source changed after discovery")
 )
 
+// IngestStore is the Postgres authority for durable repository ingestion jobs,
+// manifests, checkpoints, and indexed rows. A batch commits its indexed state
+// and checkpoint together so recovery can safely repeat the last batch.
 type IngestStore struct {
 	pool         *pgxpool.Pool
 	events       *EventStore
@@ -36,6 +39,8 @@ type IngestStore struct {
 	beforeCommit func() error
 }
 
+// IngestBatchResult reports the durable outcome of processing one bounded
+// ingestion batch.
 type IngestBatchResult struct {
 	Job      contracts.IngestJob     `json:"job"`
 	Report   *contracts.IngestReport `json:"report,omitempty"`
@@ -43,6 +48,8 @@ type IngestBatchResult struct {
 	Deduped  bool                    `json:"deduped"`
 }
 
+// NewIngestStore constructs an ingestion store and supplies a default event
+// store when events is nil.
 func NewIngestStore(pool *pgxpool.Pool, events *EventStore, artifacts *ArtifactStore) *IngestStore {
 	if events == nil {
 		events = NewEventStore(pool)
@@ -50,17 +57,24 @@ func NewIngestStore(pool *pgxpool.Pool, events *EventStore, artifacts *ArtifactS
 	return &IngestStore{pool: pool, events: events, artifacts: artifacts}
 }
 
+// SetEmbedder attaches an optional embedding function. The offline ingestion
+// path remains valid when no provider is configured.
 func (s *IngestStore) SetEmbedder(embedder func(context.Context, string) ([]float32, error)) {
 	if s != nil {
 		s.embedder = embedder
 	}
 }
+
+// SetFailureHook installs a test or fault-injection hook immediately before a
+// batch commit; it does not alter production transaction semantics.
 func (s *IngestStore) SetFailureHook(hook func() error) {
 	if s != nil {
 		s.beforeCommit = hook
 	}
 }
 
+// Submit registers a discovered manifest idempotently. A matching identity is
+// reused; a conflicting request or processing policy fails closed.
 func (s *IngestStore) Submit(ctx context.Context, request contracts.IngestJobRequest, discovered ingest.DiscoveryResult) (contracts.IngestJob, bool, error) {
 	if s == nil || s.pool == nil || s.events == nil {
 		return contracts.IngestJob{}, false, fmt.Errorf("ingest store is not configured")
@@ -223,6 +237,7 @@ func (s *IngestStore) Submit(ctx context.Context, request contracts.IngestJobReq
 	return s.Get(ctx, normalized.WorkspaceID, jobID)
 }
 
+// Get reads one ingestion job within its workspace boundary.
 func (s *IngestStore) Get(ctx context.Context, workspaceID, id string) (contracts.IngestJob, bool, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -239,6 +254,8 @@ func (s *IngestStore) Get(ctx context.Context, workspaceID, id string) (contract
 	return job, true, nil
 }
 
+// List returns a bounded, deterministic page of ingestion jobs in one
+// workspace.
 func (s *IngestStore) List(ctx context.Context, workspaceID, cursor string, limit int) (contracts.IngestPage, error) {
 	if limit <= 0 {
 		limit = 50
@@ -273,6 +290,9 @@ func (s *IngestStore) List(ctx context.Context, workspaceID, cursor string, limi
 	return page, nil
 }
 
+// ProcessBatch indexes at most the requested bounded batch and advances the
+// checkpoint in the same transaction as chunks, symbols, artifacts, and
+// lifecycle events. Repeating a committed batch is idempotent.
 func (s *IngestStore) ProcessBatch(ctx context.Context, request contracts.IngestBatchRequest) (IngestBatchResult, error) {
 	if s == nil || s.pool == nil {
 		return IngestBatchResult{}, fmt.Errorf("ingest store is not configured")
@@ -415,6 +435,8 @@ func (s *IngestStore) ProcessBatch(ctx context.Context, request contracts.Ingest
 	return IngestBatchResult{Job: resultJob, Report: resultJob.Report, Advanced: true}, nil
 }
 
+// Cancel records durable cancellation for a non-terminal job. Subsequent batch
+// processing observes the terminal state and performs no indexing work.
 func (s *IngestStore) Cancel(ctx context.Context, workspaceID, jobID string, actor contracts.ActorRef) (contracts.IngestJob, error) {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {

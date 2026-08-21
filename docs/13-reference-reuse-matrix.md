@@ -1,5 +1,7 @@
 # Reference reuse matrix
 
+Status: active research and licensing reference.
+
 This is the mandatory pre-implementation map. Read source before adopting a
 pattern; do not copy code solely because a README names a feature.
 
