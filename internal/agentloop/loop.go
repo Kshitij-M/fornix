@@ -1,6 +1,7 @@
-// Package agentloop implements Fornix's bounded deterministic agent state
-// machine. Postgres commits transitions; model and tool providers remain
-// external at-least-once effects.
+// Package agentloop implements the bounded execution part of Fornix's
+// verifiable AI work path. It turns a scoped task into deterministic model and
+// tool transitions; Postgres commits the authoritative state while external
+// providers remain explicitly at-least-once effects.
 package agentloop
 
 import (

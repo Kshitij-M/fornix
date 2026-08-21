@@ -1,6 +1,7 @@
 // Package projection applies immutable control events to rebuildable,
-// workspace-scoped read models. Projection writes and checkpoints commit in a
-// single Postgres transaction under a consumer fence.
+// workspace-scoped read models used to inspect Fornix work. Projection writes
+// and checkpoints commit in a single Postgres transaction under a consumer
+// fence, preserving the replayable history behind a verified result.
 package projection
 
 import (

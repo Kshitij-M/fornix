@@ -45,7 +45,7 @@ import (
 	"github.com/omaveda/fornix/internal/version"
 )
 
-const watcherVersion = version.Version
+var watcherVersion = version.Version
 
 type repoCfg struct {
 	Repo      string   `yaml:"repo"`

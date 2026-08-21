@@ -1,5 +1,7 @@
-// Package scheduler runs durable agent work by claiming due Postgres rows and
-// fencing every checkpoint with a workspace-scoped lease.
+// Package scheduler runs durable repository work by claiming due Postgres rows
+// and fencing every checkpoint with a workspace-scoped lease. It supplies the
+// recovery guarantees needed before an agent result can be treated as
+// verifiable.
 package scheduler
 
 import (

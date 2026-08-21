@@ -9,6 +9,43 @@ The harness owns state, evidence, scheduling, policy, and cost controls. AI
 models are used for interpretation, synthesis, and ambiguity—not for work that
 SQL, exact lookup, or deterministic routing can perform.
 
+## Product definition
+
+The technical foundation serves a product outcome:
+
+> **Fornix is verifiable AI work infrastructure for long-running repository
+> operations.**
+
+Teams should be able to delegate serious repository work to AI without losing
+control of scope, cost, evidence, approval, or recovery. The first product
+wedge is safe autonomous repository maintenance—dependency upgrades, security
+remediation, migrations, refactors, CI repair, and related work that teams
+currently keep manual because the result is difficult to verify or recover.
+
+The user-facing result is a **Verified Change Packet**. Its durable foundation
+is a future first-class **Work Receipt** linking source manifests, retrieval
+context, model/tool effects, evidence, artifacts, validation, cost, and replay
+history. The current alpha provides the control and retrieval substrate for
+that outcome; the reference workflow is a bounded, read-only showcase rather
+than a claim that unattended repository changes are complete.
+
+The product responsibilities are:
+
+```text
+Admit  →  Execute  →  Prove  →  Improve
+```
+
+- **Admit:** identity, workspace, source, policy, approval, and budget.
+- **Execute:** durable ownership, fencing, checkpoints, retries, cancellation,
+  model calls, and policy-controlled tools.
+- **Prove:** immutable evidence, provenance, artifacts, validation, cost, and
+  replayable history.
+- **Improve:** offline evaluation, quality gates, cost attribution, and
+  regression detection.
+
+The public [product vision](01-product-vision.md) is the narrative contract;
+this document is the engineering contract that makes it possible.
+
 The default retrieval path is:
 
 ```text

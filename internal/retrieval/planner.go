@@ -1,6 +1,7 @@
-// Package retrieval builds deterministic, workspace-scoped context from
-// authoritative Postgres records. Expensive stages are explicit plan choices,
-// not hidden fallback behavior.
+// Package retrieval builds deterministic, workspace-scoped context for
+// verifiable AI work from authoritative Postgres records. Expensive stages are
+// explicit plan choices, not hidden fallback behavior, so a result can explain
+// which evidence and budget produced its context.
 package retrieval
 
 import (

@@ -6,11 +6,19 @@ This is the public documentation map for Fornix. It is written for people who
 want to use the alpha, operate it locally, review its design, or contribute to
 the repository.
 
+The product direction is **verifiable AI work infrastructure for long-running
+repository operations**. Fornix is intended to let teams delegate serious
+repository work to AI without losing control of scope, cost, evidence,
+approval, or recovery. The current implementation is the durable control and
+retrieval substrate behind that outcome; the [product vision](01-product-vision.md)
+explains the distinction.
+
 ## Choose a starting point
 
 | If you want to know… | Read… |
 | --- | --- |
 | What Fornix is and why it exists | [`README.md`](../README.md) |
+| What problem Fornix will own and how the product should feel | [`01-product-vision.md`](01-product-vision.md) |
 | How to run, test, and smoke the service | [`DEVELOPMENT.md`](../DEVELOPMENT.md) |
 | How to contribute a change | [`CONTRIBUTING.md`](../CONTRIBUTING.md) |
 | How to report security concerns | [`SECURITY.md`](../SECURITY.md) |
@@ -35,8 +43,10 @@ engineering history:
   summaries. A completion note is the more reliable source when a historical
   foundation intention differs from the current implementation.
 
-The project currently has 19 completed implementation loops. The pairs below
-are the detailed record for each one.
+The project currently has 19 completed implementation loops. Those loops build
+the control-plane substrate; they are not 19 claims that the complete
+repository-maintenance product is finished. The pairs below are the detailed
+engineering record for each one.
 
 ## Implementation loops
 

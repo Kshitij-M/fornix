@@ -5,10 +5,17 @@ Status: active implementation note for Task 18.
 ## Objective
 
 Task 18 adds the first usable operator surface around the existing Postgres
-control plane and proves one complete deterministic workflow. The CLI is an
-authenticated HTTP client of the same application routes used by operators
-and the MCP compatibility shim; it does not contain a second task, model,
-tool, retrieval, or artifact implementation.
+control plane and proves one complete deterministic workflow. It is the first
+executable showcase of Fornix's product direction: verifiable AI work for
+long-running repository operations. The CLI is an authenticated HTTP client
+of the same application routes used by operators and the MCP compatibility
+shim; it does not contain a second task, model, tool, retrieval, or artifact
+implementation.
+
+This workflow is intentionally a bounded, read-only precursor to the future
+Verified Change Packet. It proves admission, execution, evidence, artifacts,
+cost observations, and replay without claiming that safe unattended repository
+changes are complete.
 
 The reference path is:
 

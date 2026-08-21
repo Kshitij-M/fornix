@@ -1,5 +1,7 @@
-// Package ingest discovers repository sources and turns stable file snapshots
-// into bounded chunks and optional lightweight symbol records.
+// Package ingest admits repository sources into Fornix's verifiable AI work
+// path and turns stable file snapshots into bounded chunks and optional
+// lightweight symbol records. It preserves source identity so later context
+// and work results can be traced back to a known repository snapshot.
 package ingest
 
 import (

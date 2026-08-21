@@ -1,0 +1,11 @@
+# Default ownership keeps review responsibility explicit as the project grows.
+# Replace or extend this with a maintainer team when one is created.
+* @Kshitij-M
+
+# These paths change the repository's security, release, or authority surface.
+.github/ @Kshitij-M
+SECURITY.md @Kshitij-M
+internal/server/ @Kshitij-M
+internal/store/ @Kshitij-M
+internal/model/ @Kshitij-M
+internal/tool/ @Kshitij-M

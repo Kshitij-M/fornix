@@ -1,11 +1,23 @@
 # Fornix production-readiness qualification
 
-Status: alpha single-node control and retrieval substrate.
+Status: alpha single-node control and retrieval substrate; not yet the complete
+safe autonomous repository-maintenance product.
 
 Fornix is runnable and testable, but it is not yet a production-grade,
 multi-tenant harness for huge projects. The current system has a durable
 Postgres control database, typed event history, deterministic projections,
 task coordination, retrieval, and code indexing.
+
+The product direction is **verifiable AI work infrastructure for long-running
+repository operations**. The goal is to let teams delegate serious repository
+work to AI without losing control of scope, cost, evidence, approval, or
+recovery. The current qualification proves the substrate behind that goal; it
+does not qualify unattended changes to important repositories.
+
+The reference workflow is therefore a showcase of the path from admission to
+replay, not a finished change-management product. A future Verified Change
+Packet and Work Receipt will make the result of a repository operation the
+primary user-facing contract.
 
 ## Verified capabilities
 
@@ -80,6 +92,14 @@ task coordination, retrieval, and code indexing.
   and reference-workflow semantics.
 
 ## Production gaps
+
+### Product-level gap
+
+- The current alpha does not yet provide the complete flagship workflow for
+  unattended repository maintenance. The reference path is bounded and
+  read-only; a production-shaped change packet, safe patch application,
+  deterministic validation, and reviewer-facing approval flow remain the next
+  product milestone.
 
 - No OAuth/SSO, external KMS/secret-manager provider, or Postgres row-level
   security policy. The operator identity/API-key surface is intentionally

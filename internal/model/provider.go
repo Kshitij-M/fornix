@@ -1,6 +1,7 @@
 // Package model provides the provider-neutral gateway for bounded model and
-// embedding calls. It keeps credentials at the provider boundary and records
-// durable at-least-once execution through the model-call ledger.
+// embedding calls in Fornix's verifiable work path. It keeps credentials at
+// the provider boundary and records durable at-least-once execution through
+// the model-call ledger so cost and evidence can be attached to a task result.
 package model
 
 import (

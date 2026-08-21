@@ -1,7 +1,8 @@
 // Package contracts contains the versioned data contracts shared by Fornix's
-// control plane, providers, execution workers, and operator surfaces.
-// Contracts keep workspace scope, provenance, budgets, and replay identities
-// explicit at every durable boundary.
+// verifiable AI work path: admission, execution, evidence, artifacts,
+// accounting, replay, and operator surfaces. Contracts keep workspace scope,
+// provenance, budgets, and replay identities explicit at every durable
+// boundary.
 package contracts
 
 import (

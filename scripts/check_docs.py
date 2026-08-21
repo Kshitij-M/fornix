@@ -10,11 +10,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 MARKDOWN_FILES = [
-    ROOT / "README.md",
-    ROOT / "DEVELOPMENT.md",
-    ROOT / "AGENTS.md",
-    ROOT / "CHANGELOG.md",
+    *sorted(ROOT.glob("*.md")),
     *sorted((ROOT / "docs").glob("*.md")),
+    *sorted((ROOT / ".github").rglob("*.md")),
 ]
 LINK_RE = re.compile(r"\[[^\]]+\]\(([^)\n]+)\)")
 PRIVATE_PATH_RE = re.compile(r"/(?:Users|home)/[A-Za-z0-9._-]+/")
