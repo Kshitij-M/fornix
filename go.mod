@@ -3,7 +3,7 @@ module github.com/omaveda/fornix
 go 1.25.0
 
 require (
-	github.com/fsnotify/fsnotify v1.7.0
+	github.com/fsnotify/fsnotify v1.10.1
 	github.com/jackc/pgx/v5 v5.9.2
 	github.com/pgvector/pgvector-go v0.4.0
 	gopkg.in/yaml.v3 v3.0.1
