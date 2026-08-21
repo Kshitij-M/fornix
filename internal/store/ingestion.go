@@ -95,6 +95,32 @@ func (s *IngestStore) Submit(ctx context.Context, request contracts.IngestJobReq
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, normalized.WorkspaceID+"|"+normalized.Source.Repository); err != nil {
 		return contracts.IngestJob{}, false, fmt.Errorf("lock ingest identity: %w", err)
 	}
+	// Resolve existing identities before INSERT so the manifest uniqueness
+	// constraint cannot surface as an untyped database error. A matching
+	// manifest is only a dedupe when the processing policy is also identical;
+	// otherwise the caller must receive a fail-closed conflict.
+	if job, readErr := readIngestJobByKeyTx(ctx, tx, normalized.WorkspaceID, normalized.IdempotencyKey, true); readErr == nil {
+		if job.RequestHash != requestHash {
+			return contracts.IngestJob{}, false, fmt.Errorf("%w: idempotency key", ErrIngestConflict)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return contracts.IngestJob{}, false, err
+		}
+		return job, false, nil
+	} else if !errors.Is(readErr, ErrIngestJobNotFound) {
+		return contracts.IngestJob{}, false, readErr
+	}
+	if job, readErr := readIngestJobByManifestTx(ctx, tx, normalized.WorkspaceID, normalized.Source.Repository, discovered.ManifestHash, true); readErr == nil {
+		if job.RequestHash != requestHash {
+			return contracts.IngestJob{}, false, fmt.Errorf("%w: manifest processing policy", ErrIngestConflict)
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return contracts.IngestJob{}, false, err
+		}
+		return job, false, nil
+	} else if !errors.Is(readErr, ErrIngestJobNotFound) {
+		return contracts.IngestJob{}, false, readErr
+	}
 	var created bool
 	err = tx.QueryRow(ctx, `
 		INSERT INTO fornix.ingest_jobs(
@@ -113,9 +139,25 @@ func (s *IngestStore) Submit(ctx context.Context, request contracts.IngestJobReq
 		return contracts.IngestJob{}, false, fmt.Errorf("insert ingest job: %w", err)
 	}
 	if !created {
-		job, readErr := readIngestJobByManifestTx(ctx, tx, normalized.WorkspaceID, normalized.Source.Repository, discovered.ManifestHash, true)
+		job, readErr := readIngestJobByKeyTx(ctx, tx, normalized.WorkspaceID, normalized.IdempotencyKey, true)
+		if readErr == nil {
+			if job.RequestHash != requestHash {
+				return contracts.IngestJob{}, false, fmt.Errorf("%w: idempotency key", ErrIngestConflict)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return contracts.IngestJob{}, false, err
+			}
+			return job, false, nil
+		}
+		if !errors.Is(readErr, ErrIngestJobNotFound) {
+			return contracts.IngestJob{}, false, readErr
+		}
+		job, readErr = readIngestJobByManifestTx(ctx, tx, normalized.WorkspaceID, normalized.Source.Repository, discovered.ManifestHash, true)
 		if readErr != nil {
 			return contracts.IngestJob{}, false, fmt.Errorf("read conflicting ingest identity: %w", readErr)
+		}
+		if job.RequestHash != requestHash {
+			return contracts.IngestJob{}, false, fmt.Errorf("%w: manifest processing policy", ErrIngestConflict)
 		}
 		if err := tx.Commit(ctx); err != nil {
 			return contracts.IngestJob{}, false, err

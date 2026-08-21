@@ -194,6 +194,28 @@ func TestIngestStoreDeduplicatesIdenticalChunkContentAcrossFiles(t *testing.T) {
 	}
 }
 
+func TestIngestStoreRejectsConflictingPolicyForSameManifest(t *testing.T) {
+	store, _, workspace, root := newIngestTestStore(t)
+	if err := os.WriteFile(filepath.Join(root, "README.md"), []byte("stable source\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	firstSource := contracts.RepositorySource{Repository: "policy-conflict", SourceRoot: root, MountRoot: root, ChunkBytes: 128, ChunkOverlap: 8}
+	discovery, err := ingest.Discover(context.Background(), firstSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := contracts.ActorRef{ID: "test", Kind: "test", WorkspaceID: workspace}
+	first, created, err := store.Submit(context.Background(), contracts.IngestJobRequest{WorkspaceID: workspace, IdempotencyKey: "policy-first", Actor: actor, Source: firstSource}, discovery)
+	if err != nil || !created {
+		t.Fatalf("first submit created=%t err=%v", created, err)
+	}
+	secondSource := firstSource
+	secondSource.ChunkBytes = 256
+	if _, _, err := store.Submit(context.Background(), contracts.IngestJobRequest{WorkspaceID: workspace, IdempotencyKey: "policy-second", Actor: actor, Source: secondSource}, discovery); !errors.Is(err, ErrIngestConflict) {
+		t.Fatalf("conflicting manifest policy error=%v, first=%s", err, first.ID)
+	}
+}
+
 func TestIngestStoreRejectsSourceMutationAndCrossWorkspaceRead(t *testing.T) {
 	store, _, workspace, root := newIngestTestStore(t)
 	ingestFixture(t, root)
