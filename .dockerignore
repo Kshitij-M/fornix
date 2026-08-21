@@ -1,9 +1,16 @@
 .git
-.env
+.github
+.venv
 bin
 tmp
+docs
+fixtures
+scripts/test
+*.md
 *.log
 *.sqlite
 *.db
+.env
+dist
 reference_repos
 chats

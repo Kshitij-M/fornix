@@ -6,12 +6,20 @@ than promising a stable compatibility contract.
 
 ## Unreleased
 
+- Defined the public product direction as verifiable AI work infrastructure for
+  long-running repository operations, with safe autonomous maintenance as the
+  first wedge and Verified Change Packets/Work Receipts as the intended result
+  contract.
 - Documentation is being consolidated into a public documentation map,
   contributor/security guidance, a human-readable HTTP API reference, and a
   consistent documentation contract for architecture and code changes.
 - Repository quality gates include repository-local pre-commit and pre-push
   hooks, reusable Make targets, bounded CI jobs, and cancellation of superseded
   runs.
+- GitHub repository operations now include structured issue intake, pull
+  request review guidance, code ownership, Dependabot, CodeQL, dependency
+  review, Scorecard, tag-driven releases, checksum attestations, and GHCR
+  container publication workflows.
 
 ## 2026-08-21
 

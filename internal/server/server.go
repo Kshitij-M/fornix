@@ -1,7 +1,7 @@
-// Package server exposes Fornix's authenticated HTTP control-plane surface.
-// Handlers enforce workspace authorization at the boundary and delegate
-// authoritative state, idempotency, and replay behavior to Postgres-backed
-// stores.
+// Package server exposes Fornix's authenticated HTTP surface for verifiable AI
+// work. Handlers enforce workspace authorization at the boundary and delegate
+// authoritative state, idempotency, evidence, and replay behavior to
+// Postgres-backed stores.
 package server
 
 import (

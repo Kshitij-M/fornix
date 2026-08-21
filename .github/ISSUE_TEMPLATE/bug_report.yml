@@ -1,0 +1,62 @@
+name: Bug report
+description: Report a reproducible problem in Fornix
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve Fornix's verifiable AI work path. Please remove credentials, private repository content, raw prompts, and other sensitive data before submitting.
+  - type: checkboxes
+    id: search
+    attributes:
+      label: Existing issue check
+      options:
+        - label: I searched existing issues and did not find a duplicate.
+          required: true
+  - type: textarea
+    id: summary
+    attributes:
+      label: What happened?
+      description: Describe the observed behavior and why it is a problem.
+      placeholder: Tell us what you expected and what actually happened.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction
+      description: Give the smallest safe command sequence, fixture, or test that reproduces the problem.
+      render: shell
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: What should have happened instead?
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Fornix version or commit
+      placeholder: v0.10.1 or a commit SHA
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      placeholder: Linux/macOS, Go version, Docker version, PostgreSQL version
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs or output
+      description: Paste bounded, redacted output only. Do not include API keys, tokens, private paths, raw prompts, or private repository contents.
+      render: text
+    validations:
+      required: false

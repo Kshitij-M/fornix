@@ -1,0 +1,59 @@
+name: Feature request
+description: Propose a focused improvement to Fornix
+title: "[Feature]: "
+labels:
+  - enhancement
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Fornix is verifiable AI work infrastructure for long-running repository operations. A strong proposal explains the repository-work problem it solves, the user outcome it improves, and the deterministic invariant that makes the result trustworthy.
+  - type: checkboxes
+    id: search
+    attributes:
+      label: Existing issue check
+      options:
+        - label: I searched existing issues and discussions and did not find a duplicate.
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem statement
+      description: What expensive, unsafe, ambiguous, or difficult-to-recover repository-work problem does this solve? Who experiences it?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe the smallest useful API, CLI, workflow, or documentation change. How does it help a team safely delegate important work to AI?
+    validations:
+      required: true
+  - type: textarea
+    id: invariants
+    attributes:
+      label: Invariants and failure behavior
+      description: Explain workspace scope, authority, idempotency, retries, crash behavior, budgets, security, and compatibility concerns.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: What approaches did you consider and why are they less suitable?
+    validations:
+      required: false
+  - type: textarea
+    id: product_outcome
+    attributes:
+      label: Product outcome
+      description: Does this improve admission, execution, proof, or improvement of a Verified Change Packet? If it does not, explain why it belongs in Fornix.
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: Acceptance criteria
+      description: List observable tests, documentation, or operational checks that would demonstrate completion.
+    validations:
+      required: true

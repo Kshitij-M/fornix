@@ -1,22 +1,30 @@
 # Contributing to Fornix
 
-Thank you for helping improve Fornix. The project is developing a public,
-efficiency-first AI harness in small, reviewable control-plane slices. A good
-contribution makes behavior safer, more deterministic, easier to inspect, or
-less expensive—and explains the trade-off clearly.
+Thank you for helping improve Fornix. The project is developing public,
+verifiable AI work infrastructure for long-running repository operations. The
+goal is to let teams delegate serious repository work to AI without losing
+control of scope, cost, evidence, approval, or recovery.
+
+A good contribution moves that goal forward. It makes behavior safer, more
+deterministic, easier to inspect, easier to recover, or less expensive—and
+explains the user problem and trade-off clearly. The harness is an engineering
+means; the outcome is safe autonomous work that produces a result people can
+understand and trust.
 
 ## Before you start
 
 Read these documents in order:
 
 1. [`README.md`](README.md) for the product boundary and alpha status.
-2. [`docs/00-fornix-foundation.md`](docs/00-fornix-foundation.md) for
+2. [`docs/01-product-vision.md`](docs/01-product-vision.md) for the problem,
+   target users, flagship workflow, and product language.
+3. [`docs/00-fornix-foundation.md`](docs/00-fornix-foundation.md) for
    authority and determinism rules.
-3. [`docs/52-documentation-guide.md`](docs/52-documentation-guide.md) for
+4. [`docs/52-documentation-guide.md`](docs/52-documentation-guide.md) for
    terminology, claims, examples, and review expectations.
-4. [`docs/14-production-readiness-qualification.md`](docs/14-production-readiness-qualification.md)
+5. [`docs/14-production-readiness-qualification.md`](docs/14-production-readiness-qualification.md)
    for verified behavior and known gaps.
-5. The relevant foundation/completion pair in the
+6. The relevant foundation/completion pair in the
    [documentation index](docs/README.md).
 
 For security-sensitive changes, read [`SECURITY.md`](SECURITY.md) first. Do
@@ -26,9 +34,11 @@ details in an issue, pull request, test fixture, or documentation example.
 ## What contributions are useful
 
 Documentation, tests, bug fixes, performance measurements, API ergonomics,
-operator workflows, and carefully scoped features are all welcome. Small
-changes are easier to review and make it possible to preserve the project’s
-append-only and replay guarantees.
+operator workflows, and carefully scoped features are all welcome. Product
+work should make the flagship repository workflow more useful; infrastructure
+work should preserve the guarantees that make a Verified Change Packet
+credible. Small changes are easier to review and make it possible to preserve
+the project’s append-only and replay guarantees.
 
 Before implementing a new subsystem, search the existing code, migrations,
 tests, architecture notes, and the reference reuse matrix. If a reference
@@ -125,7 +135,7 @@ IDs and never use real credentials or private paths.
 
 ## Pull requests
 
-A pull request should state:
+A pull request should use the repository template and state:
 
 - what changed and why;
 - the user-visible and operational behavior;
@@ -133,6 +143,12 @@ A pull request should state:
 - security, licensing, and cost implications;
 - tests and smokes run, including the environment;
 - known limitations and follow-up work.
+
+GitHub Actions runs the deterministic quality, integration, dependency, and
+security checks for every pull request. A maintainer should not merge until
+the required checks and code-owner review are complete. Fork contributions must
+remain safe to run without repository secrets; do not ask contributors to use
+`pull_request_target` or to paste provider credentials into a workflow.
 
 If the change is documentation-only, say so explicitly and run
 `make docs-check`; also check links, commands, terminology, and sensitive-data

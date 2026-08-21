@@ -1,7 +1,8 @@
-// Package store contains the Postgres authority for Fornix control state,
-// immutable event/evidence history, idempotency records, and rebuildable
-// projections. Store methods enforce workspace scope and transaction/fence
-// boundaries rather than relying on callers to do so.
+// Package store contains the Postgres authority for Fornix's verifiable work:
+// control state, immutable event/evidence history, idempotency records,
+// artifacts, accounting, and rebuildable projections. Store methods enforce
+// workspace scope and transaction/fence boundaries rather than relying on
+// callers to do so.
 package store
 
 import (

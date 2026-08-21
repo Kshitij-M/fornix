@@ -1,18 +1,18 @@
 # Security policy
 
-Fornix is an alpha, single-node control and retrieval substrate. Treat the
-current implementation as a project for development, evaluation, and
-controlled internal use—not as a complete security boundary for untrusted
-multi-tenant workloads.
+Fornix is an alpha, single-node substrate for verifiable AI work on important
+repositories. Treat the current implementation as a project for development,
+evaluation, and controlled internal use—not as a complete security boundary
+for untrusted multi-tenant workloads or unattended production changes.
 
 ## Reporting a vulnerability
 
 Please do not publish credentials, private repository content, working
 exploits, or detailed reproduction steps in a public issue or pull request.
-Use the repository’s available private vulnerability-reporting channel on
-GitHub when it is enabled. If no private channel is available, open a minimal
-public issue containing only a non-sensitive summary and ask the maintainers
-for a private follow-up channel.
+Use the repository’s [private vulnerability-reporting channel on GitHub](https://github.com/Kshitij-M/fornix/security/advisories/new)
+when it is enabled. If no private channel is available, open a minimal public
+issue containing only a non-sensitive summary and ask the maintainers for a
+private follow-up channel.
 
 Include, when safe to share privately:
 

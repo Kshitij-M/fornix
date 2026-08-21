@@ -4,6 +4,26 @@ The local environment is a Go/Postgres service with optional pgvector and
 Ollama support. Docker provides the pinned toolchain when Go is not installed
 on the host.
 
+## What this repository demonstrates
+
+Fornix is being built as **verifiable AI work infrastructure for long-running
+repository operations**. The development workflow is therefore organized
+around the product path:
+
+```text
+admit a scoped task
+  → execute with bounded context, model, and tools
+  → preserve evidence, artifacts, cost, and recovery
+  → inspect and replay the result
+```
+
+The current alpha demonstrates this path with a deterministic, read-only
+reference workflow. It is a control-plane showcase, not yet a finished
+unattended repository-change product. Use the [product vision](docs/01-product-vision.md)
+to understand why each local command exists and the
+[qualification note](docs/14-production-readiness-qualification.md) before
+interpreting a passing smoke as production readiness.
+
 ## First run
 
 ```sh
@@ -154,7 +174,8 @@ The complete deterministic path indexes a local fixture, claims a fenced task,
 compiles bounded retrieval context, invokes the fake provider, reads a file
 through the registered structured-argv read-only tool, writes a report artifact
 and linked evidence, completes the task, and replays the run from sequence
-zero:
+zero. This is the durable foundation behind the future Verified Change Packet;
+it deliberately does not modify the fixture:
 
 ```sh
 bin/fornix reference-workflow --workspace reference-local --fixture fixtures/reference-repo --workdir /workspace/fixtures/reference-repo

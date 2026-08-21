@@ -1,0 +1,11 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability privately
+    url: https://github.com/Kshitij-M/fornix/security/advisories/new
+    about: Do not disclose credentials, exploit details, or private data in a public issue. See SECURITY.md.
+  - name: Ask a question or discuss a design
+    url: https://github.com/Kshitij-M/fornix/discussions
+    about: Use GitHub Discussions for questions, proposals, and experience reports.
+  - name: Read the maintainer setup guide
+    url: https://github.com/Kshitij-M/fornix/blob/main/GITHUB_SETUP.md
+    about: Repository settings, branch rules, security features, labels, projects, and releases.

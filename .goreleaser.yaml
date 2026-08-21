@@ -1,0 +1,56 @@
+version: 2
+
+project_name: fornix
+
+builds:
+  - id: fornix
+    main: ./cmd/fornix
+    binary: fornix
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X github.com/omaveda/fornix/internal/version.Version={{.Version}}
+
+  - id: watcher
+    main: ./cmd/fornix-watcher
+    binary: fornix-watcher
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X github.com/omaveda/fornix/internal/version.Version={{.Version}}
+
+  - id: eval
+    main: ./cmd/fornix-eval
+    binary: fornix-eval
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X github.com/omaveda/fornix/internal/version.Version={{.Version}}
+
+archives:
+  - id: default
+    ids: [fornix, watcher, eval]
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - '^ci:'
+      - '^refactor:'

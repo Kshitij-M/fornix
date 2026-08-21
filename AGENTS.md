@@ -1,7 +1,15 @@
 # Fornix development rules
 
-Fornix is an efficiency-first AI harness. Read `docs/00-fornix-foundation.md`
-before changing the system.
+Fornix is being built as **verifiable AI work infrastructure for long-running
+repository operations**. The intended outcome is safe autonomous work: teams
+should be able to delegate serious repository tasks to AI without losing
+control of scope, cost, evidence, approval, or recovery.
+
+The current implementation is the durable control and retrieval substrate
+behind that outcome. Do not describe the alpha as a complete repository-change
+product. Read `docs/01-product-vision.md` for the product narrative and
+`docs/00-fornix-foundation.md` for the engineering contract before changing the
+system.
 
 ## Research gate
 
@@ -63,7 +71,9 @@ smoke coverage together.
 Fornix is a public repository. Documentation is part of the product surface,
 not a release-time afterthought. Every user-visible behavior and every
 security, durability, cost, or licensing decision must be explainable to a
-reader who has not seen the implementation history.
+reader who has not seen the implementation history. Public writing should lead
+with the repository-work problem and the user outcome, then explain the
+control-plane mechanism and its limits.
 
 When changing behavior:
 

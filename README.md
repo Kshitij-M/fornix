@@ -1,29 +1,46 @@
 # Fornix
 
-Fornix is an efficiency-first AI harness for long-running repository and
-project work. It gives AI-assisted work a durable control plane: workspace
-scope, tasks, checkpoints, retrieval budgets, model/tool policies, evidence,
-provenance, artifacts, and cost observations live behind one Go/PostgreSQL
-service.
+Fornix is **verifiable AI work infrastructure for long-running repository
+operations**.
 
-The central product decision is deliberately conservative:
+Teams can already ask AI to suggest code. The harder problem is allowing AI to
+perform important work—dependency upgrades, security remediation, migrations,
+large refactors, CI repair, and repository maintenance—without losing control
+of scope, cost, evidence, approval, or recovery.
 
-> Use exact state, deterministic routing, and bounded retrieval first. Spend
-> model tokens only when the remaining ambiguity justifies them.
+Fornix is being built to close that gap:
 
-Fornix is open source and currently alpha. It is a usable control and
-retrieval substrate, not yet a complete hosted AI product or a qualification
-for production workloads involving sensitive data or large-scale availability
-requirements.
+> **Delegate serious repository work to AI without losing the ability to bound,
+> understand, recover, and replay it.**
 
-## Why Fornix exists
+The technical form is an efficiency-first AI harness. The product outcome is
+safe autonomous work. Fornix uses exact state, deterministic routing, and
+bounded retrieval first, spending model tokens only when remaining ambiguity
+justifies them.
+
+Fornix is open source and currently alpha. The durable control and retrieval
+substrate is usable and tested, but the complete unattended repository
+maintenance product is still being built.
+
+Read the [product vision](docs/01-product-vision.md) for the problem, target
+user, flagship workflow, and the distinction between the current alpha and the
+longer-term product.
+
+## The problem Fornix solves
 
 Long-running AI work fails in expensive and difficult-to-audit ways. A worker
 can lose its place, repeat a tool call, use the wrong project context, exceed a
 budget, or produce an answer that cannot be traced back to source evidence.
 
-Fornix addresses those control-plane problems by making the following durable
-and inspectable:
+When that happens, teams cannot confidently answer:
+
+- What exactly did the agent do?
+- Which source version and evidence did it use?
+- What did the work cost?
+- Can it resume after a crash without duplicating work?
+- Can a reviewer verify the result without reading an entire transcript?
+
+Fornix makes the conditions and history of AI work durable and inspectable:
 
 - **State and recovery:** tasks, agent runs, leases, fencing tokens,
   checkpoints, retries, cancellation, and replay history.
@@ -36,6 +53,13 @@ and inspectable:
 - **Efficiency:** cost-aware routing metadata, token/byte/time limits,
   retrieval traces, fixed-dimension metrics, and offline evaluation.
 
+The intended product output is a **Verified Change Packet**: a result linked
+to its source snapshot, evidence, validation, cost, and recovery history. Its
+machine-verifiable foundation is a future first-class **Work Receipt**. The
+current alpha already stores most of the underlying control-plane facts; the
+flagship repository-maintenance workflow will make that value visible as one
+user-facing result.
+
 ## What Fornix is—and is not
 
 Fornix is:
@@ -45,6 +69,11 @@ Fornix is:
 - a bounded model, tool, and agent-run execution substrate;
 - a workspace-scoped operator API, CLI, and MCP compatibility surface;
 - a repository ingestion path for explicitly mounted local repositories.
+
+In the product direction, these capabilities combine into a safe,
+workspace-scoped runtime for repository maintenance. Fornix should integrate
+with existing agent clients and runtimes where possible rather than requiring
+every team to replace its preferred model or chat interface.
 
 Fornix is not currently:
 
@@ -139,11 +168,16 @@ tests, smoke suites, CLI usage, and the reference workflow, read
 
 ## First complete workflow
 
-The reference workflow demonstrates the intended control-plane shape with a
-deterministic fake provider. It bootstraps a workspace, ingests the mounted
-fixture, creates and claims a task, retrieves bounded context, runs the agent
-loop, writes a report artifact and evidence, completes the task, and checks
-replay hashes.
+The reference workflow is the first executable showcase of the product
+direction. It demonstrates the control-plane foundation behind a future
+Verified Change Packet: bootstrap a workspace, ingest a source snapshot, create
+and claim a task, retrieve bounded context, run a bounded agent loop, capture a
+report artifact and evidence, complete the task, and verify replay hashes.
+
+The current fixture workflow is intentionally read-only and uses a fake
+provider. It proves durable admission, retrieval, execution, evidence, and
+replay; it does not yet claim to be the finished unattended repository-change
+experience.
 
 With the service running:
 
@@ -165,10 +199,16 @@ its completion record.
 
 The most useful entry points are:
 
+- [Product vision](docs/01-product-vision.md) — the problem Fornix exists to
+  solve, who it serves, and the Verified Change Packet direction.
 - [Development guide](DEVELOPMENT.md) — setup, commands, tests, smoke suites,
   CLI usage, and local quality gates.
 - [Documentation guide](docs/52-documentation-guide.md) — terminology,
   claim discipline, examples, and review checklist.
+- [GitHub maintainer setup](GITHUB_SETUP.md) — repository rules, security
+  features, project operations, and release automation.
+- [Release guide](RELEASING.md) — tag-driven binaries, attestations, and GHCR
+  images.
 - [HTTP API reference](docs/53-http-api-reference.md) — routes, auth,
   workspace scope, idempotency, and external-effect semantics.
 - [Fornix foundation](docs/00-fornix-foundation.md) — authority boundaries,
@@ -201,11 +241,12 @@ fixtures/                   small deterministic development fixtures
 ## Status and roadmap boundary
 
 Fornix is intentionally being developed as a sequence of small, testable
-control-plane slices. The current alpha still lacks OAuth/SSO, external KMS or
-secret-manager integration, PostgreSQL row-level security, general background
-evaluation and ingestion scheduling, multi-agent execution graphs, a general
-sandbox provider, external artifact storage, backup/restore drills, capacity
-benchmarks, and high-availability operations.
+control-plane slices that lead toward safe autonomous repository work. The
+current alpha still lacks the complete change-producing workflow, OAuth/SSO,
+external KMS or secret-manager integration, PostgreSQL row-level security,
+general background evaluation and ingestion scheduling, multi-agent execution
+graphs, a general sandbox provider, external artifact storage, backup/restore
+drills, capacity benchmarks, and high-availability operations.
 
 The roadmap is expressed as architecture and completion records rather than
 an implied promise that every planned feature is production-ready. If you are

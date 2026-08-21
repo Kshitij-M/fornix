@@ -1,5 +1,6 @@
 // Package tool defines Fornix's deny-by-default capability registry, policy
-// evaluator, and bounded structured-argv execution boundary.
+// evaluator, and bounded structured-argv execution boundary. Tool results are
+// part of the evidence and recovery chain for verifiable repository work.
 package tool
 
 import (
