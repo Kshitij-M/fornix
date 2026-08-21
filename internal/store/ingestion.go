@@ -463,7 +463,7 @@ func (s *IngestStore) prepareFiles(ctx context.Context, job contracts.IngestJob,
 		}
 		for _, window := range windows {
 			rangeValue := fmt.Sprintf("%d-%d", window.LineStart, window.LineEnd)
-			h := sha256.Sum256([]byte(file.Path + "\n" + rangeValue + "\n" + window.Text))
+			h := sha256.Sum256([]byte(window.Text))
 			chunk := preparedChunk{path: file.Path, sourceRange: rangeValue, content: window.Text, hash: hex.EncodeToString(h[:])}
 			if job.Source.Embedding.Enabled {
 				withinBudget := (job.Source.Embedding.MaxChunks <= 0 || embeddingChunks < job.Source.Embedding.MaxChunks) && (job.Source.Embedding.MaxBytes <= 0 || embeddingBytes+int64(len(window.Text)) <= job.Source.Embedding.MaxBytes)

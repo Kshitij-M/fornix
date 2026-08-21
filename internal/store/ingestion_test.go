@@ -156,6 +156,44 @@ func TestIngestStoreDuplicateResumeAndCrashRecovery(t *testing.T) {
 	}
 }
 
+func TestIngestStoreDeduplicatesIdenticalChunkContentAcrossFiles(t *testing.T) {
+	store, pool, workspace, root := newIngestTestStore(t)
+	content := []byte("same repository content\n")
+	if err := os.WriteFile(filepath.Join(root, "a.txt"), content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "b.txt"), content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	source := contracts.RepositorySource{Repository: "duplicate-content", SourceRoot: root, MountRoot: root, ChunkBytes: 128}
+	discovery, err := ingest.Discover(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, created, err := store.Submit(context.Background(), contracts.IngestJobRequest{
+		WorkspaceID: workspace, IdempotencyKey: "duplicate-content-ingest",
+		Actor:  contracts.ActorRef{ID: "test", Kind: "test", WorkspaceID: workspace},
+		Source: source, BatchSize: 2,
+	}, discovery)
+	if err != nil || !created {
+		t.Fatalf("submit created=%t err=%v", created, err)
+	}
+	result, err := store.ProcessBatch(context.Background(), contracts.IngestBatchRequest{WorkspaceID: workspace, JobID: job.ID, BatchSize: 2, Actor: job.Actor})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Job.Status != contracts.IngestSucceeded || result.Job.DedupedChunks != 1 {
+		t.Fatalf("deduplication result=%+v", result.Job)
+	}
+	var chunks int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM fornix.chunks WHERE workspace_id=$1 AND content=$2`, workspace, string(content)).Scan(&chunks); err != nil {
+		t.Fatal(err)
+	}
+	if chunks != 1 {
+		t.Fatalf("identical content created %d chunk rows, want one", chunks)
+	}
+}
+
 func TestIngestStoreRejectsSourceMutationAndCrossWorkspaceRead(t *testing.T) {
 	store, _, workspace, root := newIngestTestStore(t)
 	ingestFixture(t, root)

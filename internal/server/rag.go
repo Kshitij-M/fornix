@@ -291,7 +291,9 @@ func (s *server) handleChunkUpsert(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "source_path and content required")
 		return
 	}
-	hashBytes := sha256.Sum256([]byte(req.SourcePath + "\n" + req.SourceRange + "\n" + req.Content))
+	// content_sha256 is content identity; source path/range are retained as
+	// location metadata and must not defeat workspace-local deduplication.
+	hashBytes := sha256.Sum256([]byte(req.Content))
 	hash := hex.EncodeToString(hashBytes[:])
 
 	ctx, cancel := context.WithTimeout(r.Context(), 20*time.Second)
