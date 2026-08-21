@@ -13,7 +13,10 @@ PYTHON_ENV_BIN := $(PYTHON_VENV)/bin/python
 PYTHON_BIN := $(if $(wildcard $(PYTHON_ENV_BIN)),$(PYTHON_ENV_BIN),$(PYTHON))
 PYTHON_CHECK_BIN := $(if $(wildcard $(PYTHON_BIN)),$(PYTHON_BIN),$(PYTHON))
 FORNIX_URL ?= http://localhost:8201
-FORNIX_KEY ?= $(shell sed -n 's/^FORNIX_KEY=//p' .env 2>/dev/null | head -n 1)
+# Keep local smokes authenticated when .env is absent. An explicit environment
+# or command-line value still wins, while the fallback matches CI and the
+# development-only key used by the smoke scripts.
+FORNIX_KEY ?= $(shell value=$$(sed -n 's/^FORNIX_KEY=//p' .env 2>/dev/null | head -n 1); if [ -n "$$value" ]; then printf '%s' "$$value"; else printf '%s' 'fornix-ci-test-key'; fi)
 PROJECTION_PG_DSN ?= postgres://fornix:fornix-dev-only@host.docker.internal:55433/fornix?sslmode=disable
 FORNIX_TEST_PG_DSN ?=
 
