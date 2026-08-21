@@ -20,13 +20,24 @@ FORNIX_KEY ?= $(shell value=$$(sed -n 's/^FORNIX_KEY=//p' .env 2>/dev/null | hea
 PROJECTION_PG_DSN ?= postgres://fornix:fornix-dev-only@host.docker.internal:55433/fornix?sslmode=disable
 FORNIX_TEST_PG_DSN ?=
 
-.PHONY: fmt test vet build python-install python-check check smoke smoke-events smoke-projection smoke-leases smoke-tasks smoke-retrieval smoke-provenance smoke-model smoke-tools smoke-agent smoke-scheduler smoke-identity smoke-artifacts smoke-artifact-output smoke-observability smoke-retrieval-quality smoke-retrieval-evaluation smoke-reference-workflow smoke-reference-openai smoke-ingestion operator-reference dev-up dev-up-ai dev-up-watcher dev-run dev-logs dev-down
+.PHONY: fmt fmt-check test test-race vet build python-install python-check check verify hooks-install install-hooks hooks-uninstall uninstall-hooks hooks-check smoke smoke-events smoke-projection smoke-leases smoke-tasks smoke-retrieval smoke-provenance smoke-model smoke-tools smoke-agent smoke-scheduler smoke-identity smoke-artifacts smoke-artifact-output smoke-observability smoke-retrieval-quality smoke-retrieval-evaluation smoke-reference-workflow smoke-reference-openai smoke-ingestion operator-reference dev-up dev-up-ai dev-up-watcher dev-run dev-logs dev-down
 
 fmt:
 	$(GOFMT_CMD) -w $(GO_FILES)
 
+fmt-check:
+	@diff="$$( $(GOFMT_CMD) -d $(GO_FILES) )"; \
+	if [ -n "$$diff" ]; then \
+		printf '%s\n' "$$diff"; \
+		echo 'Go files are not formatted; run make fmt.' >&2; \
+		exit 1; \
+	fi
+
 test:
 	$(GO_CMD) test ./...
+
+test-race:
+	$(GO_CMD) test -race ./...
 
 vet:
 	$(GO_CMD) vet ./...
@@ -127,7 +138,22 @@ smoke:
 	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) scripts/test/v0.27-reference-workflow-smokes.sh
 	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) scripts/test/v0.29-ingestion-smokes.sh
 
-check: test vet python-check
+check: fmt-check test vet python-check
+
+verify: check test-race build
+
+hooks-install install-hooks:
+	git config core.hooksPath .githooks
+	@echo 'Installed Fornix hooks through core.hooksPath=.githooks'
+
+hooks-uninstall uninstall-hooks:
+	git config --unset core.hooksPath 2>/dev/null || true
+	@echo 'Removed the repository-local hook override'
+
+hooks-check:
+	@test -x .githooks/pre-commit
+	@test -x .githooks/pre-push
+	@echo 'Fornix hooks are present and executable'
 
 dev-up:
 	docker compose --env-file .env up -d db

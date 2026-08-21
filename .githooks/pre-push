@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+echo 'pre-push: running deterministic repository checks'
+make verify
+echo 'pre-push: passed'

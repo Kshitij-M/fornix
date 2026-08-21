@@ -22,11 +22,17 @@ Postgres uses host port `55433` by default.
 
 ```sh
 make fmt
+make fmt-check
 make test
+make test-race
 make vet
 make build
 make python-install
 make python-check
+make check
+make verify
+make hooks-install
+make hooks-check
 make smoke
 make smoke-events
 make smoke-projection
@@ -54,6 +60,32 @@ make dev-up-watcher
 make dev-logs
 make dev-down
 ```
+
+## Local quality gates
+
+Install the repository-local hooks once per checkout:
+
+```sh
+make hooks-install
+```
+
+The pre-commit hook runs staged whitespace checks, Go formatting, Python
+syntax checks, and shell syntax checks. The pre-push hook runs `make verify`,
+which includes formatting, unit tests, race tests, vet, Python checks, and
+binary builds. Docker is used automatically for the pinned Go toolchain when
+Go is not installed locally. Hooks fail closed when a required toolchain is
+unavailable.
+
+To remove the repository-local hook override:
+
+```sh
+make hooks-uninstall
+```
+
+CI runs the same Make targets and keeps the Postgres/HTTP qualification job
+separate. Its integration job has a bounded timeout, cancels superseded runs,
+and supplies the runner-to-container database address explicitly to the
+database-backed smoke scripts.
 
 The projection runtime is an internal Postgres-backed pull API. It does not
 start a background worker; callers explicitly run bounded batches or a

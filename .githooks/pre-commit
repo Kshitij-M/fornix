@@ -1,0 +1,75 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root"
+
+git diff --cached --check
+
+staged_files=()
+while IFS= read -r path; do
+  [[ -n "$path" ]] && staged_files+=("$path")
+done < <(git diff --cached --name-only --diff-filter=ACMR)
+if (( ${#staged_files[@]} == 0 )); then
+  exit 0
+fi
+
+has_suffix() {
+  local path="$1"
+  local suffix="$2"
+  [[ "$path" == *"$suffix" ]]
+}
+
+go_files=()
+python_files=()
+shell_files=()
+for path in "${staged_files[@]}"; do
+  if has_suffix "$path" ".go"; then
+    go_files+=("$path")
+  elif has_suffix "$path" ".py"; then
+    python_files+=("$path")
+  elif has_suffix "$path" ".sh"; then
+    shell_files+=("$path")
+  fi
+done
+
+if (( ${#go_files[@]} > 0 )); then
+  if command -v gofmt >/dev/null 2>&1; then
+    format_diff="$(gofmt -d -- "${go_files[@]}")"
+  elif command -v docker >/dev/null 2>&1; then
+    format_diff="$(docker run --rm -v "$repo_root:/workspace" -w /workspace golang:1.25.13 gofmt -d -- "${go_files[@]}")"
+  else
+    echo 'pre-commit: Go formatting requires gofmt or Docker' >&2
+    exit 1
+  fi
+  if [[ -n "$format_diff" ]]; then
+    printf '%s\n' "$format_diff"
+    echo 'pre-commit: Go files are not formatted; run make fmt' >&2
+    exit 1
+  fi
+fi
+
+if (( ${#python_files[@]} > 0 )); then
+  if [[ -x .venv/bin/python ]]; then
+    python_bin=.venv/bin/python
+  elif command -v python3 >/dev/null 2>&1; then
+    python_bin=python3
+  elif command -v docker >/dev/null 2>&1; then
+    docker run --rm -v "$repo_root:/workspace" -w /workspace python:3.13-slim python -m py_compile "${python_files[@]}"
+    python_bin=''
+  else
+    echo 'pre-commit: Python checks require python3, .venv, or Docker' >&2
+    exit 1
+  fi
+  if [[ -n "$python_bin" ]]; then
+    "$python_bin" -m py_compile "${python_files[@]}"
+  fi
+fi
+
+if (( ${#shell_files[@]} > 0 )); then
+  for path in "${shell_files[@]}"; do
+    bash -n "$path"
+  done
+fi
+
+echo "pre-commit: passed (${#staged_files[@]} staged files)"
