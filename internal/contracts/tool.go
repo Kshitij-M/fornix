@@ -169,17 +169,18 @@ func (p *SandboxProfile) Normalize() error {
 // ToolDefinition is an explicitly registered executable capability. Requests
 // cannot choose a different executable than the definition names.
 type ToolDefinition struct {
-	ID             string         `json:"id"`
-	Version        string         `json:"version"`
-	Name           string         `json:"name"`
-	Capability     string         `json:"capability"`
-	Description    string         `json:"description,omitempty"`
-	Executable     string         `json:"executable"`
-	ArgvPrefix     []string       `json:"argv_prefix,omitempty"`
-	AllowedEnvKeys []string       `json:"allowed_env_keys,omitempty"`
-	WorkdirRoot    string         `json:"workdir_root,omitempty"`
-	Sandbox        SandboxProfile `json:"sandbox"`
-	Enabled        bool           `json:"enabled"`
+	ID              string         `json:"id"`
+	Version         string         `json:"version"`
+	Name            string         `json:"name"`
+	Capability      string         `json:"capability"`
+	Description     string         `json:"description,omitempty"`
+	Executable      string         `json:"executable"`
+	ArgvPrefix      []string       `json:"argv_prefix,omitempty"`
+	PathArgvIndexes []int          `json:"path_argv_indexes,omitempty"`
+	AllowedEnvKeys  []string       `json:"allowed_env_keys,omitempty"`
+	WorkdirRoot     string         `json:"workdir_root,omitempty"`
+	Sandbox         SandboxProfile `json:"sandbox"`
+	Enabled         bool           `json:"enabled"`
 }
 
 func (d *ToolDefinition) Normalize() error {
@@ -200,6 +201,14 @@ func (d *ToolDefinition) Normalize() error {
 	}
 	if len(d.ArgvPrefix) > MaxToolArgCount {
 		return fmt.Errorf("tool argv prefix is too large")
+	}
+	if len(d.PathArgvIndexes) > MaxToolArgCount {
+		return fmt.Errorf("tool path argv indexes are too large")
+	}
+	for _, index := range d.PathArgvIndexes {
+		if index < 0 || index >= MaxToolArgCount {
+			return fmt.Errorf("tool path argv index is out of bounds")
+		}
 	}
 	for i := range d.ArgvPrefix {
 		if len(d.ArgvPrefix[i]) > MaxToolArgBytes {

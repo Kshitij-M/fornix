@@ -3,6 +3,8 @@ package tool
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -128,6 +130,67 @@ func TestLocalExecutorEnforcesTimeoutAndOutputBudget(t *testing.T) {
 	}
 	if outputResult.Failure == nil || outputResult.Failure.Code != contracts.ToolFailureOutputLimit {
 		t.Fatalf("expected output limit, got %#v", outputResult)
+	}
+}
+
+func TestLocalExecutorRejectsFilesystemSymlinkEscapes(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "linked")); err != nil {
+		t.Fatal(err)
+	}
+
+	definition := testDefinition("/bin/cat")
+	definition.WorkdirRoot = root
+	definition.PathArgvIndexes = []int{1}
+	definition.Sandbox.ReadOnlyWorkdir = true
+	definition.Sandbox.AllowedWorkdirRoot = root
+	request := testRequest()
+	request.ToolID = definition.ID
+	request.Capability = definition.Capability
+	request.Argv = []string{"/bin/cat", "secret.txt"}
+	request.Workdir = filepath.Join(root, "linked")
+	request.Budget = definition.Sandbox
+	if err := request.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	result, err := (LocalExecutor{}).Run(context.Background(), definition, request)
+	var failureErr *FailureError
+	if !errors.As(err, &failureErr) || failureErr.Failure.Code != contracts.ToolFailureWorkdirDenied {
+		t.Fatalf("expected symlinked workdir rejection, result=%#v err=%v", result, err)
+	}
+}
+
+func TestLocalExecutorRestrictsReadOnlyPathArguments(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.WriteFile(filepath.Join(outside, "secret.txt"), []byte("secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(outside, "secret.txt"), filepath.Join(root, "linked.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	definition := testDefinition("/bin/cat")
+	definition.WorkdirRoot = root
+	definition.PathArgvIndexes = []int{1}
+	definition.Sandbox.ReadOnlyWorkdir = true
+	definition.Sandbox.AllowedWorkdirRoot = root
+	for _, path := range []string{"/etc/passwd", "../secret.txt", "linked.txt"} {
+		request := testRequest()
+		request.ToolID = definition.ID
+		request.Capability = definition.Capability
+		request.Argv = []string{"/bin/cat", path}
+		request.Workdir = root
+		request.Budget = definition.Sandbox
+		if err := request.Normalize(); err != nil {
+			t.Fatal(err)
+		}
+		result, err := (LocalExecutor{}).Run(context.Background(), definition, request)
+		var failureErr *FailureError
+		if !errors.As(err, &failureErr) || failureErr.Failure.Code != contracts.ToolFailureWorkdirDenied {
+			t.Fatalf("expected path %q rejection, result=%#v err=%v", path, result, err)
+		}
 	}
 }
 

@@ -146,7 +146,8 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 	if err := toolRegistry.Register(contracts.ToolDefinition{
 		ID: "fornix.repository.read", Name: "repository.read", Version: "1", Capability: "repository.read",
 		Description: "read a bounded repository file through structured argv", Executable: "/bin/cat", Enabled: true,
-		Sandbox: repositorySandbox,
+		PathArgvIndexes: []int{1},
+		Sandbox:         repositorySandbox,
 	}); err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("register repository tool: %w", err)

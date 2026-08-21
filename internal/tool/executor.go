@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -66,6 +67,42 @@ func (LocalExecutor) Run(parent context.Context, def contracts.ToolDefinition, r
 	}
 	if workdir != "" && !withinRoot(workdir, firstNonEmpty(def.WorkdirRoot, profile.AllowedWorkdirRoot)) {
 		return contracts.ToolResult{}, failure(contracts.ToolFailureWorkdirDenied, "working directory is outside tool policy", false)
+	}
+	root := firstNonEmpty(def.WorkdirRoot, profile.AllowedWorkdirRoot)
+	canonicalRoot := root
+	if root != "" {
+		var err error
+		canonicalRoot, err = filepath.EvalSymlinks(root)
+		if err != nil {
+			return contracts.ToolResult{}, failure(contracts.ToolFailureWorkdirDenied, "tool workdir root cannot be resolved", false)
+		}
+	}
+	if workdir != "" {
+		canonical, err := filepath.EvalSymlinks(workdir)
+		if err != nil {
+			return contracts.ToolResult{}, failure(contracts.ToolFailureWorkdirDenied, "working directory cannot be resolved", false)
+		}
+		if canonicalRoot != "" && !withinRoot(canonical, canonicalRoot) {
+			return contracts.ToolResult{}, failure(contracts.ToolFailureWorkdirDenied, "working directory resolves outside tool policy", false)
+		}
+		workdir = canonical
+	}
+	if profile.ReadOnlyWorkdir && len(def.PathArgvIndexes) > 0 {
+		if workdir == "" || canonicalRoot == "" {
+			return contracts.ToolResult{}, failure(contracts.ToolFailureWorkdirDenied, "read-only path arguments require an authorized workdir", false)
+		}
+		for _, index := range def.PathArgvIndexes {
+			if index >= len(req.Argv) || filepath.IsAbs(req.Argv[index]) {
+				return contracts.ToolResult{}, failure(contracts.ToolFailureWorkdirDenied, "path argument is outside the authorized workdir", false)
+			}
+			candidate := filepath.Join(workdir, req.Argv[index])
+			if !withinRoot(candidate, canonicalRoot) {
+				return contracts.ToolResult{}, failure(contracts.ToolFailureWorkdirDenied, "path argument is outside the authorized workdir", false)
+			}
+			if resolved, err := filepath.EvalSymlinks(candidate); err == nil && !withinRoot(resolved, canonicalRoot) {
+				return contracts.ToolResult{}, failure(contracts.ToolFailureWorkdirDenied, "path argument resolves outside the authorized workdir", false)
+			}
+		}
 	}
 	allowed := map[string]struct{}{}
 	for _, key := range def.AllowedEnvKeys {
