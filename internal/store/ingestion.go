@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -183,13 +184,19 @@ func (s *IngestStore) Submit(ctx context.Context, request contracts.IngestJobReq
 		seen[file.Path] = true
 	}
 	removed := 0
+	removedPaths := make([]string, 0, len(previous))
 	for path := range previous {
 		if !seen[path] {
-			removed++
-			removedFile := contracts.IngestFile{ID: stableIngestFileID(jobID, path, previous[path].ContentHash), JobID: jobID, WorkspaceID: normalized.WorkspaceID, Ordinal: len(discovered.Files) + removed - 1, Path: path, Mode: previous[path].Mode, ByteSize: previous[path].ByteSize, ContentHash: previous[path].ContentHash, State: contracts.IngestFileRemoved, SupersedesFileID: previous[path].ID}
-			if err := insertIngestFileTx(ctx, tx, removedFile); err != nil {
-				return contracts.IngestJob{}, false, err
-			}
+			removedPaths = append(removedPaths, path)
+		}
+	}
+	sort.Strings(removedPaths)
+	for _, path := range removedPaths {
+		old := previous[path]
+		removed++
+		removedFile := contracts.IngestFile{ID: stableIngestFileID(jobID, path, old.ContentHash), JobID: jobID, WorkspaceID: normalized.WorkspaceID, Ordinal: len(discovered.Files) + removed - 1, Path: path, Mode: old.Mode, ByteSize: old.ByteSize, ContentHash: old.ContentHash, State: contracts.IngestFileRemoved, SupersedesFileID: old.ID}
+		if err := insertIngestFileTx(ctx, tx, removedFile); err != nil {
+			return contracts.IngestJob{}, false, err
 		}
 	}
 	if _, err := tx.Exec(ctx, `UPDATE fornix.ingest_jobs SET file_count=$2, skipped_files=$3, removed_files=$4, updated_at=clock_timestamp() WHERE id=$1`, jobID, len(discovered.Files)+removed, len(discovered.Skipped), removed); err != nil {

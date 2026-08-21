@@ -216,6 +216,70 @@ func TestIngestStoreRejectsConflictingPolicyForSameManifest(t *testing.T) {
 	}
 }
 
+func TestIngestStoreOrdersRemovedFilesDeterministically(t *testing.T) {
+	store, pool, workspace, root := newIngestTestStore(t)
+	for _, name := range []string{"z.txt", "a.txt", "m.txt"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte(name+" content\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	source := contracts.RepositorySource{Repository: "ordered-removals", SourceRoot: root, MountRoot: root, ChunkBytes: 128}
+	discovery, err := ingest.Discover(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := contracts.ActorRef{ID: "test", Kind: "test", WorkspaceID: workspace}
+	first, created, err := store.Submit(context.Background(), contracts.IngestJobRequest{WorkspaceID: workspace, IdempotencyKey: "ordered-first", Actor: actor, Source: source, BatchSize: 8}, discovery)
+	if err != nil || !created {
+		t.Fatalf("first submit created=%t err=%v", created, err)
+	}
+	if _, err := store.ProcessBatch(context.Background(), contracts.IngestBatchRequest{WorkspaceID: workspace, JobID: first.ID, BatchSize: 8, Actor: actor}); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "a.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(root, "m.txt")); err != nil {
+		t.Fatal(err)
+	}
+	discovery, err = ingest.Discover(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, created, err := store.Submit(context.Background(), contracts.IngestJobRequest{WorkspaceID: workspace, IdempotencyKey: "ordered-second", Actor: actor, Source: source, BatchSize: 8}, discovery)
+	if err != nil || !created {
+		t.Fatalf("second submit created=%t err=%v", created, err)
+	}
+	rows, err := pool.Query(context.Background(), `SELECT path,ordinal,state FROM fornix.ingest_files WHERE job_id=$1 ORDER BY ordinal`, second.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	want := []struct {
+		path, state string
+		ordinal     int
+	}{{"z.txt", contracts.IngestFilePresent, 0}, {"a.txt", contracts.IngestFileRemoved, 1}, {"m.txt", contracts.IngestFileRemoved, 2}}
+	for _, expected := range want {
+		if !rows.Next() {
+			t.Fatalf("missing ingest file %+v", expected)
+		}
+		var path, state string
+		var ordinal int
+		if err := rows.Scan(&path, &ordinal, &state); err != nil {
+			t.Fatal(err)
+		}
+		if path != expected.path || ordinal != expected.ordinal || state != expected.state {
+			t.Fatalf("removed file order got path=%q ordinal=%d state=%q want=%+v", path, ordinal, state, expected)
+		}
+	}
+	if rows.Next() {
+		t.Fatal("unexpected extra ingest file")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestIngestStoreRejectsSourceMutationAndCrossWorkspaceRead(t *testing.T) {
 	store, _, workspace, root := newIngestTestStore(t)
 	ingestFixture(t, root)
