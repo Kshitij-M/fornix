@@ -136,6 +136,11 @@ The current implementation includes the following tested slices:
 - immutable workspace-scoped Work Receipts linking task/run, retrieval,
   model/tool, evidence, artifact, cost, and replay identities with bounded
   gist/detail/raw disclosure;
+- approval-gated repository change packets with source preconditions,
+  content-addressed operation artifacts, workspace-mount and symlink safety,
+  durable approval decisions, structured filesystem application, post-state
+  verification, recovery-required classification, and Verified Change Packet
+  receipts;
 - operator workspace/bootstrap, inspection, evaluation, disclosure, and
   durable repository-ingestion commands.
 
@@ -180,8 +185,10 @@ finalize one Work Receipt over the authoritative records.
 
 The current fixture workflow is intentionally read-only and uses a fake
 provider. It proves durable admission, retrieval, execution, evidence, and
-replay; it does not yet claim to be the finished unattended repository-change
-experience.
+replay. The separate `fornix change` workflow now demonstrates the approval-
+gated write boundary for explicitly configured local mounts; it does not yet
+automatically turn every agent response into a proposed patch or provide a
+host-independent sandbox.
 
 With the service running:
 

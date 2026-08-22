@@ -300,6 +300,26 @@ func (s *WorkReceiptStore) validateAuthoritativeWorkTx(ctx context.Context, tx p
 			return ErrWorkReceiptStale
 		}
 	}
+	if receipt.WorkKind == contracts.WorkReceiptReferenceChangeApplication {
+		var status, packetHash string
+		if err := tx.QueryRow(ctx, `SELECT status, packet_hash FROM fornix.change_applications WHERE workspace_id=$1 AND id=$2 FOR SHARE`, receipt.WorkspaceID, receipt.WorkID).Scan(&status, &packetHash); errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: change application is missing", ErrWorkReceiptIntegrity)
+		} else if err != nil {
+			return fmt.Errorf("validate receipt change application: %w", err)
+		} else if status != contracts.ChangeApplied || (receipt.ReplayHash != "" && receipt.ReplayHash != packetHash) {
+			return fmt.Errorf("%w: change application is not verified", ErrWorkReceiptIntegrity)
+		}
+	}
+	if receipt.WorkKind == contracts.WorkReceiptReferenceChangeProposal {
+		var status, packetHash string
+		if err := tx.QueryRow(ctx, `SELECT status, packet_hash FROM fornix.change_proposals WHERE workspace_id=$1 AND id=$2 FOR SHARE`, receipt.WorkspaceID, receipt.WorkID).Scan(&status, &packetHash); errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: change proposal is missing", ErrWorkReceiptIntegrity)
+		} else if err != nil {
+			return fmt.Errorf("validate receipt change proposal: %w", err)
+		} else if status != contracts.ChangeApplied || (receipt.ReplayHash != "" && receipt.ReplayHash != packetHash) {
+			return fmt.Errorf("%w: change proposal is not applied", ErrWorkReceiptIntegrity)
+		}
+	}
 	return nil
 }
 
@@ -387,6 +407,10 @@ func validateReceiptReferenceTx(ctx context.Context, tx pgx.Tx, workspaceID stri
 	case contracts.WorkReceiptReferenceReplay:
 		// Replay is checked through the agent-run state hash or explicit hash.
 		found = ref.Hash != ""
+	case contracts.WorkReceiptReferenceChangeProposal:
+		err = tx.QueryRow(ctx, `SELECT true, packet_hash FROM fornix.change_proposals WHERE workspace_id=$1 AND id=$2`, workspaceID, ref.SourceID).Scan(&found, &sourceHash)
+	case contracts.WorkReceiptReferenceChangeApplication:
+		err = tx.QueryRow(ctx, `SELECT true, packet_hash FROM fornix.change_applications WHERE workspace_id=$1 AND id=$2 AND status='applied'`, workspaceID, ref.SourceID).Scan(&found, &sourceHash)
 	default:
 		return fmt.Errorf("%w: unsupported reference kind %q", ErrWorkReceiptIntegrity, ref.Kind)
 	}

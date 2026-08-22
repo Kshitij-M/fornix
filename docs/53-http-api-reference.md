@@ -203,6 +203,39 @@ shim exposes equivalent `fornix__receipt_get` and
 `fornix__receipt_disclose` tools. All three surfaces call the same HTTP
 authority and preserve workspace authorization.
 
+## Approval-gated repository changes
+
+Repository changes use a separate external-effect boundary. A proposal is a
+typed, bounded packet against a captured source snapshot; approval is a
+durable decision over the packet hash; application is admitted only after the
+packet and configured workspace mount are rechecked. Raw proposed bytes are
+content-addressed artifacts and are never copied into change rows or event
+payloads.
+
+| Method | Route | Purpose | Required capability |
+| --- | --- | --- | --- |
+| `POST` | `/v1/changes/dry-run` | Plan and verify a change without durable mutation or filesystem writes | `change:propose` |
+| `POST` | `/v1/changes` | Capture a source snapshot and create an idempotent proposal | `change:propose` |
+| `GET` | `/v1/changes/{id}` | Read a workspace-scoped proposal and packet references | `change:read` |
+| `POST` | `/v1/changes/{id}/approve` | Approve or reject the exact packet hash | `change:approve` |
+| `POST` | `/v1/changes/{id}/apply` | Apply an approved packet through structured filesystem APIs | `change:apply` |
+| `POST` | `/v1/changes/disclose` | Read a bounded hash-preserving proposal/application view | `change:disclose` |
+
+The source root must be inside the workspace's explicitly configured
+`tool_root`; absolute-path traversal, symlink components, non-regular files,
+source hash drift, duplicate operations, and budget violations fail closed.
+Application uses temporary-file writes with content-hash verification and
+checks the affected post-state. A multi-operation crash can leave an external
+partial effect; the durable application is then classified
+`recovery_required`, and Fornix does not claim exactly-once filesystem
+execution. Successful applications produce a derived Verified Change Packet
+Work Receipt with source, artifact, packet, result-tree, and provenance hashes.
+
+The CLI exposes `fornix change dry-run`, `propose`, `get`, `approve`, `apply`,
+and `disclose`. The MCP shim exposes equivalent
+`fornix__change_*` tools. The fake provider is not involved in planning,
+approval, or application.
+
 ## Compatibility data-plane routes
 
 These routes support the original memo, chunk, symbol, coordination, and
