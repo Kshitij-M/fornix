@@ -71,6 +71,7 @@ engineering record for each one.
 | 17 | Retrieval-surface capture and operator evaluation | [`46-retrieval-surface-capture-foundation.md`](46-retrieval-surface-capture-foundation.md) | [`47-loop-17-completion.md`](47-loop-17-completion.md) |
 | 18 | Operator control and reference workflow | [`48-operator-reference-workflow-foundation.md`](48-operator-reference-workflow-foundation.md) | [`49-loop-18-completion.md`](49-loop-18-completion.md) |
 | 19 | Resumable repository ingestion | [`50-repository-ingestion-foundation.md`](50-repository-ingestion-foundation.md) | [`51-loop-19-completion.md`](51-loop-19-completion.md) |
+| 20 | Work Receipts and Verified Change Packet foundation | [`54-work-receipt-foundation.md`](54-work-receipt-foundation.md) | [`55-loop-20-completion.md`](55-loop-20-completion.md) |
 
 ## Cross-cutting decisions
 

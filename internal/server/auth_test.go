@@ -148,3 +148,31 @@ func TestSecurityMiddlewareAuthorizesEvaluationOperatorSurface(t *testing.T) {
 		}
 	}
 }
+
+func TestSecurityMiddlewareAuthorizesWorkReceiptSurface(t *testing.T) {
+	srv, _, workspaceID, token := newServerAuthTest(t, []contracts.Permission{
+		contracts.PermissionReceiptRead,
+		contracts.PermissionReceiptWrite,
+	})
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	handler := withRequestMiddleware(srv.securityMiddleware(next), 1<<20)
+	cases := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodPost, "/v1/work-receipts", `{"workspace_id":"` + workspaceID + `"}`},
+		{http.MethodGet, "/v1/work-receipts/receipt-1?workspace_id=" + workspaceID, ""},
+		{http.MethodPost, "/v1/work-receipts/disclose", `{"workspace_id":"` + workspaceID + `","receipt_id":"receipt-1"}`},
+	}
+	for _, item := range cases {
+		request := httptest.NewRequest(item.method, item.path, strings.NewReader(item.body))
+		request.Header.Set("Authorization", "Bearer "+token)
+		request.Header.Set("X-Request-ID", "receipt-auth-"+item.method+"-"+item.path)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("authorized %s %s response=%d body=%s", item.method, item.path, response.Code, response.Body.String())
+		}
+	}
+}

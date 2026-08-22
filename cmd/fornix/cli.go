@@ -73,6 +73,8 @@ func runCLI(args []string) error {
 		return cli.artifactCommand(parts[1:])
 	case "evidence":
 		return cli.evidenceCommand(parts[1:])
+	case "receipt":
+		return cli.receiptCommand(parts[1:])
 	case "reference-workflow":
 		return cli.referenceWorkflow(parts[1:])
 	default:
@@ -81,7 +83,7 @@ func runCLI(args []string) error {
 }
 
 func (c *operatorCLI) usage() error {
-	return errors.New("usage: fornix [--url URL] [--key KEY] [--workspace ID] <health|workspace|identity|role|api-key|ingest|task|run|retrieve|evaluation|metrics|artifact|evidence|reference-workflow>")
+	return errors.New("usage: fornix [--url URL] [--key KEY] [--workspace ID] <health|workspace|identity|role|api-key|ingest|task|run|retrieve|evaluation|metrics|artifact|evidence|receipt|reference-workflow>")
 }
 
 func (c *operatorCLI) workspaceCommand(args []string) error {
@@ -141,7 +143,7 @@ func (c *operatorCLI) roleCommand(args []string) error {
 }
 
 func contractsPermissionDefaults() string {
-	return "workspace:read,task:read,task:mutate,task:execute,agent:run,agent:read,retrieval:read,retrieval:write,evidence:read,evidence:write,model:invoke,tool:execute,evaluation:read,evaluation:run"
+	return "workspace:read,task:read,task:mutate,task:execute,agent:run,agent:read,retrieval:read,retrieval:write,evidence:read,evidence:write,model:invoke,tool:execute,evaluation:read,evaluation:run,receipt:read,receipt:write"
 }
 
 func (c *operatorCLI) apiKeyCommand(args []string) error {
@@ -272,6 +274,21 @@ func (c *operatorCLI) evidenceCommand(args []string) error {
 	return c.requestPrint(http.MethodPost, "/v1/evidence/disclose", map[string]any{"workspace_id": c.workspace, "evidence_id": int64Value(args, "id", 0), "level": valueArg(args, "level", "gist"), "max_bytes": 32768, "max_tokens": 8192, "max_nodes": 32}, false)
 }
 
+func (c *operatorCLI) receiptCommand(args []string) error {
+	if len(args) == 0 || args[0] == "get" {
+		return c.requestPrint(http.MethodGet, "/v1/work-receipts/"+url.PathEscape(valueArg(args[1:], "id", ""))+"?workspace_id="+url.QueryEscape(c.workspace), nil, false)
+	}
+	if args[0] == "disclose" {
+		body := map[string]any{
+			"workspace_id": c.workspace, "receipt_id": valueArg(args[1:], "id", ""),
+			"level": valueArg(args[1:], "level", "gist"), "max_bytes": intValue(args[1:], "max-bytes", 32768),
+			"max_tokens": intValue(args[1:], "max-tokens", 8192), "max_items": intValue(args[1:], "max-items", 64),
+		}
+		return c.requestPrint(http.MethodPost, "/v1/work-receipts/disclose", body, false)
+	}
+	return fmt.Errorf("unknown receipt command %q", args[0])
+}
+
 func (c *operatorCLI) referenceWorkflow(args []string) error {
 	workspace := valueArg(args, "workspace", c.workspace)
 	workdir := valueArg(args, "workdir", valueArg(args, "fixture", envOr("FORNIX_REFERENCE_WORKDIR", "/workspace/fixtures/reference-repo")))
@@ -383,7 +400,39 @@ func (c *operatorCLI) referenceWorkflow(args []string) error {
 		events, eventsOK := replay["events"].([]any)
 		replayVerified = eventsOK && stringValue(checkpoint, "state_hash") != "" && stringValue(checkpoint, "state_hash") == stringValue(run, "state_hash") && len(events) > 0
 	}
-	return c.print(map[string]any{"workspace": workspace, "ingest": ingest, "task": taskResponse, "claim": claim, "run": runResponse, "artifact": artifact, "evidence": evidence, "completion": complete, "replay": replay, "replay_verified": replayVerified})
+	stateHash := stringValue(run, "state_hash")
+	receiptRequest := map[string]any{
+		"workspace_id": workspace, "idempotency_key": "reference-receipt:" + taskID,
+		"work_kind": "task", "work_id": taskID,
+		"task":          map[string]any{"id": taskID, "kind": "task", "workspace_id": workspace},
+		"session":       map[string]any{"id": sessionID, "kind": "session", "workspace_id": workspace},
+		"task_owner_id": sessionID, "task_fence": fence, "source_manifest_hash": manifestHash, "replay_hash": stateHash,
+		"steps": []any{
+			map[string]any{"ordinal": 0, "id": "ingest", "name": "repository ingestion", "kind": "ingest", "status": "succeeded", "source_kind": "repository_ingest", "source_id": jobID, "source_hash": manifestHash},
+			map[string]any{"ordinal": 1, "id": "context", "name": "bounded context", "kind": "retrieval", "status": "succeeded", "output_hash": stringValue(run, "context_hash")},
+			map[string]any{"ordinal": 2, "id": "agent-run", "name": "agent run", "kind": "agent", "status": "succeeded", "source_kind": "agent_run", "source_id": runID, "source_hash": stateHash},
+			map[string]any{"ordinal": 3, "id": "report-artifact", "name": "report artifact", "kind": "artifact", "status": "succeeded", "source_kind": "artifact", "source_id": nestedID(artifact, "artifact", "id"), "source_hash": nestedFieldString(artifact, "artifact", "content_hash")},
+			map[string]any{"ordinal": 4, "id": "report-evidence", "name": "report evidence", "kind": "evidence", "status": "succeeded", "source_kind": "evidence", "source_id": nestedID(evidence, "record", "id"), "source_hash": nestedFieldString(evidence, "record", "evidence_hash")},
+			map[string]any{"ordinal": 5, "id": "task-completion", "name": "task completion", "kind": "task", "status": "succeeded", "source_kind": "task", "source_id": taskID},
+		},
+		"references": []any{
+			map[string]any{"workspace_id": workspace, "kind": "task", "source_id": taskID},
+			map[string]any{"workspace_id": workspace, "kind": "agent_run", "source_id": runID, "hash": stateHash},
+			map[string]any{"workspace_id": workspace, "kind": "artifact", "source_id": nestedID(artifact, "artifact", "id"), "hash": nestedFieldString(artifact, "artifact", "content_hash"), "role": "report"},
+			map[string]any{"workspace_id": workspace, "kind": "evidence", "source_id": nestedID(evidence, "record", "id"), "hash": nestedFieldString(evidence, "record", "evidence_hash"), "role": "report"},
+		},
+	}
+	if artifactID := int64ValueFromString(nestedID(artifact, "artifact", "id")); artifactID > 0 {
+		receiptRequest["artifacts"] = []any{map[string]any{"id": int64ValueFromString(nestedID(artifact, "reference", "id")), "artifact_id": artifactID, "workspace_id": workspace, "content_hash": nestedFieldString(artifact, "artifact", "content_hash"), "source_kind": "agent_run", "source_id": runID, "role": "report"}}
+	}
+	if evidenceID := int64ValueFromString(nestedID(evidence, "record", "id")); evidenceID > 0 {
+		receiptRequest["evidence"] = []any{map[string]any{"id": evidenceID, "workspace_id": workspace, "evidence_hash": nestedFieldString(evidence, "record", "evidence_hash"), "source_reference": "agent-run:" + runID + ":report", "role": "report"}}
+	}
+	receipt, err := c.request(http.MethodPost, "/v1/work-receipts", receiptRequest, false)
+	if err != nil {
+		return err
+	}
+	return c.print(map[string]any{"workspace": workspace, "ingest": ingest, "task": taskResponse, "claim": claim, "run": runResponse, "artifact": artifact, "evidence": evidence, "completion": complete, "replay": replay, "replay_verified": replayVerified, "receipt": receipt})
 }
 
 func (c *operatorCLI) requestPrint(method, path string, body any, bootstrap bool) error {
@@ -514,6 +563,12 @@ func stringValue(value map[string]any, key string) string {
 	return ""
 }
 func nestedID(value map[string]any, object, key string) string {
+	if item, ok := value[object].(map[string]any); ok {
+		return stringValue(item, key)
+	}
+	return ""
+}
+func nestedFieldString(value map[string]any, object, key string) string {
 	if item, ok := value[object].(map[string]any); ok {
 		return stringValue(item, key)
 	}

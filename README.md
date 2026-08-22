@@ -55,10 +55,10 @@ Fornix makes the conditions and history of AI work durable and inspectable:
 
 The intended product output is a **Verified Change Packet**: a result linked
 to its source snapshot, evidence, validation, cost, and recovery history. Its
-machine-verifiable foundation is a future first-class **Work Receipt**. The
+machine-verifiable foundation is now the first-class **Work Receipt**. The
 current alpha already stores most of the underlying control-plane facts; the
-flagship repository-maintenance workflow will make that value visible as one
-user-facing result.
+reference workflow assembles them into one immutable, hash-stable receipt
+without claiming that remote work was exactly-once.
 
 ## What Fornix is—and is not
 
@@ -133,6 +133,9 @@ The current implementation includes the following tested slices:
 - content-addressed Postgres artifacts, output links, retention/integrity
   operations, observations, cost accounting, offline evaluation, and
   retrieval-surface capture;
+- immutable workspace-scoped Work Receipts linking task/run, retrieval,
+  model/tool, evidence, artifact, cost, and replay identities with bounded
+  gist/detail/raw disclosure;
 - operator workspace/bootstrap, inspection, evaluation, disclosure, and
   durable repository-ingestion commands.
 
@@ -172,7 +175,8 @@ The reference workflow is the first executable showcase of the product
 direction. It demonstrates the control-plane foundation behind a future
 Verified Change Packet: bootstrap a workspace, ingest a source snapshot, create
 and claim a task, retrieve bounded context, run a bounded agent loop, capture a
-report artifact and evidence, complete the task, and verify replay hashes.
+report artifact and evidence, complete the task, verify replay hashes, and
+finalize one Work Receipt over the authoritative records.
 
 The current fixture workflow is intentionally read-only and uses a fake
 provider. It proves durable admission, retrieval, execution, evidence, and
@@ -183,6 +187,12 @@ With the service running:
 
 ```sh
 make smoke-reference-workflow
+```
+
+Inspect a receipt without replaying external work:
+
+```sh
+bin/fornix receipt disclose --id <receipt-id> --level detail
 ```
 
 OpenAI-compatible chat is disabled by default. The optional smoke reads

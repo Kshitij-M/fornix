@@ -158,6 +158,24 @@ def tool_evidence_disclose(args: dict) -> dict:
     })
 
 
+def tool_receipt_get(args: dict) -> dict:
+    receipt_id = str(args.get("receipt_id") or "").strip()
+    if not receipt_id or "/" in receipt_id:
+        raise ValueError("receipt_id required")
+    return _call("GET", f"/v1/work-receipts/{receipt_id}?workspace_id={FORNIX_WORKSPACE}")
+
+
+def tool_receipt_disclose(args: dict) -> dict:
+    return _call("POST", "/v1/work-receipts/disclose", {
+        "workspace_id": FORNIX_WORKSPACE,
+        "receipt_id": str(args.get("receipt_id") or ""),
+        "level": args.get("level", "gist"),
+        "max_bytes": min(int(args.get("max_bytes") or 32768), 1 << 20),
+        "max_tokens": min(int(args.get("max_tokens") or 8192), 262144),
+        "max_items": min(int(args.get("max_items") or 64), 128),
+    })
+
+
 def tool_search(args: dict) -> dict:
     return _call("POST", "/v1/memo/search", {
         "query": args.get("query", ""),
@@ -388,6 +406,18 @@ TOOLS = [
         "description": "Read bounded workspace-scoped evidence with provenance-safe disclosure.",
         "inputSchema": {"type": "object", "properties": {"evidence_id": {"type": "integer"}, "source_reference": {"type": "string"}, "level": {"type": "string", "enum": ["gist", "detail", "raw"]}, "max_bytes": {"type": "integer", "maximum": 1048576}, "max_tokens": {"type": "integer", "maximum": 65536}}, "additionalProperties": False},
         "fn": tool_evidence_disclose,
+    },
+    {
+        "name": "fornix__receipt_get",
+        "description": "Inspect one immutable workspace-scoped Work Receipt without replaying external effects.",
+        "inputSchema": {"type": "object", "properties": {"receipt_id": {"type": "string"}}, "required": ["receipt_id"], "additionalProperties": False},
+        "fn": tool_receipt_get,
+    },
+    {
+        "name": "fornix__receipt_disclose",
+        "description": "Read a bounded gist/detail/raw Work Receipt disclosure with its stable canonical hash.",
+        "inputSchema": {"type": "object", "properties": {"receipt_id": {"type": "string"}, "level": {"type": "string", "enum": ["gist", "detail", "raw"]}, "max_bytes": {"type": "integer", "maximum": 1048576}, "max_tokens": {"type": "integer", "maximum": 262144}, "max_items": {"type": "integer", "maximum": 128}}, "required": ["receipt_id"], "additionalProperties": False},
+        "fn": tool_receipt_disclose,
     },
 ]
 TOOL_INDEX = {t["name"]: t for t in TOOLS}

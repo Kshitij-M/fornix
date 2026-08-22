@@ -20,6 +20,10 @@ assert v["replay_verified"] is True
 assert v["artifact"]
 assert v["evidence"]
 assert v["completion"]
+assert v["receipt"]
+receipt=v["receipt"].get("receipt", v["receipt"])
+assert receipt.get("canonical_hash"), receipt
+assert receipt.get("verification", {}).get("status") == "verified", receipt
 run=v["run"].get("run", v["run"])
 assert run.get("state") == "succeeded", run
 print("reference workflow smoke: ok")' <<EOF

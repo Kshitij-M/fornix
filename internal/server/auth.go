@@ -248,6 +248,13 @@ func permissionForRequest(r *http.Request) contracts.Permission {
 		return contracts.PermissionWorkspaceWrite
 	case path == "/v1/observability/metrics" || path == "/v1/metrics":
 		return contracts.PermissionWorkspaceRead
+	case path == "/v1/work-receipts/disclose" || strings.HasPrefix(path, "/v1/work-receipts/") && r.Method == http.MethodGet:
+		return contracts.PermissionReceiptRead
+	case path == "/v1/work-receipts":
+		if r.Method == http.MethodGet {
+			return contracts.PermissionReceiptRead
+		}
+		return contracts.PermissionReceiptWrite
 	case path == "/v1/artifacts":
 		return contracts.PermissionEvidenceWrite
 	case path == "/v1/chunks":

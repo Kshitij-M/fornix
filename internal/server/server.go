@@ -53,6 +53,7 @@ type server struct {
 	operator          *store.OperatorStore
 	observability     *store.ObservabilityStore
 	evaluations       *store.EvaluationStore
+	workReceipts      *store.WorkReceiptStore
 	toolRegistry      *tool.Registry
 	toolExecutor      *tool.Executor
 	toolRuns          *store.ToolRunStore
@@ -96,6 +97,7 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 	modelCalls := store.NewModelCallStore(pool)
 	observability := store.NewObservabilityStore(pool)
 	evaluations := store.NewEvaluationStore(pool)
+	workReceipts := store.NewWorkReceiptStore(pool)
 	retrievalSurfaces := store.NewRetrievalSurfaceStore(pool)
 	authStore := store.NewAuthStore(pool)
 	operatorStore := store.NewOperatorStore(pool, events)
@@ -193,6 +195,7 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 		operator:          operatorStore,
 		observability:     observability,
 		evaluations:       evaluations,
+		workReceipts:      workReceipts,
 		toolRegistry:      toolRegistry,
 		toolRuns:          toolRuns,
 		toolExecutor:      toolExecutor,
@@ -2457,6 +2460,32 @@ func (s *server) routes() http.Handler {
 			return
 		}
 		s.handleObservabilityMetrics(w, r)
+	})
+	mux.HandleFunc("/v1/work-receipts/disclose", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleWorkReceiptDisclosure(w, r)
+	})
+	mux.HandleFunc("/v1/work-receipts/", func(w http.ResponseWriter, r *http.Request) {
+		id := strings.TrimPrefix(r.URL.Path, "/v1/work-receipts/")
+		if id == "" || strings.Contains(id, "/") {
+			writeErr(w, http.StatusNotFound, "work receipt id required")
+			return
+		}
+		if r.Method != http.MethodGet {
+			writeErr(w, http.StatusMethodNotAllowed, "GET only")
+			return
+		}
+		s.handleWorkReceiptGet(w, r, id)
+	})
+	mux.HandleFunc("/v1/work-receipts", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleWorkReceiptFinalize(w, r)
 	})
 	mux.HandleFunc("/v1/metrics", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
