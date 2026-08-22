@@ -25,6 +25,7 @@ import (
 	pgvector "github.com/pgvector/pgvector-go"
 
 	"github.com/omaveda/fornix/internal/agentloop"
+	"github.com/omaveda/fornix/internal/change"
 	"github.com/omaveda/fornix/internal/config"
 	"github.com/omaveda/fornix/internal/contracts"
 	"github.com/omaveda/fornix/internal/model"
@@ -54,6 +55,7 @@ type server struct {
 	observability     *store.ObservabilityStore
 	evaluations       *store.EvaluationStore
 	workReceipts      *store.WorkReceiptStore
+	changes           *change.Service
 	toolRegistry      *tool.Registry
 	toolExecutor      *tool.Executor
 	toolRuns          *store.ToolRunStore
@@ -98,6 +100,10 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 	observability := store.NewObservabilityStore(pool)
 	evaluations := store.NewEvaluationStore(pool)
 	workReceipts := store.NewWorkReceiptStore(pool)
+	artifactStore := store.NewArtifactStore(pool)
+	changeStore := store.NewRepositoryChangeStore(pool, events, artifactStore)
+	changeService := change.NewService(changeStore, artifactStore)
+	changeService.SetReceiptStore(workReceipts)
 	retrievalSurfaces := store.NewRetrievalSurfaceStore(pool)
 	authStore := store.NewAuthStore(pool)
 	operatorStore := store.NewOperatorStore(pool, events)
@@ -185,7 +191,7 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 		pool:              pool,
 		events:            events,
 		evidence:          store.NewEvidenceStore(pool),
-		artifacts:         store.NewArtifactStore(pool),
+		artifacts:         artifactStore,
 		tasks:             store.NewTaskStore(pool, events),
 		retrieval:         retrievalStore,
 		retrievalSurfaces: retrievalSurfaces,
@@ -196,6 +202,7 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 		observability:     observability,
 		evaluations:       evaluations,
 		workReceipts:      workReceipts,
+		changes:           changeService,
 		toolRegistry:      toolRegistry,
 		toolRuns:          toolRuns,
 		toolExecutor:      toolExecutor,
@@ -2486,6 +2493,48 @@ func (s *server) routes() http.Handler {
 			return
 		}
 		s.handleWorkReceiptFinalize(w, r)
+	})
+	mux.HandleFunc("/v1/changes/dry-run", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleChangeDryRun(w, r)
+	})
+	mux.HandleFunc("/v1/changes/disclose", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleChangeDisclosure(w, r)
+	})
+	mux.HandleFunc("/v1/changes/", func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/v1/changes/"), "/")
+		if len(parts) == 0 || parts[0] == "" {
+			writeErr(w, http.StatusNotFound, "change id required")
+			return
+		}
+		proposalID := parts[0]
+		if len(parts) == 1 && r.Method == http.MethodGet {
+			s.handleChangeGet(w, r, proposalID)
+			return
+		}
+		if len(parts) == 2 && parts[1] == "approve" && r.Method == http.MethodPost {
+			s.handleChangeApprove(w, r, proposalID)
+			return
+		}
+		if len(parts) == 2 && parts[1] == "apply" && r.Method == http.MethodPost {
+			s.handleChangeApply(w, r, proposalID)
+			return
+		}
+		writeErr(w, http.StatusNotFound, "unknown change operation")
+	})
+	mux.HandleFunc("/v1/changes", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleChangePropose(w, r)
 	})
 	mux.HandleFunc("/v1/metrics", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {

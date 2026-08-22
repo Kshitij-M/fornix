@@ -104,6 +104,31 @@ func TestModelCallStoreConcurrentStartDeduplicates(t *testing.T) {
 	}
 }
 
+func TestModelCallStoreRequestIDConflictResolvesAndRejectsHashMismatch(t *testing.T) {
+	store, _, workspaceID := newModelCallTestStore(t)
+	first := modelCallRequest(workspaceID, "request-identity-first")
+	first.RequestID = "shared-request-id"
+	if _, err := store.Start(context.Background(), first, []byte(`{"request":"stable"}`)); err != nil {
+		t.Fatal(err)
+	}
+
+	// A retry may arrive with a regenerated idempotency key while retaining
+	// the same logical request ID. The second unique index must resolve to the
+	// original durable call rather than surfacing a raw constraint error.
+	retry := first
+	retry.IdempotencyKey = "request-identity-retry"
+	replayed, err := store.Start(context.Background(), retry, []byte(`{"request":"stable"}`))
+	if err != nil || !replayed.Existing || replayed.Record.RequestID != first.RequestID {
+		t.Fatalf("request-id replay = %+v err=%v", replayed, err)
+	}
+
+	conflict := retry
+	conflict.Metadata = map[string]string{"different": "payload"}
+	if _, err := store.Start(context.Background(), conflict, []byte(`{"request":"stable"}`)); !errors.Is(err, ErrModelCallConflict) {
+		t.Fatalf("request-id hash conflict = %v", err)
+	}
+}
+
 func TestModelCallStoreTerminalReplayAndWorkspaceIsolation(t *testing.T) {
 	store, _, workspaceID := newModelCallTestStore(t)
 	ctx := context.Background()

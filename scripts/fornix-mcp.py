@@ -176,6 +176,87 @@ def tool_receipt_disclose(args: dict) -> dict:
     })
 
 
+def _change_operation(args: dict) -> dict:
+    operation = {
+        "id": args.get("operation_id", "op-1"),
+        "type": args.get("operation_type", "replace_file"),
+        "path": args.get("path", ""),
+        "expected_hash": args.get("expected_hash", ""),
+    }
+    if args.get("destination"):
+        operation["destination"] = args["destination"]
+    if "content" in args:
+        operation["content"] = args.get("content", "").encode()
+    if args.get("new_mode"):
+        operation["new_mode"] = int(args["new_mode"])
+    return operation
+
+
+def tool_change_dry_run(args: dict) -> dict:
+    repository = args.get("repository", "reference-repo")
+    return _call("POST", "/v1/changes/dry-run", {
+        "workspace_id": FORNIX_WORKSPACE,
+        "repository": repository,
+        "source": {"workspace_id": FORNIX_WORKSPACE, "repository": repository, "source_root": args.get("source_root", os.environ.get("FORNIX_REFERENCE_WORKDIR", "/workspace/fixtures/reference-repo"))},
+        "operations": [_change_operation(args)],
+        "approval_mode": args.get("approval_mode", "required"),
+    })
+
+
+def tool_change_propose(args: dict) -> dict:
+    repository = args.get("repository", "reference-repo")
+    key = args.get("idempotency_key", "change:mcp:" + repository + ":" + args.get("path", ""))
+    return _call("POST", "/v1/changes", {
+        "workspace_id": FORNIX_WORKSPACE,
+        "repository": repository,
+        "source": {"workspace_id": FORNIX_WORKSPACE, "repository": repository, "source_root": args.get("source_root", os.environ.get("FORNIX_REFERENCE_WORKDIR", "/workspace/fixtures/reference-repo"))},
+        "operations": [_change_operation(args)],
+        "approval_mode": args.get("approval_mode", "required"),
+        "idempotency_key": key,
+    }, key)
+
+
+def tool_change_get(args: dict) -> dict:
+    return _call("GET", f"/v1/changes/{args['proposal_id']}?workspace_id={FORNIX_WORKSPACE}")
+
+
+def tool_change_approve(args: dict) -> dict:
+    proposal_id = str(args["proposal_id"])
+    key = args.get("idempotency_key", "change-approval:mcp:" + proposal_id)
+    return _call("POST", f"/v1/changes/{proposal_id}/approve", {
+        "workspace_id": FORNIX_WORKSPACE,
+        "packet_hash": args.get("packet_hash", ""),
+        "decision": args.get("decision", "approved"),
+        "reason": args.get("reason", "MCP operator decision"),
+        "idempotency_key": key,
+    }, key)
+
+
+def tool_change_apply(args: dict) -> dict:
+    proposal_id = str(args["proposal_id"])
+    key = args.get("idempotency_key", "change-apply:mcp:" + proposal_id)
+    return _call("POST", f"/v1/changes/{proposal_id}/apply", {
+        "workspace_id": FORNIX_WORKSPACE,
+        "packet_hash": args.get("packet_hash", ""),
+        "idempotency_key": key,
+        "dry_run": bool(args.get("dry_run", False)),
+    }, key)
+
+
+def tool_change_disclose(args: dict) -> dict:
+    body = {
+        "workspace_id": FORNIX_WORKSPACE,
+        "level": args.get("level", "gist"),
+        "max_bytes": min(int(args.get("max_bytes") or 32768), 1 << 20),
+        "max_items": min(int(args.get("max_items") or 100), 100),
+    }
+    if args.get("proposal_id"):
+        body["proposal_id"] = args["proposal_id"]
+    if args.get("application_id"):
+        body["application_id"] = args["application_id"]
+    return _call("POST", "/v1/changes/disclose", body)
+
+
 def tool_search(args: dict) -> dict:
     return _call("POST", "/v1/memo/search", {
         "query": args.get("query", ""),
@@ -418,6 +499,42 @@ TOOLS = [
         "description": "Read a bounded gist/detail/raw Work Receipt disclosure with its stable canonical hash.",
         "inputSchema": {"type": "object", "properties": {"receipt_id": {"type": "string"}, "level": {"type": "string", "enum": ["gist", "detail", "raw"]}, "max_bytes": {"type": "integer", "maximum": 1048576}, "max_tokens": {"type": "integer", "maximum": 262144}, "max_items": {"type": "integer", "maximum": 128}}, "required": ["receipt_id"], "additionalProperties": False},
         "fn": tool_receipt_disclose,
+    },
+    {
+        "name": "fornix__change_dry_run",
+        "description": "Plan a bounded repository change without durable mutation or filesystem writes.",
+        "inputSchema": {"type": "object", "properties": {"repository": {"type": "string"}, "source_root": {"type": "string"}, "operation_type": {"type": "string", "enum": ["create_file", "replace_file", "delete_file", "rename_file", "chmod_file"]}, "path": {"type": "string"}, "destination": {"type": "string"}, "expected_hash": {"type": "string"}, "content": {"type": "string"}, "new_mode": {"type": "integer"}}, "required": ["path", "operation_type"]},
+        "fn": tool_change_dry_run,
+    },
+    {
+        "name": "fornix__change_propose",
+        "description": "Create an approval-gated, content-addressed repository change proposal.",
+        "inputSchema": {"type": "object", "properties": {"repository": {"type": "string"}, "source_root": {"type": "string"}, "operation_type": {"type": "string"}, "path": {"type": "string"}, "destination": {"type": "string"}, "expected_hash": {"type": "string"}, "content": {"type": "string"}, "idempotency_key": {"type": "string"}}, "required": ["path", "operation_type"]},
+        "fn": tool_change_propose,
+    },
+    {
+        "name": "fornix__change_get",
+        "description": "Inspect one workspace-scoped repository change proposal.",
+        "inputSchema": {"type": "object", "properties": {"proposal_id": {"type": "string"}}, "required": ["proposal_id"]},
+        "fn": tool_change_get,
+    },
+    {
+        "name": "fornix__change_approve",
+        "description": "Record an auditable decision over an exact repository change packet hash.",
+        "inputSchema": {"type": "object", "properties": {"proposal_id": {"type": "string"}, "packet_hash": {"type": "string"}, "decision": {"type": "string", "enum": ["approved", "rejected"]}, "reason": {"type": "string"}, "idempotency_key": {"type": "string"}}, "required": ["proposal_id", "packet_hash", "decision"]},
+        "fn": tool_change_approve,
+    },
+    {
+        "name": "fornix__change_apply",
+        "description": "Apply one approved packet through the configured structured filesystem boundary.",
+        "inputSchema": {"type": "object", "properties": {"proposal_id": {"type": "string"}, "packet_hash": {"type": "string"}, "dry_run": {"type": "boolean"}, "idempotency_key": {"type": "string"}}, "required": ["proposal_id", "packet_hash"]},
+        "fn": tool_change_apply,
+    },
+    {
+        "name": "fornix__change_disclose",
+        "description": "Read a bounded hash-preserving proposal or application disclosure.",
+        "inputSchema": {"type": "object", "properties": {"proposal_id": {"type": "string"}, "application_id": {"type": "string"}, "level": {"type": "string", "enum": ["gist", "detail", "raw"]}, "max_bytes": {"type": "integer", "maximum": 1048576}, "max_items": {"type": "integer", "maximum": 100}}},
+        "fn": tool_change_disclose,
     },
 ]
 TOOL_INDEX = {t["name"]: t for t in TOOLS}

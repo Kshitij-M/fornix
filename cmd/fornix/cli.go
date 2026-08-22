@@ -75,6 +75,8 @@ func runCLI(args []string) error {
 		return cli.evidenceCommand(parts[1:])
 	case "receipt":
 		return cli.receiptCommand(parts[1:])
+	case "change":
+		return cli.changeCommand(parts[1:])
 	case "reference-workflow":
 		return cli.referenceWorkflow(parts[1:])
 	default:
@@ -83,7 +85,7 @@ func runCLI(args []string) error {
 }
 
 func (c *operatorCLI) usage() error {
-	return errors.New("usage: fornix [--url URL] [--key KEY] [--workspace ID] <health|workspace|identity|role|api-key|ingest|task|run|retrieve|evaluation|metrics|artifact|evidence|receipt|reference-workflow>")
+	return errors.New("usage: fornix [--url URL] [--key KEY] [--workspace ID] <health|workspace|identity|role|api-key|ingest|task|run|retrieve|evaluation|metrics|artifact|evidence|receipt|change|reference-workflow>")
 }
 
 func (c *operatorCLI) workspaceCommand(args []string) error {
@@ -143,7 +145,7 @@ func (c *operatorCLI) roleCommand(args []string) error {
 }
 
 func contractsPermissionDefaults() string {
-	return "workspace:read,task:read,task:mutate,task:execute,agent:run,agent:read,retrieval:read,retrieval:write,evidence:read,evidence:write,model:invoke,tool:execute,evaluation:read,evaluation:run,receipt:read,receipt:write"
+	return "workspace:read,task:read,task:mutate,task:execute,agent:run,agent:read,retrieval:read,retrieval:write,evidence:read,evidence:write,model:invoke,tool:execute,evaluation:read,evaluation:run,receipt:read,receipt:write,change:read,change:propose,change:approve,change:apply,change:disclose"
 }
 
 func (c *operatorCLI) apiKeyCommand(args []string) error {
@@ -287,6 +289,101 @@ func (c *operatorCLI) receiptCommand(args []string) error {
 		return c.requestPrint(http.MethodPost, "/v1/work-receipts/disclose", body, false)
 	}
 	return fmt.Errorf("unknown receipt command %q", args[0])
+}
+
+func (c *operatorCLI) changeCommand(args []string) error {
+	if len(args) == 0 {
+		return errors.New("change requires dry-run, propose, get, approve, apply, or disclose")
+	}
+	switch args[0] {
+	case "dry-run", "propose":
+		body, err := c.changeBody(args[1:])
+		if err != nil {
+			return err
+		}
+		path := "/v1/changes"
+		if args[0] == "dry-run" {
+			path = "/v1/changes/dry-run"
+		}
+		return c.requestPrint(http.MethodPost, path, body, false)
+	case "get":
+		return c.requestPrint(http.MethodGet, "/v1/changes/"+url.PathEscape(valueArg(args[1:], "id", ""))+"?workspace_id="+url.QueryEscape(c.workspace), nil, false)
+	case "approve":
+		body := map[string]any{
+			"workspace_id":    c.workspace,
+			"packet_hash":     valueArg(args[1:], "packet-hash", ""),
+			"decision":        valueArg(args[1:], "decision", "approved"),
+			"reason":          valueArg(args[1:], "reason", "operator decision"),
+			"idempotency_key": valueArg(args[1:], "idempotency", "change-approval:"+valueArg(args[1:], "id", "")),
+		}
+		return c.requestPrint(http.MethodPost, "/v1/changes/"+url.PathEscape(valueArg(args[1:], "id", ""))+"/approve", body, false)
+	case "apply":
+		body := map[string]any{
+			"workspace_id":    c.workspace,
+			"packet_hash":     valueArg(args[1:], "packet-hash", ""),
+			"idempotency_key": valueArg(args[1:], "idempotency", "change-apply:"+valueArg(args[1:], "id", "")),
+			"dry_run":         valueArg(args[1:], "dry-run", "false") == "true",
+		}
+		return c.requestPrint(http.MethodPost, "/v1/changes/"+url.PathEscape(valueArg(args[1:], "id", ""))+"/apply", body, false)
+	case "disclose":
+		body := map[string]any{
+			"workspace_id":   c.workspace,
+			"proposal_id":    valueArg(args[1:], "id", ""),
+			"application_id": valueArg(args[1:], "application-id", ""),
+			"level":          valueArg(args[1:], "level", "gist"),
+			"max_bytes":      intValue(args[1:], "max-bytes", 32768),
+			"max_items":      intValue(args[1:], "max-items", 100),
+		}
+		if body["application_id"] == "" {
+			delete(body, "application_id")
+		}
+		if body["proposal_id"] == "" {
+			delete(body, "proposal_id")
+		}
+		return c.requestPrint(http.MethodPost, "/v1/changes/disclose", body, false)
+	default:
+		return fmt.Errorf("unknown change command %q", args[0])
+	}
+}
+
+func (c *operatorCLI) changeBody(args []string) (map[string]any, error) {
+	content := []byte(valueArg(args, "content", ""))
+	if path := valueArg(args, "content-file", ""); path != "" {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("read change content file: %w", err)
+		}
+		content = data
+	}
+	operation := map[string]any{
+		"id":            valueArg(args, "operation-id", "op-1"),
+		"type":          valueArg(args, "type", "replace_file"),
+		"path":          valueArg(args, "path", ""),
+		"expected_hash": valueArg(args, "expected-hash", ""),
+	}
+	if destination := valueArg(args, "destination", ""); destination != "" {
+		operation["destination"] = destination
+	}
+	if len(content) > 0 {
+		operation["content"] = content
+	}
+	if mode := valueArg(args, "mode", ""); mode != "" {
+		parsed, err := strconv.ParseUint(mode, 8, 32)
+		if err != nil {
+			return nil, fmt.Errorf("invalid file mode: %w", err)
+		}
+		operation["new_mode"] = parsed
+	}
+	root := valueArg(args, "source-root", envOr("FORNIX_REFERENCE_WORKDIR", "/workspace/fixtures/reference-repo"))
+	repository := valueArg(args, "repository", "reference-repo")
+	return map[string]any{
+		"workspace_id":    c.workspace,
+		"repository":      repository,
+		"source":          map[string]any{"workspace_id": c.workspace, "repository": repository, "source_root": root},
+		"operations":      []any{operation},
+		"approval_mode":   valueArg(args, "approval-mode", "required"),
+		"idempotency_key": valueArg(args, "idempotency", "change:"+c.workspace+":"+sha256String(repository+":"+operation["path"].(string)+":"+string(content))),
+	}, nil
 }
 
 func (c *operatorCLI) referenceWorkflow(args []string) error {

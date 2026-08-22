@@ -255,6 +255,21 @@ func permissionForRequest(r *http.Request) contracts.Permission {
 			return contracts.PermissionReceiptRead
 		}
 		return contracts.PermissionReceiptWrite
+	case path == "/v1/changes/dry-run" || path == "/v1/changes":
+		return contracts.PermissionChangePropose
+	case path == "/v1/changes/disclose":
+		return contracts.PermissionChangeDisclose
+	case strings.HasPrefix(path, "/v1/changes/"):
+		if strings.HasSuffix(path, "/approve") {
+			return contracts.PermissionChangeApprove
+		}
+		if strings.HasSuffix(path, "/apply") {
+			return contracts.PermissionChangeApply
+		}
+		if r.Method == http.MethodGet {
+			return contracts.PermissionChangeRead
+		}
+		return contracts.PermissionChangeRead
 	case path == "/v1/artifacts":
 		return contracts.PermissionEvidenceWrite
 	case path == "/v1/chunks":

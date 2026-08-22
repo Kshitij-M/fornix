@@ -267,6 +267,44 @@ func (s *ArtifactStore) GetByHash(ctx context.Context, workspaceID, contentHash 
 	return artifact, nil
 }
 
+// ReadRawByHash returns immutable artifact bytes for an internal execution
+// boundary after enforcing a caller-supplied byte budget and integrity check.
+// It is intentionally separate from Disclose: execution needs exact bytes,
+// while operator disclosure also applies gist/detail/token budgets.
+func (s *ArtifactStore) ReadRawByHash(ctx context.Context, workspaceID, contentHash string, maxBytes int64) ([]byte, error) {
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("artifact store is not configured")
+	}
+	workspaceID = strings.TrimSpace(workspaceID)
+	contentHash = strings.ToLower(strings.TrimSpace(contentHash))
+	if workspaceID == "" || contentHash == "" || maxBytes <= 0 || maxBytes > contracts.MaxArtifactBytes {
+		return nil, ErrArtifactInvalid
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	artifact, err := readArtifactByHashTx(ctx, tx, workspaceID, contentHash, false)
+	if err != nil {
+		return nil, err
+	}
+	if artifact.ByteSize > maxBytes {
+		return nil, fmt.Errorf("%w: artifact exceeds execution byte budget", ErrArtifactInvalid)
+	}
+	raw, err := readArtifactRawTx(ctx, tx, artifact)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyArtifactBytes(artifact, raw, nil); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+	return raw, nil
+}
+
 // Disclose returns a bounded gist, detail, or raw view while preserving the
 // artifact content hash and integrity state.
 func (s *ArtifactStore) Disclose(ctx context.Context, request contracts.ArtifactDisclosureRequest) (contracts.ArtifactDisclosureResult, error) {

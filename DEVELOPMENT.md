@@ -336,6 +336,59 @@ Run the v0.16 smoke after rebuilding the service:
 make smoke-provenance
 ```
 
+## Approval-gated repository changes
+
+Task 21 adds the first controlled write boundary for an explicitly configured
+local repository mount. A change proposal captures the affected source paths,
+content hashes, file modes, packet hash, and bounded operations. Proposed file
+bytes are stored as workspace-scoped immutable artifacts. Approval records the
+exact packet hash; applying a changed packet or a stale task fence fails closed.
+
+The source root must be inside the workspace `tool_root`, and the planner
+rejects traversal, symlink components, non-regular files, duplicate paths,
+source drift, and budget violations. No shell or implicit command execution is
+used. Dry-run performs planning and precondition checks only:
+
+```sh
+bin/fornix --workspace reference-local change dry-run \
+  --repository reference-repo \
+  --source-root /workspace/fixtures/reference-repo \
+  --type create_file --path .fornix-dry-run.txt --content 'not written'
+```
+
+The approval and application path is:
+
+```sh
+proposal=$(bin/fornix --workspace reference-local change propose \
+  --repository reference-repo \
+  --source-root /workspace/fixtures/reference-repo \
+  --type create_file --path .fornix-change.txt --content 'review me' \
+  --idempotency change-example-1)
+bin/fornix --workspace reference-local change approve --id <proposal-id> --packet-hash <packet-hash>
+bin/fornix --workspace reference-local change apply --id <proposal-id> --packet-hash <packet-hash>
+bin/fornix --workspace reference-local change disclose --id <proposal-id> --level detail
+```
+
+The HTTP routes are `/v1/changes`, `/v1/changes/{id}/approve`,
+`/v1/changes/{id}/apply`, `/v1/changes/dry-run`, and
+`/v1/changes/disclose`. The MCP shim exposes the corresponding
+`fornix__change_*` tools. The CLI/API/MCP calls require the change capabilities
+and preserve the authenticated actor; body-supplied actors are ignored.
+
+Single-file writes use a temporary file, content-hash verification, and a
+post-state hash. A multi-operation process crash can still leave a partial
+external tree; the application is classified `recovery_required` rather than
+claiming rollback or exactly-once filesystem execution. Successful
+applications emit a derived Work Receipt linking proposal/application,
+artifacts, source manifest, packet hash, result-tree hash, and provenance.
+
+Run the live smoke against a writable configured mount:
+
+```sh
+FORNIX_REFERENCE_WORKDIR=/absolute/path/to/a/writable/mounted/repository \
+  make smoke-changes
+```
+
 Artifacts are immutable, workspace-scoped SHA-256 content records backed by
 Postgres chunks. Oversized tool output, evidence raw payloads, and agent
 output/history are linked transactionally while inline compatibility fields

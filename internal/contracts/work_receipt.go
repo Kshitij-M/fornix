@@ -48,18 +48,20 @@ const (
 )
 
 const (
-	WorkReceiptReferenceTask             = "task"
-	WorkReceiptReferenceEvent            = "event"
-	WorkReceiptReferenceAgentRun         = "agent_run"
-	WorkReceiptReferenceRetrievalSurface = "retrieval_surface"
-	WorkReceiptReferenceModelCall        = "model_call"
-	WorkReceiptReferenceToolRun          = "tool_run"
-	WorkReceiptReferenceEvidence         = "evidence"
-	WorkReceiptReferenceArtifact         = "artifact"
-	WorkReceiptReferenceValidation       = "validation"
-	WorkReceiptReferenceObservation      = "observation"
-	WorkReceiptReferenceCost             = "cost"
-	WorkReceiptReferenceReplay           = "replay"
+	WorkReceiptReferenceTask              = "task"
+	WorkReceiptReferenceEvent             = "event"
+	WorkReceiptReferenceAgentRun          = "agent_run"
+	WorkReceiptReferenceRetrievalSurface  = "retrieval_surface"
+	WorkReceiptReferenceModelCall         = "model_call"
+	WorkReceiptReferenceToolRun           = "tool_run"
+	WorkReceiptReferenceEvidence          = "evidence"
+	WorkReceiptReferenceArtifact          = "artifact"
+	WorkReceiptReferenceValidation        = "validation"
+	WorkReceiptReferenceObservation       = "observation"
+	WorkReceiptReferenceCost              = "cost"
+	WorkReceiptReferenceReplay            = "replay"
+	WorkReceiptReferenceChangeProposal    = "change_proposal"
+	WorkReceiptReferenceChangeApplication = "change_application"
 )
 
 // WorkReceiptEvidence is a typed, hash-only link to immutable evidence. Raw
@@ -643,7 +645,7 @@ func receiptArtifactKey(a WorkReceiptArtifact) string {
 
 func validWorkReceiptReferenceKind(kind string) bool {
 	switch kind {
-	case WorkReceiptReferenceTask, WorkReceiptReferenceEvent, WorkReceiptReferenceAgentRun, WorkReceiptReferenceRetrievalSurface, WorkReceiptReferenceModelCall, WorkReceiptReferenceToolRun, WorkReceiptReferenceEvidence, WorkReceiptReferenceArtifact, WorkReceiptReferenceValidation, WorkReceiptReferenceObservation, WorkReceiptReferenceCost, WorkReceiptReferenceReplay:
+	case WorkReceiptReferenceTask, WorkReceiptReferenceEvent, WorkReceiptReferenceAgentRun, WorkReceiptReferenceRetrievalSurface, WorkReceiptReferenceModelCall, WorkReceiptReferenceToolRun, WorkReceiptReferenceEvidence, WorkReceiptReferenceArtifact, WorkReceiptReferenceValidation, WorkReceiptReferenceObservation, WorkReceiptReferenceCost, WorkReceiptReferenceReplay, WorkReceiptReferenceChangeProposal, WorkReceiptReferenceChangeApplication:
 		return true
 	default:
 		return false

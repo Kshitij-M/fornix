@@ -96,6 +96,13 @@ still requires safe patch application and reviewer-facing change validation.
   compatibility shim now share workspace bootstrap, identity/role/API-key
   lifecycle, bounded ingest metadata, task/run inspection, disclosure, metrics,
   and reference-workflow semantics.
+- Approval-gated repository change packets are now typed, workspace-scoped,
+  idempotent, content-addressed, and persisted in migration 029. The planner
+  rejects traversal and symlink escapes, the application boundary uses
+  structured filesystem APIs with source/post-state hashes, and successful
+  applications produce a derived Work Receipt. Dry-run, duplicate delivery,
+  crash rollback, approval-hash, artifact, and live Postgres concurrency tests
+  cover the first vertical slice.
 
 ## Production gaps
 
@@ -103,10 +110,10 @@ still requires safe patch application and reviewer-facing change validation.
 
 - The current alpha does not yet provide the complete flagship workflow for
   unattended repository maintenance. The reference path is bounded and
-  read-only; the receipt foundation is in place, but a production-shaped
-  change packet, safe patch application,
-  deterministic validation, and reviewer-facing approval flow remain the next
-  product milestone.
+  read-only, while the change path is an explicit local-mount vertical slice;
+  automatic agent-to-patch synthesis, multi-file transactional filesystem
+  semantics, deterministic repository validation, and a reviewer-facing
+  change UI remain product work.
 
 - No OAuth/SSO, external KMS/secret-manager provider, or Postgres row-level
   security policy. The operator identity/API-key surface is intentionally
@@ -141,6 +148,12 @@ still requires safe patch application and reviewer-facing change validation.
   public replay API is provided yet.
 - Lease transitions are current coordination state rather than an append-only
   audit stream; operational metrics and lease-history retention are deferred.
+- Repository application is an external filesystem effect. Temp-file writes
+  protect individual files, but a crash during a multi-operation packet can
+  leave a partial tree; Fornix records `recovery_required` and does not claim
+  automatic rollback or exactly-once application. The current boundary does
+  not include a general patch parser, VCS commit/push integration, or a
+  host-independent sandbox/network policy.
 
 ## Qualification commands
 
@@ -166,6 +179,7 @@ make smoke-retrieval-evaluation
 make smoke-reference-workflow
 make smoke-reference-openai
 make smoke-ingestion
+make smoke-changes
 ```
 
 Postgres-backed results and measured latency/storage/replay throughput are

@@ -54,6 +54,11 @@ const (
 	PermissionEvaluationWrite Permission = "evaluation:write"
 	PermissionReceiptRead     Permission = "receipt:read"
 	PermissionReceiptWrite    Permission = "receipt:write"
+	PermissionChangeRead      Permission = "change:read"
+	PermissionChangePropose   Permission = "change:propose"
+	PermissionChangeApprove   Permission = "change:approve"
+	PermissionChangeApply     Permission = "change:apply"
+	PermissionChangeDisclose  Permission = "change:disclose"
 )
 
 // AdminWildcard is written with no whitespace on the wire. The named
@@ -67,7 +72,7 @@ var knownPermissions = map[Permission]struct{}{
 	PermissionEvidenceRead: {}, PermissionEvidenceWrite: {},
 	PermissionAgentRun: {}, PermissionAgentRead: {}, PermissionSchedulerRun: {},
 	PermissionWorkspaceRead: {}, PermissionWorkspaceWrite: {},
-	PermissionIdentityAdmin: {}, PermissionCredentialUse: {}, PermissionEvaluationRead: {}, PermissionEvaluationRun: {}, PermissionEvaluationWrite: {}, PermissionReceiptRead: {}, PermissionReceiptWrite: {}, AdminWildcard: {},
+	PermissionIdentityAdmin: {}, PermissionCredentialUse: {}, PermissionEvaluationRead: {}, PermissionEvaluationRun: {}, PermissionEvaluationWrite: {}, PermissionReceiptRead: {}, PermissionReceiptWrite: {}, PermissionChangeRead: {}, PermissionChangePropose: {}, PermissionChangeApprove: {}, PermissionChangeApply: {}, PermissionChangeDisclose: {}, AdminWildcard: {},
 }
 
 // Principal is the authenticated caller presented to authorization checks.

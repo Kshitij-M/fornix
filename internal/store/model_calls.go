@@ -95,7 +95,7 @@ func (s *ModelCallStore) Start(ctx context.Context, request contracts.ModelReque
 			actor, task_ref, session_ref, status,
 			request_evidence
 		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,$15,$16::jsonb)
-		ON CONFLICT (workspace_id, idempotency_key) DO NOTHING`,
+		ON CONFLICT DO NOTHING`,
 		request.WorkspaceID, request.RequestID, request.IdempotencyKey,
 		requestHash, request.SchemaVersion, request.CausationID, request.CorrelationID,
 		request.Provider.Provider, request.Provider.Endpoint, request.Provider.Model,
@@ -105,7 +105,26 @@ func (s *ModelCallStore) Start(ctx context.Context, request contracts.ModelReque
 		return model.CallStart{}, fmt.Errorf("reserve model call: %w", err)
 	}
 	if inserted.RowsAffected() == 0 {
-		record, readErr := readModelCallTx(ctx, tx, request.WorkspaceID, request.IdempotencyKey)
+		// model_calls has two independent workspace-scoped uniqueness
+		// constraints: idempotency_key and request_id.  A conflict on either
+		// one must resolve to the same durable record.  An explicit conflict
+		// target would only protect one of those constraints and would leak a
+		// raw unique-violation under concurrent callers for the other.  The
+		// no-target insert above waits for the competing transaction; this
+		// lookup then deterministically resolves the committed winner.
+		var existingIdempotencyKey string
+		lookupErr := tx.QueryRow(ctx, `
+			SELECT idempotency_key
+			FROM fornix.model_calls
+			WHERE workspace_id=$1 AND (idempotency_key=$2 OR request_id=$3)
+			FOR UPDATE`, request.WorkspaceID, request.IdempotencyKey, request.RequestID).Scan(&existingIdempotencyKey)
+		if lookupErr != nil {
+			if errors.Is(lookupErr, pgx.ErrNoRows) {
+				return model.CallStart{}, fmt.Errorf("resolve conflicting model call: %w", ErrModelCallMissing)
+			}
+			return model.CallStart{}, fmt.Errorf("resolve conflicting model call: %w", lookupErr)
+		}
+		record, readErr := readModelCallTx(ctx, tx, request.WorkspaceID, existingIdempotencyKey)
 		if readErr != nil {
 			return model.CallStart{}, readErr
 		}
