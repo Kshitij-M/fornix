@@ -271,6 +271,7 @@ jobs:
           FORNIX_URL: http://localhost:8201
           FORNIX_KEY: fornix-ci-test-key
           FORNIX_BOOTSTRAP_KEY: fornix-ci-bootstrap-key
+          FORNIX_REFERENCE_WORKDIR: ${{ github.workspace }}/fixtures/reference-repo
         run: scripts/test/v0.30-work-receipt-smokes.sh
 
   vulnerabilities:
