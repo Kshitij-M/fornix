@@ -170,6 +170,39 @@ Observability and evaluation never store credentials or raw prompts in metric
 dimensions or reports. Replay consumes recorded model/tool/retrieval history;
 it does not call remote providers or execute external tools.
 
+## Work Receipts
+
+Work Receipts are immutable verification envelopes over completed task or
+agent-run work. They are derived from existing Postgres authorities; they do
+not replace task, event, model, tool, retrieval, evidence, artifact, cost, or
+replay records.
+
+| Method | Route | Purpose | Required capability |
+| --- | --- | --- | --- |
+| `POST` | `/v1/work-receipts` | Finalize one idempotent, fenced receipt and its typed links | `receipt:write` |
+| `GET` | `/v1/work-receipts/{id}` | Read one workspace-scoped immutable receipt | `receipt:read` |
+| `POST` | `/v1/work-receipts/disclose` | Read bounded gist/detail/raw canonical receipt JSON | `receipt:read` |
+
+Finalization validates terminal task/run state, current task fences, source
+identity, workspace ownership, and evidence/artifact hashes before committing
+the receipt, steps, and normalized links in one transaction. Reusing the
+natural work identity or idempotency key with the same logical request returns
+one receipt; changing the request fails with a conflict. A crash before commit
+leaves no receipt or partial link set.
+
+The canonical receipt hash excludes delivery IDs and wall-clock fields while
+including stable work identity, actor, fences, steps, source hashes, cost
+classification, and replay verification. Gist/detail/raw views preserve that
+canonical hash and enforce byte, token, and item budgets. Raw receipt JSON is
+still redacted receipt metadata; it is not a disclosure of prompts,
+credentials, or unbounded tool output. Remote providers and local processes
+remain at-least-once external boundaries.
+
+The CLI exposes `fornix receipt get` and `fornix receipt disclose`; the MCP
+shim exposes equivalent `fornix__receipt_get` and
+`fornix__receipt_disclose` tools. All three surfaces call the same HTTP
+authority and preserve workspace authorization.
+
 ## Compatibility data-plane routes
 
 These routes support the original memo, chunk, symbol, coordination, and

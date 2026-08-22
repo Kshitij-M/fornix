@@ -83,12 +83,17 @@ jobs:
         with:
           python-version: '3.13'
       - run: python -m pip install --requirement scripts/requirements.txt
-      - run: go build -trimpath -o /tmp/fornix ./cmd/fornix
+      - name: Build Fornix and operator CLI
+        run: |
+          go build -trimpath -o /tmp/fornix ./cmd/fornix
+          mkdir -p bin
+          cp /tmp/fornix bin/fornix
       - name: Start Fornix
         env:
           FORNIX_AUTH_MODE: development
           FORNIX_WORKER_ENABLED: "false"
           FORNIX_KEY: fornix-ci-test-key
+          FORNIX_BOOTSTRAP_KEY: fornix-ci-bootstrap-key
           FORNIX_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
           FORNIX_LISTEN: :8201
         run: |
@@ -257,6 +262,17 @@ jobs:
           FORNIX_KEY: fornix-ci-test-key
           FORNIX_REFERENCE_WORKDIR: ${{ github.workspace }}/fixtures/reference-repo
         run: scripts/test/v0.29-ingestion-smokes.sh
+      - name: Run Work Receipt integration tests
+        env:
+          FORNIX_TEST_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+        run: go test ./internal/contracts ./internal/server ./internal/store -run 'Test(WorkReceipt|SecurityMiddlewareAuthorizesWorkReceiptSurface)' -count=1 -v
+      - name: Run Work Receipt smoke
+        env:
+          FORNIX_URL: http://localhost:8201
+          FORNIX_KEY: fornix-ci-test-key
+          FORNIX_BOOTSTRAP_KEY: fornix-ci-bootstrap-key
+          FORNIX_REFERENCE_WORKDIR: ${{ github.workspace }}/fixtures/reference-repo
+        run: scripts/test/v0.30-work-receipt-smokes.sh
 
   vulnerabilities:
     name: Vulnerability scan

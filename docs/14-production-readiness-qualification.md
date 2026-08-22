@@ -15,9 +15,10 @@ recovery. The current qualification proves the substrate behind that goal; it
 does not qualify unattended changes to important repositories.
 
 The reference workflow is therefore a showcase of the path from admission to
-replay, not a finished change-management product. A future Verified Change
-Packet and Work Receipt will make the result of a repository operation the
-primary user-facing contract.
+replay, not a finished change-management product. The first Work Receipt
+foundation now makes the result of that bounded operation an immutable,
+workspace-scoped verification contract; a complete Verified Change Packet
+still requires safe patch application and reviewer-facing change validation.
 
 ## Verified capabilities
 
@@ -86,6 +87,11 @@ primary user-facing contract.
   recordings, run bounded durable or dry-run evaluations, compare baselines,
   and read metrics/gates/reports. The offline `fornix-eval` CLI is deterministic
   and consumes recorded surfaces only.
+- Immutable Work Receipts bind completed task/run identity to bounded steps,
+  source/evidence/artifact hashes, cost classification, replay state, and
+  verification outcomes. Finalization is idempotent, transactional, and
+  fail-closed on missing, stale, contradictory, or cross-workspace references.
+  Gist/detail/raw disclosure preserves the canonical receipt hash.
 - The authenticated Go operator CLI, `/v1/operator/*` HTTP routes, and MCP
   compatibility shim now share workspace bootstrap, identity/role/API-key
   lifecycle, bounded ingest metadata, task/run inspection, disclosure, metrics,
@@ -97,7 +103,8 @@ primary user-facing contract.
 
 - The current alpha does not yet provide the complete flagship workflow for
   unattended repository maintenance. The reference path is bounded and
-  read-only; a production-shaped change packet, safe patch application,
+  read-only; the receipt foundation is in place, but a production-shaped
+  change packet, safe patch application,
   deterministic validation, and reviewer-facing approval flow remain the next
   product milestone.
 

@@ -20,7 +20,7 @@ FORNIX_KEY ?= $(shell value=$$(sed -n 's/^FORNIX_KEY=//p' .env 2>/dev/null | hea
 PROJECTION_PG_DSN ?= postgres://fornix:fornix-dev-only@host.docker.internal:55433/fornix?sslmode=disable
 FORNIX_TEST_PG_DSN ?=
 
-.PHONY: fmt fmt-check test test-race vet build python-install python-check docs-check check verify hooks-install install-hooks hooks-uninstall uninstall-hooks hooks-check smoke smoke-events smoke-projection smoke-leases smoke-tasks smoke-retrieval smoke-provenance smoke-model smoke-tools smoke-agent smoke-scheduler smoke-identity smoke-artifacts smoke-artifact-output smoke-observability smoke-retrieval-quality smoke-retrieval-evaluation smoke-reference-workflow smoke-reference-openai smoke-ingestion operator-reference dev-up dev-up-ai dev-up-watcher dev-run dev-logs dev-down
+.PHONY: fmt fmt-check test test-race vet build python-install python-check docs-check check verify hooks-install install-hooks hooks-uninstall uninstall-hooks hooks-check smoke smoke-events smoke-projection smoke-leases smoke-tasks smoke-retrieval smoke-provenance smoke-model smoke-tools smoke-agent smoke-scheduler smoke-identity smoke-artifacts smoke-artifact-output smoke-observability smoke-retrieval-quality smoke-retrieval-evaluation smoke-reference-workflow smoke-reference-openai smoke-ingestion smoke-work-receipts operator-reference dev-up dev-up-ai dev-up-watcher dev-run dev-logs dev-down
 
 fmt:
 	$(GOFMT_CMD) -w $(GO_FILES)
@@ -117,6 +117,9 @@ smoke-reference-openai:
 smoke-ingestion:
 	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) scripts/test/v0.29-ingestion-smokes.sh
 
+smoke-work-receipts:
+	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) scripts/test/v0.30-work-receipt-smokes.sh
+
 operator-reference: build
 	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) bin/fornix reference-workflow --workspace $${FORNIX_WORKSPACE_ID:-reference-local} --fixture fixtures/reference-repo
 
@@ -140,6 +143,7 @@ smoke:
 	FORNIX_RETRIEVAL_EVAL_PG_DSN=$(PROJECTION_PG_DSN) FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) scripts/test/v0.26-retrieval-evaluation-smokes.sh
 	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) scripts/test/v0.27-reference-workflow-smokes.sh
 	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) scripts/test/v0.29-ingestion-smokes.sh
+	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) scripts/test/v0.30-work-receipt-smokes.sh
 
 check: fmt-check test vet python-check docs-check
 
