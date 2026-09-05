@@ -37,7 +37,7 @@ jobs:
 
       - name: Extract Fornix image metadata
         id: fornix-meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
@@ -57,7 +57,7 @@ jobs:
 
       - name: Extract watcher image metadata
         id: watcher-meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v6
         with:
           images: ghcr.io/${{ github.repository }}-watcher
           tags: |
