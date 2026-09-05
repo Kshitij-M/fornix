@@ -91,6 +91,16 @@ func (s *Service) Validate(ctx context.Context, request contracts.ValidationRequ
 	if err != nil {
 		return Result{}, err
 	}
+	// The authoritative proposal is the source of truth when the caller used
+	// the compact request form. Rebuild the plan so the persisted request hash
+	// covers the resolved manifest as well as the other authority fields.
+	if request.SourceManifestHash == "" && proposal.Source.ManifestHash != "" {
+		request.SourceManifestHash = proposal.Source.ManifestHash
+		plan, err = request.Plan()
+		if err != nil {
+			return Result{}, err
+		}
+	}
 	if request.DryRun {
 		dry := s.execute(ctx, request, plan, application, proposal, "dry-run")
 		return Result{Run: dry.Run, DryRun: true}, nil

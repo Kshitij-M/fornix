@@ -288,7 +288,10 @@ func readAfter(ctx context.Context, queryer eventQueryer, request ReadRequest) (
 		return nil, fmt.Errorf("read control events: %w", err)
 	}
 	defer rows.Close()
-	events := make([]contracts.EventEnvelope, 0, limit)
+	// Do not use request-derived values as allocation capacities. The limit is
+	// bounded above, but a zero-capacity slice keeps the allocation independent
+	// of untrusted input while retaining the same bounded query behavior.
+	events := make([]contracts.EventEnvelope, 0)
 	for rows.Next() {
 		event, err := scanEvent(rows)
 		if err != nil {

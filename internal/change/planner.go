@@ -263,16 +263,21 @@ func CaptureSnapshot(ctx context.Context, workspaceID, repository, root string, 
 	if err != nil {
 		return contracts.ChangeSourceSnapshot{}, err
 	}
+	repositoryRoot, err := os.OpenRoot(root)
+	if err != nil {
+		return contracts.ChangeSourceSnapshot{}, fmt.Errorf("open repository root: %w", err)
+	}
+	defer repositoryRoot.Close()
 	files := make([]contracts.ChangeSourceFile, 0, len(normalized))
 	for _, path := range normalized {
 		if err := ctx.Err(); err != nil {
 			return contracts.ChangeSourceSnapshot{}, err
 		}
-		absolute, err := SafeJoin(root, path)
-		if err != nil {
+		if _, err := SafeJoin(root, path); err != nil {
 			return contracts.ChangeSourceSnapshot{}, err
 		}
-		info, statErr := os.Lstat(absolute)
+		relative := filepath.FromSlash(path)
+		info, statErr := repositoryRoot.Lstat(relative)
 		if errors.Is(statErr, os.ErrNotExist) {
 			files = append(files, contracts.ChangeSourceFile{Path: path, Exists: false})
 			continue
@@ -286,7 +291,7 @@ func CaptureSnapshot(ctx context.Context, workspaceID, repository, root string, 
 		if !info.Mode().IsRegular() {
 			return contracts.ChangeSourceSnapshot{}, fmt.Errorf("%w: non-regular file %s", ErrUnsafePath, path)
 		}
-		data, err := os.ReadFile(absolute)
+		data, err := repositoryRoot.ReadFile(relative)
 		if err != nil {
 			return contracts.ChangeSourceSnapshot{}, fmt.Errorf("read %s: %w", path, err)
 		}
@@ -697,6 +702,11 @@ func observedTreeHashFull(root string, source contracts.ChangeSourceSnapshot, op
 			paths[operation.Destination] = struct{}{}
 		}
 	}
+	repositoryRoot, err := os.OpenRoot(root)
+	if err != nil {
+		return "", fmt.Errorf("open repository root: %w", err)
+	}
+	defer repositoryRoot.Close()
 	orderedPaths := make([]string, 0, len(paths))
 	for path := range paths {
 		orderedPaths = append(orderedPaths, path)
@@ -704,11 +714,11 @@ func observedTreeHashFull(root string, source contracts.ChangeSourceSnapshot, op
 	sort.Strings(orderedPaths)
 	files := make([]contracts.ChangeSourceFile, 0, len(orderedPaths))
 	for _, raw := range orderedPaths {
-		path, err := SafeJoin(root, raw)
-		if err != nil {
+		if _, err := SafeJoin(root, raw); err != nil {
 			return "", err
 		}
-		info, err := os.Lstat(path)
+		relative := filepath.FromSlash(raw)
+		info, err := repositoryRoot.Lstat(relative)
 		if errors.Is(err, os.ErrNotExist) {
 			files = append(files, contracts.ChangeSourceFile{Path: raw, Exists: false})
 			continue
@@ -719,7 +729,7 @@ func observedTreeHashFull(root string, source contracts.ChangeSourceSnapshot, op
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return "", ErrUnsafePath
 		}
-		data, err := os.ReadFile(path)
+		data, err := repositoryRoot.ReadFile(relative)
 		if err != nil {
 			return "", err
 		}

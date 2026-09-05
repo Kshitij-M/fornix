@@ -634,7 +634,9 @@ func (s *ValidationStore) ListResults(ctx context.Context, workspaceID, runID st
 		return nil, err
 	}
 	defer rows.Close()
-	results := make([]contracts.ValidationResult, 0, limit)
+	// Keep allocation capacity independent of the request. SQL still applies
+	// the normalized hard limit above, and append grows only for rows returned.
+	results := make([]contracts.ValidationResult, 0)
 	for rows.Next() {
 		result, scanErr := scanValidationResult(rows)
 		if scanErr != nil {
