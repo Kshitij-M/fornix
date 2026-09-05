@@ -58,6 +58,7 @@ const (
 	PermissionChangePropose   Permission = "change:propose"
 	PermissionChangeApprove   Permission = "change:approve"
 	PermissionChangeApply     Permission = "change:apply"
+	PermissionChangeValidate  Permission = "change:validate"
 	PermissionChangeDisclose  Permission = "change:disclose"
 )
 
@@ -72,7 +73,7 @@ var knownPermissions = map[Permission]struct{}{
 	PermissionEvidenceRead: {}, PermissionEvidenceWrite: {},
 	PermissionAgentRun: {}, PermissionAgentRead: {}, PermissionSchedulerRun: {},
 	PermissionWorkspaceRead: {}, PermissionWorkspaceWrite: {},
-	PermissionIdentityAdmin: {}, PermissionCredentialUse: {}, PermissionEvaluationRead: {}, PermissionEvaluationRun: {}, PermissionEvaluationWrite: {}, PermissionReceiptRead: {}, PermissionReceiptWrite: {}, PermissionChangeRead: {}, PermissionChangePropose: {}, PermissionChangeApprove: {}, PermissionChangeApply: {}, PermissionChangeDisclose: {}, AdminWildcard: {},
+	PermissionIdentityAdmin: {}, PermissionCredentialUse: {}, PermissionEvaluationRead: {}, PermissionEvaluationRun: {}, PermissionEvaluationWrite: {}, PermissionReceiptRead: {}, PermissionReceiptWrite: {}, PermissionChangeRead: {}, PermissionChangePropose: {}, PermissionChangeApprove: {}, PermissionChangeApply: {}, PermissionChangeValidate: {}, PermissionChangeDisclose: {}, AdminWildcard: {},
 }
 
 // Principal is the authenticated caller presented to authorization checks.

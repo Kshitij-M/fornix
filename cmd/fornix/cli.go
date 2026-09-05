@@ -77,6 +77,8 @@ func runCLI(args []string) error {
 		return cli.receiptCommand(parts[1:])
 	case "change":
 		return cli.changeCommand(parts[1:])
+	case "validation":
+		return cli.validationCommand(parts[1:])
 	case "reference-workflow":
 		return cli.referenceWorkflow(parts[1:])
 	default:
@@ -85,7 +87,7 @@ func runCLI(args []string) error {
 }
 
 func (c *operatorCLI) usage() error {
-	return errors.New("usage: fornix [--url URL] [--key KEY] [--workspace ID] <health|workspace|identity|role|api-key|ingest|task|run|retrieve|evaluation|metrics|artifact|evidence|receipt|change|reference-workflow>")
+	return errors.New("usage: fornix [--url URL] [--key KEY] [--workspace ID] <health|workspace|identity|role|api-key|ingest|task|run|retrieve|evaluation|metrics|artifact|evidence|receipt|change|validation|reference-workflow>")
 }
 
 func (c *operatorCLI) workspaceCommand(args []string) error {
@@ -145,7 +147,7 @@ func (c *operatorCLI) roleCommand(args []string) error {
 }
 
 func contractsPermissionDefaults() string {
-	return "workspace:read,task:read,task:mutate,task:execute,agent:run,agent:read,retrieval:read,retrieval:write,evidence:read,evidence:write,model:invoke,tool:execute,evaluation:read,evaluation:run,receipt:read,receipt:write,change:read,change:propose,change:approve,change:apply,change:disclose"
+	return "workspace:read,task:read,task:mutate,task:execute,agent:run,agent:read,retrieval:read,retrieval:write,evidence:read,evidence:write,model:invoke,tool:execute,evaluation:read,evaluation:run,receipt:read,receipt:write,change:read,change:propose,change:approve,change:apply,change:validate,change:disclose"
 }
 
 func (c *operatorCLI) apiKeyCommand(args []string) error {
@@ -344,6 +346,62 @@ func (c *operatorCLI) changeCommand(args []string) error {
 	default:
 		return fmt.Errorf("unknown change command %q", args[0])
 	}
+}
+
+func (c *operatorCLI) validationCommand(args []string) error {
+	if len(args) == 0 {
+		return errors.New("validation requires dry-run, run, status, results, replay, disclose, resume, cancel, or handoff")
+	}
+	switch args[0] {
+	case "dry-run", "run":
+		body := c.validationBody(args[1:])
+		body["dry_run"] = args[0] == "dry-run"
+		return c.requestPrint(http.MethodPost, "/v1/validations", body, false)
+	case "status":
+		return c.requestPrint(http.MethodGet, "/v1/validations/"+url.PathEscape(valueArg(args[1:], "id", ""))+"?workspace_id="+url.QueryEscape(c.workspace), nil, false)
+	case "results":
+		id := url.PathEscape(valueArg(args[1:], "id", ""))
+		path := "/v1/validations/" + id + "/results?workspace_id=" + url.QueryEscape(c.workspace) + "&limit=" + strconv.Itoa(intValue(args[1:], "limit", 64)) + "&offset=" + strconv.Itoa(intValue(args[1:], "offset", 0))
+		return c.requestPrint(http.MethodGet, path, nil, false)
+	case "replay":
+		id := url.PathEscape(valueArg(args[1:], "id", ""))
+		return c.requestPrint(http.MethodGet, "/v1/validations/"+id+"/replay?workspace_id="+url.QueryEscape(c.workspace)+"&limit="+strconv.Itoa(intValue(args[1:], "limit", 500)), nil, false)
+	case "disclose":
+		return c.requestPrint(http.MethodPost, "/v1/validations/disclose", map[string]any{"workspace_id": c.workspace, "validation_run_id": valueArg(args[1:], "id", ""), "level": valueArg(args[1:], "level", "gist"), "max_bytes": intValue(args[1:], "max-bytes", 32768), "max_items": intValue(args[1:], "max-items", 64)}, false)
+	case "resume":
+		id := url.PathEscape(valueArg(args[1:], "id", ""))
+		return c.requestPrint(http.MethodPost, "/v1/validations/"+id+"/resume?workspace_id="+url.QueryEscape(c.workspace), nil, false)
+	case "cancel":
+		id := url.PathEscape(valueArg(args[1:], "id", ""))
+		return c.requestPrint(http.MethodPost, "/v1/validations/"+id+"/cancel?workspace_id="+url.QueryEscape(c.workspace), nil, false)
+	case "handoff":
+		id := valueArg(args[1:], "id", "")
+		path := "/v1/reindex-handoffs/" + url.PathEscape(id) + "?workspace_id=" + url.QueryEscape(c.workspace)
+		if len(args) > 1 && args[1] == "submit" {
+			path = "/v1/reindex-handoffs/" + url.PathEscape(valueArg(args[2:], "id", "")) + "/submit?workspace_id=" + url.QueryEscape(c.workspace)
+			return c.requestPrint(http.MethodPost, path, nil, false)
+		}
+		return c.requestPrint(http.MethodGet, path, nil, false)
+	default:
+		return fmt.Errorf("unknown validation command %q", args[0])
+	}
+}
+
+func (c *operatorCLI) validationBody(args []string) map[string]any {
+	repository := valueArg(args, "repository", "reference-repo")
+	body := map[string]any{
+		"workspace_id": c.workspace, "repository": repository,
+		"change_application_id": valueArg(args, "application-id", ""),
+		"proposal_id":           valueArg(args, "proposal-id", ""),
+		"packet_hash":           valueArg(args, "packet-hash", ""),
+		"expected_tree_hash":    valueArg(args, "expected-tree-hash", ""),
+		"idempotency_key":       valueArg(args, "idempotency", "validation:"+c.workspace+":"+repository+":"+valueArg(args, "application-id", "")),
+		"source":                map[string]any{"repository": repository, "source_root": valueArg(args, "source-root", envOr("FORNIX_REFERENCE_WORKDIR", "/workspace/fixtures/reference-repo"))},
+	}
+	if owner := valueArg(args, "task-owner", ""); owner != "" {
+		body["task_owner_id"], body["task_fence"] = owner, uint64Value(args, "task-fence", 0)
+	}
+	return body
 }
 
 func (c *operatorCLI) changeBody(args []string) (map[string]any, error) {

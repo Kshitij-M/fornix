@@ -176,3 +176,35 @@ func TestSecurityMiddlewareAuthorizesWorkReceiptSurface(t *testing.T) {
 		}
 	}
 }
+
+func TestSecurityMiddlewareAuthorizesValidationAndHandoffSurface(t *testing.T) {
+	srv, _, workspaceID, token := newServerAuthTest(t, []contracts.Permission{
+		contracts.PermissionChangeRead,
+		contracts.PermissionChangeValidate,
+	})
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	handler := withRequestMiddleware(srv.securityMiddleware(next), 1<<20)
+	cases := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodPost, "/v1/validations", `{"workspace_id":"` + workspaceID + `"}`},
+		{http.MethodGet, "/v1/validations/run-1?workspace_id=" + workspaceID, ""},
+		{http.MethodGet, "/v1/validations/run-1/replay?workspace_id=" + workspaceID, ""},
+		{http.MethodPost, "/v1/validations/run-1/resume?workspace_id=" + workspaceID, ""},
+		{http.MethodPost, "/v1/validations/disclose", `{"workspace_id":"` + workspaceID + `","validation_run_id":"run-1"}`},
+		{http.MethodGet, "/v1/reindex-handoffs/handoff-1?workspace_id=" + workspaceID, ""},
+		{http.MethodPost, "/v1/reindex-handoffs/handoff-1/submit?workspace_id=" + workspaceID, ""},
+	}
+	for _, item := range cases {
+		request := httptest.NewRequest(item.method, item.path, strings.NewReader(item.body))
+		request.Header.Set("Authorization", "Bearer "+token)
+		request.Header.Set("X-Request-ID", "validation-auth-"+item.method+"-"+item.path)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("authorized %s %s response=%d body=%s", item.method, item.path, response.Code, response.Body.String())
+		}
+	}
+}

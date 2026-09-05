@@ -328,6 +328,12 @@ func TestIngestStoreTaskFenceFailsClosed(t *testing.T) {
 	if _, err := taskStore.ClaimNext(context.Background(), TaskClaimInput{WorkspaceID: workspace, SessionID: "ingest-worker-b", LeaseTTL: time.Minute}); err != nil {
 		t.Fatal(err)
 	}
+	staleRequest := request
+	staleRequest.IdempotencyKey = "fenced-ingest-stale-submit"
+	staleRequest.Source.Repository = "fixture-fenced-new"
+	if _, _, err := store.Submit(context.Background(), staleRequest, discovery); !errors.Is(err, ErrIngestFence) {
+		t.Fatalf("stale ingest submission was accepted: %v", err)
+	}
 	if _, err := store.ProcessBatch(context.Background(), contracts.IngestBatchRequest{WorkspaceID: workspace, JobID: job.ID, BatchSize: 1, TaskOwnerID: "ingest-worker-a", TaskFence: claim.Lease.Fence, Actor: request.Actor}); !errors.Is(err, ErrIngestFence) {
 		t.Fatalf("stale batch fence was accepted: %v", err)
 	}

@@ -28,11 +28,13 @@ import (
 	"github.com/omaveda/fornix/internal/change"
 	"github.com/omaveda/fornix/internal/config"
 	"github.com/omaveda/fornix/internal/contracts"
+	"github.com/omaveda/fornix/internal/ingest"
 	"github.com/omaveda/fornix/internal/model"
 	"github.com/omaveda/fornix/internal/retrieval"
 	"github.com/omaveda/fornix/internal/scheduler"
 	"github.com/omaveda/fornix/internal/store"
 	"github.com/omaveda/fornix/internal/tool"
+	validationruntime "github.com/omaveda/fornix/internal/validation"
 	"github.com/omaveda/fornix/internal/version"
 )
 
@@ -55,6 +57,8 @@ type server struct {
 	observability     *store.ObservabilityStore
 	evaluations       *store.EvaluationStore
 	workReceipts      *store.WorkReceiptStore
+	validations       *store.ValidationStore
+	validation        *validationruntime.Service
 	changes           *change.Service
 	toolRegistry      *tool.Registry
 	toolExecutor      *tool.Executor
@@ -101,6 +105,7 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 	evaluations := store.NewEvaluationStore(pool)
 	workReceipts := store.NewWorkReceiptStore(pool)
 	artifactStore := store.NewArtifactStore(pool)
+	evidenceStore := store.NewEvidenceStore(pool)
 	changeStore := store.NewRepositoryChangeStore(pool, events, artifactStore)
 	changeService := change.NewService(changeStore, artifactStore)
 	changeService.SetReceiptStore(workReceipts)
@@ -190,7 +195,7 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 	srv := &server{
 		pool:              pool,
 		events:            events,
-		evidence:          store.NewEvidenceStore(pool),
+		evidence:          evidenceStore,
 		artifacts:         artifactStore,
 		tasks:             store.NewTaskStore(pool, events),
 		retrieval:         retrievalStore,
@@ -202,6 +207,7 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 		observability:     observability,
 		evaluations:       evaluations,
 		workReceipts:      workReceipts,
+		validations:       store.NewValidationStore(pool, events, evidenceStore, artifactStore, observability),
 		changes:           changeService,
 		toolRegistry:      toolRegistry,
 		toolRuns:          toolRuns,
@@ -226,6 +232,31 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 	srv.ingests.SetEmbedder(func(embedCtx context.Context, text string) ([]float32, error) {
 		return srv.embed(embedCtx, text)
 	})
+	validatorRegistry, err := validationruntime.NewDefaultRegistry()
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("configure validation registry: %w", err)
+	}
+	srv.validation = &validationruntime.Service{Registry: validatorRegistry, Runs: srv.validations, Discovery: ingest.Discover}
+	srv.validations.SetReceiptStore(workReceipts)
+	srv.validation.SubmitHandoff = func(handoffCtx context.Context, handoff contracts.ReindexHandoff) (contracts.IngestJob, error) {
+		workspace, workspaceErr := srv.operator.GetWorkspace(handoffCtx, handoff.WorkspaceID)
+		if workspaceErr != nil {
+			return contracts.IngestJob{}, workspaceErr
+		}
+		source := contracts.RepositorySource{Repository: handoff.Repository, SourceRoot: handoff.SourceRoot, MountRoot: workspace.ToolRoot}
+		discovered, discoverErr := ingest.Discover(handoffCtx, source)
+		if discoverErr != nil {
+			return contracts.IngestJob{}, discoverErr
+		}
+		job, _, submitErr := srv.ingests.Submit(handoffCtx, contracts.IngestJobRequest{
+			RequestID: handoff.RequestID, IdempotencyKey: handoff.IdempotencyKey, CausationID: handoff.ValidationRunID,
+			CorrelationID: handoff.RequestID, WorkspaceID: handoff.WorkspaceID, Actor: handoff.Actor, Task: handoff.Task,
+			Session: handoff.Session, TaskOwnerID: handoff.TaskOwnerID, TaskFence: handoff.TaskFence, Source: source,
+			BatchSize: contracts.DefaultIngestBatchSize,
+		}, discovered)
+		return job, submitErr
+	}
 	// Restore workspace-specific read-only repository admission rules from the
 	// durable workspace registry. The rule is only an in-process fast path; all
 	// requests still require authenticated workspace authorization.
@@ -2535,6 +2566,75 @@ func (s *server) routes() http.Handler {
 			return
 		}
 		s.handleChangePropose(w, r)
+	})
+	mux.HandleFunc("/v1/validations/disclose", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleValidationDisclosure(w, r)
+	})
+	mux.HandleFunc("/v1/validations/", func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/validations/"), "/"), "/")
+		if len(parts) == 0 || parts[0] == "" {
+			writeErr(w, http.StatusNotFound, "validation run id required")
+			return
+		}
+		runID := parts[0]
+		if len(parts) == 1 && r.Method == http.MethodGet {
+			s.handleValidationGet(w, r, runID)
+			return
+		}
+		if len(parts) != 2 {
+			writeErr(w, http.StatusNotFound, "unknown validation operation")
+			return
+		}
+		switch parts[1] {
+		case "results":
+			if r.Method == http.MethodGet {
+				s.handleValidationResults(w, r, runID)
+				return
+			}
+		case "replay":
+			if r.Method == http.MethodGet {
+				s.handleValidationReplay(w, r, runID)
+				return
+			}
+		case "resume":
+			if r.Method == http.MethodPost {
+				s.handleValidationResume(w, r, runID)
+				return
+			}
+		case "cancel":
+			if r.Method == http.MethodPost {
+				s.handleValidationCancel(w, r, runID)
+				return
+			}
+		}
+		writeErr(w, http.StatusNotFound, "unknown validation operation")
+	})
+	mux.HandleFunc("/v1/validations", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleValidationCreate(w, r)
+	})
+	mux.HandleFunc("/v1/reindex-handoffs/", func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/v1/reindex-handoffs/"), "/"), "/")
+		if len(parts) == 0 || parts[0] == "" {
+			writeErr(w, http.StatusNotFound, "handoff id required")
+			return
+		}
+		if len(parts) == 1 && r.Method == http.MethodGet {
+			s.handleHandoffGet(w, r, parts[0])
+			return
+		}
+		if len(parts) == 2 && parts[1] == "submit" && r.Method == http.MethodPost {
+			s.handleHandoffSubmit(w, r, parts[0])
+			return
+		}
+		writeErr(w, http.StatusNotFound, "unknown handoff operation")
 	})
 	mux.HandleFunc("/v1/metrics", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {

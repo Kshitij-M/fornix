@@ -236,6 +236,42 @@ and `disclose`. The MCP shim exposes equivalent
 `fornix__change_*` tools. The fake provider is not involved in planning,
 approval, or application.
 
+## Post-change validation and re-index handoff
+
+Validation is the read-only proof boundary after an approved change. It checks
+the applied packet and configured mount, persists bounded result/evidence
+history, creates a new ingestion handoff, and emits a verified validation Work
+Receipt. It never overwrites the applied change or invokes a model, tool,
+broker, or external CI service.
+
+| Method | Route | Purpose | Required capability |
+| --- | --- | --- | --- |
+| `POST` | `/v1/validations` | Run or dry-run the registered deterministic validators | `change:validate` |
+| `GET` | `/v1/validations/{id}` | Read one workspace-scoped validation run | `change:read` |
+| `GET` | `/v1/validations/{id}/results` | Read bounded validator results in ordinal order | `change:read` |
+| `GET` | `/v1/validations/{id}/replay` | Reconstruct recorded results/events without live effects | `change:read` |
+| `POST` | `/v1/validations/{id}/resume` | Resume a pending run from its durable identity | `change:validate` |
+| `POST` | `/v1/validations/{id}/cancel` | Durably cancel a non-terminal run | `change:validate` |
+| `POST` | `/v1/validations/disclose` | Read a bounded gist/detail/raw report view | `change:read` |
+| `GET` | `/v1/reindex-handoffs/{id}` | Read a durable handoff | `change:read` |
+| `POST` | `/v1/reindex-handoffs/{id}/submit` | Idempotently submit the handoff to ingestion | `change:validate` |
+
+The initial validator registry covers source preconditions, changed-file and
+byte limits, path safety, result-tree equality, and re-index discovery. Plans
+are explicit and sorted by validator ID/version. Results are hash-preserving,
+workspace-scoped, bounded, and append-only. A crash before the final Postgres
+commit leaves the run pending with no result/evidence/handoff effect; a crash
+after commit is safely replayable. The local filesystem observation and the
+subsequent ingestion job are separate external boundaries, so handoff
+submission is at-least-once and remains retryable.
+
+The CLI exposes `fornix validation dry-run`, `run`, `status`, `results`,
+`replay`, `disclose`, `resume`, `cancel`, and `handoff`. The MCP shim exposes
+the corresponding validation and handoff tools. See
+[`58-validation-foundation.md`](58-validation-foundation.md) for invariants
+and [`59-loop-22-completion.md`](59-loop-22-completion.md) for qualification
+evidence and remaining limitations.
+
 ## Compatibility data-plane routes
 
 These routes support the original memo, chunk, symbol, coordination, and

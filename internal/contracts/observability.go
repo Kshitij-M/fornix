@@ -22,14 +22,15 @@ const (
 )
 
 const (
-	ObservationModel     = "model"
-	ObservationTool      = "tool"
-	ObservationRetrieval = "retrieval"
-	ObservationAgent     = "agent"
-	ObservationArtifact  = "artifact"
-	ObservationRetry     = "retry"
-	ObservationApproval  = "approval"
-	ObservationScheduler = "scheduler"
+	ObservationModel      = "model"
+	ObservationTool       = "tool"
+	ObservationRetrieval  = "retrieval"
+	ObservationAgent      = "agent"
+	ObservationArtifact   = "artifact"
+	ObservationRetry      = "retry"
+	ObservationApproval   = "approval"
+	ObservationScheduler  = "scheduler"
+	ObservationValidation = "validation"
 )
 
 const (
@@ -848,7 +849,7 @@ func validCostCategory(value string) bool {
 
 func validObservationKind(value string) bool {
 	switch value {
-	case ObservationModel, ObservationTool, ObservationRetrieval, ObservationAgent, ObservationArtifact, ObservationRetry, ObservationApproval, ObservationScheduler:
+	case ObservationModel, ObservationTool, ObservationRetrieval, ObservationAgent, ObservationArtifact, ObservationRetry, ObservationApproval, ObservationScheduler, ObservationValidation:
 		return true
 	default:
 		return false

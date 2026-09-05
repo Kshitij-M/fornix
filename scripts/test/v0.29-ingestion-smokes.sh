@@ -2,29 +2,34 @@
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+. "$repo_root/scripts/test/smoke_helpers.sh"
 url=${FORNIX_URL:-http://localhost:8201}
 key=${FORNIX_KEY:-}
 bootstrap_key=${FORNIX_BOOTSTRAP_KEY:-}
 workspace="ingest-smoke-$$"
 workdir=${FORNIX_REFERENCE_WORKDIR:-/workspace/fixtures/reference-repo}
+container_url=$(fornix_smoke_container_url "$url")
+if [ -x "$repo_root/bin/fornix" ]; then
+  cli_workdir=$workdir
+else
+  cli_workdir=$(fornix_smoke_container_path "$workdir" "$repo_root")
+fi
 
 cli() {
   if [ -x "$repo_root/bin/fornix" ]; then
-    docker run --rm --network host \
-      -e FORNIX_URL="$url" -e FORNIX_KEY="$key" -e FORNIX_BOOTSTRAP_KEY="$bootstrap_key" \
-      -v "$repo_root:/workspace" -w /workspace golang:1.25.13 \
-      /workspace/bin/fornix --workspace "$workspace" "$@"
+    FORNIX_URL="$url" FORNIX_KEY="$key" FORNIX_BOOTSTRAP_KEY="$bootstrap_key" \
+      FORNIX_WORKSPACE_ID="$workspace" "$repo_root/bin/fornix" --workspace "$workspace" "$@"
   else
-    docker run --rm --network host \
-      -e FORNIX_URL="$url" -e FORNIX_KEY="$key" -e FORNIX_BOOTSTRAP_KEY="$bootstrap_key" \
+    docker run --rm --add-host=host.docker.internal:host-gateway \
+      -e FORNIX_URL="$container_url" -e FORNIX_KEY="$key" -e FORNIX_BOOTSTRAP_KEY="$bootstrap_key" \
       -v "$repo_root:/workspace" -w /workspace golang:1.25.13 \
       go run ./cmd/fornix --workspace "$workspace" "$@"
   fi
 }
 
-cli workspace bootstrap --workspace "$workspace" --tool-root "$workdir" >/dev/null
+cli workspace bootstrap --workspace "$workspace" --tool-root "$cli_workdir" >/dev/null
 before=$(cli ingest list)
-dry_run=$(cli ingest dry-run --source-root "$workdir" --repository reference-repo)
+dry_run=$(cli ingest dry-run --source-root "$cli_workdir" --repository reference-repo)
 python3 -c 'import json,sys
 v=json.loads(sys.stdin.read()); r=v["report"]
 assert r["dry_run"] is True
@@ -39,7 +44,7 @@ before=json.loads(sys.argv[1]); after=json.loads(sys.argv[2])
 assert len(before.get("jobs", [])) == len(after.get("jobs", []))
 print("ingestion dry-run mutation check: ok")' "$before" "$after"
 
-submitted=$(cli ingest submit --source-root "$workdir" --repository reference-repo --idempotency "smoke-ingest:$workspace")
+submitted=$(cli ingest submit --source-root "$cli_workdir" --repository reference-repo --idempotency "smoke-ingest:$workspace")
 job_id=$(python3 -c 'import json,sys; print(json.load(sys.stdin)["job"]["id"])' <<EOF
 $submitted
 EOF
@@ -59,7 +64,7 @@ EOF
 done
 
 final=$(cli ingest status --id "$job_id")
-duplicate=$(cli ingest submit --source-root "$workdir" --repository reference-repo --idempotency "smoke-ingest:$workspace")
+duplicate=$(cli ingest submit --source-root "$cli_workdir" --repository reference-repo --idempotency "smoke-ingest:$workspace")
 python3 -c 'import json,sys
 final=json.loads(sys.argv[1]); dup=json.loads(sys.argv[2])
 assert final.get("status", final.get("job", {}).get("status")) == "succeeded", final

@@ -59,13 +59,6 @@ func Discover(ctx context.Context, source contracts.RepositorySource) (Discovery
 	if err != nil {
 		return DiscoveryResult{}, fmt.Errorf("canonicalize configured mount: %w", err)
 	}
-	rootInfo, err := os.Lstat(normalized.SourceRoot)
-	if err != nil {
-		return DiscoveryResult{}, fmt.Errorf("stat source root: %w", err)
-	}
-	if rootInfo.Mode()&os.ModeSymlink != 0 {
-		return DiscoveryResult{}, fmt.Errorf("source root symlink is rejected")
-	}
 	root, err := canonicalDirectory(normalized.SourceRoot)
 	if err != nil {
 		return DiscoveryResult{}, fmt.Errorf("canonicalize source root: %w", err)
@@ -73,6 +66,11 @@ func Discover(ctx context.Context, source contracts.RepositorySource) (Discovery
 	if !within(root, mount) {
 		return DiscoveryResult{}, fmt.Errorf("source root escapes configured mount")
 	}
+	rootHandle, err := os.OpenRoot(root)
+	if err != nil {
+		return DiscoveryResult{}, fmt.Errorf("open source root: %w", err)
+	}
+	defer rootHandle.Close()
 
 	rules := append(append([]string(nil), defaultIgnoreRules...), normalized.IgnoreRules...)
 	files := make([]DiscoveredFile, 0)
@@ -122,7 +120,7 @@ func Discover(ctx context.Context, source contracts.RepositorySource) (Discovery
 			result.Skipped = append(result.Skipped, SkippedFile{Path: rel, Reason: "file_too_large", ByteSize: info.Size()})
 			return nil
 		}
-		data, readErr := os.ReadFile(current)
+		data, readErr := rootHandle.ReadFile(filepath.FromSlash(rel))
 		if readErr != nil {
 			return readErr
 		}
@@ -163,7 +161,7 @@ func ValidateConfiguredRoot(sourceRoot, mountRoot string) error {
 	if strings.TrimSpace(sourceRoot) == "" || strings.TrimSpace(mountRoot) == "" || !filepath.IsAbs(sourceRoot) || !filepath.IsAbs(mountRoot) {
 		return fmt.Errorf("source and mount roots must be absolute")
 	}
-	rootInfo, err := os.Lstat(sourceRoot)
+	rootInfo, err := directoryEntry(sourceRoot)
 	if err != nil {
 		return fmt.Errorf("stat source root: %w", err)
 	}
@@ -186,7 +184,12 @@ func ValidateConfiguredRoot(sourceRoot, mountRoot string) error {
 
 func canonicalDirectory(raw string) (string, error) {
 	clean := filepath.Clean(raw)
-	info, err := os.Stat(clean)
+	root, err := os.OpenRoot(clean)
+	if err != nil {
+		return "", err
+	}
+	defer root.Close()
+	info, err := root.Stat(".")
 	if err != nil {
 		return "", err
 	}
@@ -194,6 +197,20 @@ func canonicalDirectory(raw string) (string, error) {
 		return "", fmt.Errorf("%s is not a directory", clean)
 	}
 	return filepath.EvalSymlinks(clean)
+}
+
+// directoryEntry inspects the final path component without following it.
+// Opening the parent as an os.Root also prevents a caller-controlled path
+// from being used outside that parent during the check.
+func directoryEntry(raw string) (os.FileInfo, error) {
+	clean := filepath.Clean(raw)
+	parent, base := filepath.Dir(clean), filepath.Base(clean)
+	parentRoot, err := os.OpenRoot(parent)
+	if err != nil {
+		return nil, err
+	}
+	defer parentRoot.Close()
+	return parentRoot.Lstat(base)
 }
 
 func within(candidate, root string) bool {
@@ -239,12 +256,17 @@ func ignored(rel string, isDir bool, rules []string) bool {
 // ReadAndVerify makes the source immutable from the indexer's point of view.
 // A changed file is a hard failure; already committed batches remain valid.
 func ReadAndVerify(root string, file contracts.IngestFile) ([]byte, error) {
-	rel := filepath.FromSlash(file.Path)
-	if filepath.IsAbs(rel) || hasPathTraversal(file.Path) {
-		return nil, fmt.Errorf("unsafe ingest path %q", file.Path)
+	normalized, err := normalizeIngestPath(file.Path)
+	if err != nil {
+		return nil, err
 	}
-	full := filepath.Join(root, rel)
-	info, err := os.Lstat(full)
+	rel := filepath.FromSlash(normalized)
+	rootHandle, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, err
+	}
+	defer rootHandle.Close()
+	info, err := rootHandle.Lstat(rel)
 	if err != nil {
 		return nil, err
 	}
@@ -254,7 +276,7 @@ func ReadAndVerify(root string, file contracts.IngestFile) ([]byte, error) {
 	if uint32(info.Mode().Perm()) != file.Mode || info.Size() != file.ByteSize {
 		return nil, fmt.Errorf("source metadata changed: %s", file.Path)
 	}
-	data, err := os.ReadFile(full)
+	data, err := rootHandle.ReadFile(rel)
 	if err != nil {
 		return nil, err
 	}
@@ -263,4 +285,19 @@ func ReadAndVerify(root string, file contracts.IngestFile) ([]byte, error) {
 		return nil, fmt.Errorf("source content changed: %s", file.Path)
 	}
 	return data, nil
+}
+
+func normalizeIngestPath(raw string) (string, error) {
+	if strings.TrimSpace(raw) == "" || strings.ContainsAny(raw, "\x00\r\n") {
+		return "", fmt.Errorf("unsafe ingest path %q", raw)
+	}
+	slash := filepath.ToSlash(raw)
+	if filepath.IsAbs(filepath.FromSlash(slash)) || strings.HasPrefix(slash, "/") {
+		return "", fmt.Errorf("unsafe ingest path %q", raw)
+	}
+	clean := path.Clean(slash)
+	if clean == "." || clean == ".." || strings.HasPrefix(clean, "../") || clean != slash {
+		return "", fmt.Errorf("unsafe ingest path %q", raw)
+	}
+	return clean, nil
 }
