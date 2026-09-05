@@ -136,6 +136,11 @@ func ObserveAppliedPacketState(ctx context.Context, root string, packet contract
 	if err != nil {
 		return PacketStateObservation{}, err
 	}
+	repositoryRoot, err := os.OpenRoot(root)
+	if err != nil {
+		return PacketStateObservation{}, fmt.Errorf("open repository root: %w", err)
+	}
+	defer repositoryRoot.Close()
 	var files int
 	var bytes int64
 	paths := make(map[string]struct{}, len(packet.Source.Files)+len(packet.Operations)*2)
@@ -152,11 +157,11 @@ func ObserveAppliedPacketState(ctx context.Context, root string, packet contract
 		if err := ctx.Err(); err != nil {
 			return PacketStateObservation{}, err
 		}
-		absolute, joinErr := SafeJoin(root, path)
-		if joinErr != nil {
+		if _, joinErr := SafeJoin(root, path); joinErr != nil {
 			return PacketStateObservation{}, joinErr
 		}
-		info, statErr := os.Lstat(absolute)
+		relative := filepath.FromSlash(path)
+		info, statErr := repositoryRoot.Lstat(relative)
 		if errors.Is(statErr, os.ErrNotExist) {
 			continue
 		}
@@ -166,7 +171,7 @@ func ObserveAppliedPacketState(ctx context.Context, root string, packet contract
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return PacketStateObservation{}, fmt.Errorf("%w: %s", ErrUnsafePath, path)
 		}
-		data, readErr := os.ReadFile(absolute)
+		data, readErr := repositoryRoot.ReadFile(relative)
 		if readErr != nil {
 			return PacketStateObservation{}, readErr
 		}
