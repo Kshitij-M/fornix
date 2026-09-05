@@ -136,6 +136,12 @@ func (s *IngestStore) Submit(ctx context.Context, request contracts.IngestJobReq
 	} else if !errors.Is(readErr, ErrIngestJobNotFound) {
 		return contracts.IngestJob{}, false, readErr
 	}
+	if normalized.Task != nil {
+		candidate := contracts.IngestJob{WorkspaceID: normalized.WorkspaceID, Task: normalized.Task, TaskOwnerID: normalized.TaskOwnerID, TaskFence: normalized.TaskFence}
+		if err := authorizeIngestTaskTx(ctx, tx, candidate); err != nil {
+			return contracts.IngestJob{}, false, err
+		}
+	}
 	var created bool
 	err = tx.QueryRow(ctx, `
 		INSERT INTO fornix.ingest_jobs(

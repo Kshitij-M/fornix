@@ -259,6 +259,16 @@ func permissionForRequest(r *http.Request) contracts.Permission {
 		return contracts.PermissionChangePropose
 	case path == "/v1/changes/disclose":
 		return contracts.PermissionChangeDisclose
+	case path == "/v1/validations" || strings.HasPrefix(path, "/v1/validations/"):
+		if r.Method == http.MethodGet || path == "/v1/validations/disclose" || strings.HasSuffix(path, "/replay") || strings.HasSuffix(path, "/report") {
+			return contracts.PermissionChangeRead
+		}
+		return contracts.PermissionChangeValidate
+	case path == "/v1/reindex-handoffs" || strings.HasPrefix(path, "/v1/reindex-handoffs/"):
+		if r.Method == http.MethodGet {
+			return contracts.PermissionChangeRead
+		}
+		return contracts.PermissionChangeValidate
 	case strings.HasPrefix(path, "/v1/changes/"):
 		if strings.HasSuffix(path, "/approve") {
 			return contracts.PermissionChangeApprove

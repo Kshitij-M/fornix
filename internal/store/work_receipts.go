@@ -57,18 +57,39 @@ func (s *WorkReceiptStore) Finalize(ctx context.Context, request contracts.WorkR
 	if err != nil {
 		return contracts.WorkReceipt{}, false, err
 	}
-	return s.finalize(ctx, receipt)
-}
-
-func (s *WorkReceiptStore) finalize(ctx context.Context, receipt contracts.WorkReceipt) (contracts.WorkReceipt, bool, error) {
-	if err := receipt.Normalize(); err != nil {
-		return contracts.WorkReceipt{}, false, err
-	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return contracts.WorkReceipt{}, false, fmt.Errorf("begin work receipt finalization: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	stored, inserted, err := s.finalizeTx(ctx, tx, receipt)
+	if err != nil {
+		return contracts.WorkReceipt{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return contracts.WorkReceipt{}, false, fmt.Errorf("commit work receipt: %w", err)
+	}
+	return stored, inserted, nil
+}
+
+// FinalizeTx verifies and stages a receipt in an existing transaction. The
+// caller owns the transaction commit or rollback. This allows a receipt to be
+// part of a larger authoritative mutation without a second commit boundary.
+func (s *WorkReceiptStore) FinalizeTx(ctx context.Context, tx pgx.Tx, request contracts.WorkReceiptFinalizeRequest) (contracts.WorkReceipt, bool, error) {
+	if s == nil || tx == nil {
+		return contracts.WorkReceipt{}, false, fmt.Errorf("work receipt transaction is not configured")
+	}
+	receipt, err := request.ToReceipt(time.Now().UTC())
+	if err != nil {
+		return contracts.WorkReceipt{}, false, err
+	}
+	return s.finalizeTx(ctx, tx, receipt)
+}
+
+func (s *WorkReceiptStore) finalizeTx(ctx context.Context, tx pgx.Tx, receipt contracts.WorkReceipt) (contracts.WorkReceipt, bool, error) {
+	if err := receipt.Normalize(); err != nil {
+		return contracts.WorkReceipt{}, false, err
+	}
 	if err := s.validateAuthoritativeWorkTx(ctx, tx, &receipt); err != nil {
 		return contracts.WorkReceipt{}, false, err
 	}
@@ -132,9 +153,6 @@ func (s *WorkReceiptStore) finalize(ctx context.Context, receipt contracts.WorkR
 		if existing.RequestHash != receipt.RequestHash || existing.CanonicalHash != receipt.CanonicalHash {
 			return contracts.WorkReceipt{}, false, fmt.Errorf("%w: receipt identity already has a different canonical request", ErrWorkReceiptConflict)
 		}
-		if err := tx.Commit(ctx); err != nil {
-			return contracts.WorkReceipt{}, false, fmt.Errorf("commit duplicate work receipt read: %w", err)
-		}
 		return existing, false, nil
 	}
 	if err := s.fail("receipt_inserted"); err != nil {
@@ -175,9 +193,6 @@ func (s *WorkReceiptStore) finalize(ctx context.Context, receipt contracts.WorkR
 	}
 	if err := s.fail("before_commit"); err != nil {
 		return contracts.WorkReceipt{}, false, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return contracts.WorkReceipt{}, false, fmt.Errorf("commit work receipt: %w", err)
 	}
 	return stored, true, nil
 }
@@ -320,6 +335,18 @@ func (s *WorkReceiptStore) validateAuthoritativeWorkTx(ctx context.Context, tx p
 			return fmt.Errorf("%w: change proposal is not applied", ErrWorkReceiptIntegrity)
 		}
 	}
+	if receipt.WorkKind == contracts.WorkReceiptReferenceValidation {
+		var status, reportHash, replayHash string
+		if err := tx.QueryRow(ctx, `SELECT status, report_hash, replay_hash FROM fornix.validation_runs WHERE workspace_id=$1 AND id=$2 FOR SHARE`, receipt.WorkspaceID, receipt.WorkID).Scan(&status, &reportHash, &replayHash); errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("%w: validation run is missing", ErrWorkReceiptIntegrity)
+		} else if err != nil {
+			return fmt.Errorf("validate receipt validation run: %w", err)
+		} else if status != contracts.ValidationPassed {
+			return fmt.Errorf("%w: validation run is not passed", ErrWorkReceiptIntegrity)
+		} else if receipt.ReplayHash != "" && receipt.ReplayHash != replayHash {
+			return fmt.Errorf("%w: validation replay hash does not match", ErrWorkReceiptIntegrity)
+		}
+	}
 	return nil
 }
 
@@ -401,12 +428,24 @@ func validateReceiptReferenceTx(ctx context.Context, tx pgx.Tx, workspaceID stri
 	case contracts.WorkReceiptReferenceCost:
 		err = tx.QueryRow(ctx, `SELECT true, payload_hash FROM fornix.cost_ledger WHERE workspace_id=$1 AND (id=$2 OR idempotency_key=$2) LIMIT 1`, workspaceID, ref.SourceID).Scan(&found, &sourceHash)
 	case contracts.WorkReceiptReferenceValidation:
-		// Validation records are represented by their stable hash until a
-		// dedicated validation authority is added. No external call occurs.
-		found = ref.Hash != ""
+		var reportHash, replayHash, requestHash string
+		err = tx.QueryRow(ctx, `SELECT true, report_hash, replay_hash, request_hash FROM fornix.validation_runs WHERE workspace_id=$1 AND id=$2`, workspaceID, ref.SourceID).Scan(&found, &reportHash, &replayHash, &requestHash)
+		if err == nil && ref.Hash != "" {
+			switch strings.ToLower(ref.Hash) {
+			case strings.ToLower(reportHash):
+				sourceHash = reportHash
+			case strings.ToLower(replayHash):
+				sourceHash = replayHash
+			case strings.ToLower(requestHash):
+				sourceHash = requestHash
+			default:
+				return fmt.Errorf("%w: validation %s hash mismatch", ErrWorkReceiptIntegrity, ref.SourceID)
+			}
+		}
 	case contracts.WorkReceiptReferenceReplay:
 		// Replay is checked through the agent-run state hash or explicit hash.
 		found = ref.Hash != ""
+		sourceHash = ref.Hash
 	case contracts.WorkReceiptReferenceChangeProposal:
 		err = tx.QueryRow(ctx, `SELECT true, packet_hash FROM fornix.change_proposals WHERE workspace_id=$1 AND id=$2`, workspaceID, ref.SourceID).Scan(&found, &sourceHash)
 	case contracts.WorkReceiptReferenceChangeApplication:

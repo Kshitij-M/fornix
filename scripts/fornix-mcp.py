@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Fornix MCP compatibility shim — bridges Claude Code → Fornix HTTP API.
 
-Tools exposed (v0.10.1 compatibility shim):
+Tools exposed (compatibility shim plus deterministic validation and handoff):
   - fornix__health
   - fornix__search        (memo search)
   - fornix__remember      (memo create)
@@ -9,6 +9,9 @@ Tools exposed (v0.10.1 compatibility shim):
   - fornix__symbol_callers
   - fornix__symbol_callees
   - fornix__symbol_context
+  - fornix__validation_run / fornix__validation_get / fornix__validation_results
+  - fornix__validation_replay / fornix__validation_disclose / fornix__validation_resume
+  - fornix__validation_cancel / fornix__reindex_handoff_get / fornix__reindex_handoff_submit
 
 Speaks MCP stdio (JSON-RPC 2.0). Configure in ~/.claude.json mcpServers.fornix
 with command python3 + args [this file path] + env FORNIX_URL + FORNIX_KEY.
@@ -255,6 +258,62 @@ def tool_change_disclose(args: dict) -> dict:
     if args.get("application_id"):
         body["application_id"] = args["application_id"]
     return _call("POST", "/v1/changes/disclose", body)
+
+
+def tool_validation_run(args: dict) -> dict:
+    repository = args.get("repository", "reference-repo")
+    body = {
+        "workspace_id": FORNIX_WORKSPACE,
+        "repository": repository,
+        "change_application_id": str(args.get("application_id") or ""),
+        "proposal_id": str(args.get("proposal_id") or ""),
+        "packet_hash": str(args.get("packet_hash") or ""),
+        "expected_tree_hash": str(args.get("expected_tree_hash") or ""),
+        "source": {"repository": repository, "source_root": args.get("source_root", os.environ.get("FORNIX_REFERENCE_WORKDIR", "/workspace/fixtures/reference-repo"))},
+        "dry_run": bool(args.get("dry_run", False)),
+        "idempotency_key": args.get("idempotency_key", "validation:mcp:" + repository + ":" + str(args.get("application_id") or "")),
+    }
+    return _call("POST", "/v1/validations", body, body["idempotency_key"])
+
+
+def tool_validation_get(args: dict) -> dict:
+    return _call("GET", f"/v1/validations/{args['validation_run_id']}?workspace_id={FORNIX_WORKSPACE}")
+
+
+def tool_validation_results(args: dict) -> dict:
+    limit = min(int(args.get("limit") or 64), 64)
+    offset = max(int(args.get("offset") or 0), 0)
+    return _call("GET", f"/v1/validations/{args['validation_run_id']}/results?workspace_id={FORNIX_WORKSPACE}&limit={limit}&offset={offset}")
+
+
+def tool_validation_replay(args: dict) -> dict:
+    return _call("GET", f"/v1/validations/{args['validation_run_id']}/replay?workspace_id={FORNIX_WORKSPACE}&limit={min(int(args.get('limit') or 500), 500)}")
+
+
+def tool_validation_disclose(args: dict) -> dict:
+    return _call("POST", "/v1/validations/disclose", {
+        "workspace_id": FORNIX_WORKSPACE,
+        "validation_run_id": str(args.get("validation_run_id") or ""),
+        "level": args.get("level", "gist"),
+        "max_bytes": min(int(args.get("max_bytes") or 32768), 1 << 20),
+        "max_items": min(int(args.get("max_items") or 64), 128),
+    })
+
+
+def tool_validation_cancel(args: dict) -> dict:
+    return _call("POST", f"/v1/validations/{args['validation_run_id']}/cancel?workspace_id={FORNIX_WORKSPACE}", {})
+
+
+def tool_validation_resume(args: dict) -> dict:
+    return _call("POST", f"/v1/validations/{args['validation_run_id']}/resume?workspace_id={FORNIX_WORKSPACE}", {})
+
+
+def tool_handoff_get(args: dict) -> dict:
+    return _call("GET", f"/v1/reindex-handoffs/{args['handoff_id']}?workspace_id={FORNIX_WORKSPACE}")
+
+
+def tool_handoff_submit(args: dict) -> dict:
+    return _call("POST", f"/v1/reindex-handoffs/{args['handoff_id']}/submit?workspace_id={FORNIX_WORKSPACE}", {})
 
 
 def tool_search(args: dict) -> dict:
@@ -535,6 +594,60 @@ TOOLS = [
         "description": "Read a bounded hash-preserving proposal or application disclosure.",
         "inputSchema": {"type": "object", "properties": {"proposal_id": {"type": "string"}, "application_id": {"type": "string"}, "level": {"type": "string", "enum": ["gist", "detail", "raw"]}, "max_bytes": {"type": "integer", "maximum": 1048576}, "max_items": {"type": "integer", "maximum": 100}}},
         "fn": tool_change_disclose,
+    },
+    {
+        "name": "fornix__validation_run",
+        "description": "Run deterministic post-change validation and create a durable re-index handoff.",
+        "inputSchema": {"type": "object", "properties": {"repository": {"type": "string"}, "source_root": {"type": "string"}, "application_id": {"type": "string"}, "proposal_id": {"type": "string"}, "packet_hash": {"type": "string"}, "expected_tree_hash": {"type": "string"}, "dry_run": {"type": "boolean"}, "idempotency_key": {"type": "string"}}, "required": ["application_id", "proposal_id", "packet_hash", "expected_tree_hash"]},
+        "fn": tool_validation_run,
+    },
+    {
+        "name": "fornix__validation_get",
+        "description": "Inspect one workspace-scoped post-change validation run.",
+        "inputSchema": {"type": "object", "properties": {"validation_run_id": {"type": "string"}}, "required": ["validation_run_id"], "additionalProperties": False},
+        "fn": tool_validation_get,
+    },
+    {
+        "name": "fornix__validation_results",
+        "description": "Read bounded immutable validator results in deterministic order.",
+        "inputSchema": {"type": "object", "properties": {"validation_run_id": {"type": "string"}, "limit": {"type": "integer", "maximum": 64}, "offset": {"type": "integer", "minimum": 0}}, "required": ["validation_run_id"]},
+        "fn": tool_validation_results,
+    },
+    {
+        "name": "fornix__validation_replay",
+        "description": "Replay recorded validation results and events without filesystem or external effects.",
+        "inputSchema": {"type": "object", "properties": {"validation_run_id": {"type": "string"}, "limit": {"type": "integer", "maximum": 500}}, "required": ["validation_run_id"]},
+        "fn": tool_validation_replay,
+    },
+    {
+        "name": "fornix__validation_disclose",
+        "description": "Disclose a bounded hash-preserving validation report.",
+        "inputSchema": {"type": "object", "properties": {"validation_run_id": {"type": "string"}, "level": {"type": "string", "enum": ["gist", "detail", "raw"]}, "max_bytes": {"type": "integer", "maximum": 1048576}, "max_items": {"type": "integer", "maximum": 128}}, "required": ["validation_run_id"]},
+        "fn": tool_validation_disclose,
+    },
+    {
+        "name": "fornix__validation_cancel",
+        "description": "Durably cancel a non-terminal validation run.",
+        "inputSchema": {"type": "object", "properties": {"validation_run_id": {"type": "string"}}, "required": ["validation_run_id"], "additionalProperties": False},
+        "fn": tool_validation_cancel,
+    },
+    {
+        "name": "fornix__validation_resume",
+        "description": "Resume a pending deterministic validation run from its durable identity.",
+        "inputSchema": {"type": "object", "properties": {"validation_run_id": {"type": "string"}}, "required": ["validation_run_id"], "additionalProperties": False},
+        "fn": tool_validation_resume,
+    },
+    {
+        "name": "fornix__reindex_handoff_get",
+        "description": "Inspect a durable post-validation re-index handoff.",
+        "inputSchema": {"type": "object", "properties": {"handoff_id": {"type": "string"}}, "required": ["handoff_id"], "additionalProperties": False},
+        "fn": tool_handoff_get,
+    },
+    {
+        "name": "fornix__reindex_handoff_submit",
+        "description": "Submit a pending re-index handoff to the existing bounded ingestion authority.",
+        "inputSchema": {"type": "object", "properties": {"handoff_id": {"type": "string"}}, "required": ["handoff_id"], "additionalProperties": False},
+        "fn": tool_handoff_submit,
     },
 ]
 TOOL_INDEX = {t["name"]: t for t in TOOLS}

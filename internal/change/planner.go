@@ -47,6 +47,135 @@ type AppliedChange struct {
 	Conflict          *contracts.ChangeConflict
 }
 
+// PacketStateObservation is the bounded, hash-only filesystem state observed
+// by post-change validators. It deliberately shares the same precondition and
+// tree hashing code as Executor so validation cannot drift from application
+// semantics.
+type PacketStateObservation struct {
+	ResultTreeHash string
+	Files          int
+	Bytes          int64
+	Conflict       *contracts.ChangeConflict
+}
+
+// ObservePacketState checks all packet preconditions and computes the exact
+// affected-tree hash used by the change executor. It never mutates files and
+// never returns file contents.
+func ObservePacketState(ctx context.Context, root string, packet contracts.ChangePacket) (PacketStateObservation, error) {
+	if strings.TrimSpace(root) == "" {
+		return PacketStateObservation{}, fmt.Errorf("repository root is required")
+	}
+	if packet.WorkspaceID == "" {
+		return PacketStateObservation{}, fmt.Errorf("packet workspace_id is required")
+	}
+	operations := sortedOperations(packet.Operations)
+	for _, operation := range operations {
+		if err := ctx.Err(); err != nil {
+			return PacketStateObservation{}, err
+		}
+		if conflict := checkPrecondition(root, operation); conflict != nil {
+			return PacketStateObservation{Conflict: conflict}, fmt.Errorf("%w: %s", ErrSourceConflict, conflict.Path)
+		}
+	}
+	hash, err := observedTreeHashFull(root, packet.Source, operations)
+	if err != nil {
+		return PacketStateObservation{}, err
+	}
+	var files int
+	var bytes int64
+	paths := make(map[string]struct{}, len(packet.Source.Files)+len(operations)*2)
+	for _, file := range packet.Source.Files {
+		paths[file.Path] = struct{}{}
+	}
+	for _, operation := range operations {
+		paths[operation.Path] = struct{}{}
+		if operation.Type == contracts.ChangeOpRename {
+			paths[operation.Destination] = struct{}{}
+		}
+	}
+	for path := range paths {
+		absolute, joinErr := SafeJoin(root, path)
+		if joinErr != nil {
+			return PacketStateObservation{}, joinErr
+		}
+		info, statErr := os.Lstat(absolute)
+		if errors.Is(statErr, os.ErrNotExist) {
+			continue
+		}
+		if statErr != nil {
+			return PacketStateObservation{}, statErr
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return PacketStateObservation{}, fmt.Errorf("%w: %s", ErrUnsafePath, path)
+		}
+		data, readErr := os.ReadFile(absolute)
+		if readErr != nil {
+			return PacketStateObservation{}, readErr
+		}
+		files++
+		bytes += int64(len(data))
+	}
+	return PacketStateObservation{ResultTreeHash: hash, Files: files, Bytes: bytes}, nil
+}
+
+// ObserveAppliedPacketState computes the post-application tree observation
+// without re-running preconditions that were intentionally consumed by the
+// filesystem application. It is the correct boundary for validation after a
+// successful external change; it remains read-only and rejects unsafe paths.
+func ObserveAppliedPacketState(ctx context.Context, root string, packet contracts.ChangePacket) (PacketStateObservation, error) {
+	if strings.TrimSpace(root) == "" {
+		return PacketStateObservation{}, fmt.Errorf("repository root is required")
+	}
+	if packet.WorkspaceID == "" {
+		return PacketStateObservation{}, fmt.Errorf("packet workspace_id is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return PacketStateObservation{}, err
+	}
+	hash, err := observedTreeHashFull(root, packet.Source, packet.Operations)
+	if err != nil {
+		return PacketStateObservation{}, err
+	}
+	var files int
+	var bytes int64
+	paths := make(map[string]struct{}, len(packet.Source.Files)+len(packet.Operations)*2)
+	for _, file := range packet.Source.Files {
+		paths[file.Path] = struct{}{}
+	}
+	for _, operation := range packet.Operations {
+		paths[operation.Path] = struct{}{}
+		if operation.Type == contracts.ChangeOpRename {
+			paths[operation.Destination] = struct{}{}
+		}
+	}
+	for path := range paths {
+		if err := ctx.Err(); err != nil {
+			return PacketStateObservation{}, err
+		}
+		absolute, joinErr := SafeJoin(root, path)
+		if joinErr != nil {
+			return PacketStateObservation{}, joinErr
+		}
+		info, statErr := os.Lstat(absolute)
+		if errors.Is(statErr, os.ErrNotExist) {
+			continue
+		}
+		if statErr != nil {
+			return PacketStateObservation{}, statErr
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return PacketStateObservation{}, fmt.Errorf("%w: %s", ErrUnsafePath, path)
+		}
+		data, readErr := os.ReadFile(absolute)
+		if readErr != nil {
+			return PacketStateObservation{}, readErr
+		}
+		files++
+		bytes += int64(len(data))
+	}
+	return PacketStateObservation{ResultTreeHash: hash, Files: files, Bytes: bytes}, nil
+}
+
 // ContentResolver supplies immutable content artifacts to the executor.
 type ContentResolver func(context.Context, string, string) ([]byte, error)
 

@@ -283,6 +283,17 @@ jobs:
           FORNIX_KEY: fornix-ci-test-key
           FORNIX_REFERENCE_WORKDIR: ${{ github.workspace }}/fixtures/reference-repo
         run: scripts/test/v0.31-change-smokes.sh
+      - name: Run post-change validation integration tests
+        env:
+          FORNIX_TEST_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+        run: go test ./internal/store ./internal/validation -run 'Test(Validation|DefaultRegistry|Registry|ObserveApplied)' -count=1 -v
+      - name: Run post-change validation smoke
+        env:
+          FORNIX_URL: http://localhost:8201
+          FORNIX_KEY: fornix-ci-test-key
+          FORNIX_BOOTSTRAP_KEY: fornix-ci-bootstrap-key
+          FORNIX_REFERENCE_WORKDIR: ${{ github.workspace }}/fixtures/reference-repo
+        run: scripts/test/v0.32-validation-smokes.sh
 
   vulnerabilities:
     name: Vulnerability scan

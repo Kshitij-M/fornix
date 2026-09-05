@@ -74,6 +74,7 @@ make smoke-retrieval-evaluation
 make smoke-reference-workflow
 make smoke-reference-openai
 make smoke-ingestion
+make smoke-validation
 make operator-reference
 make dev-up
 make dev-run
@@ -206,6 +207,33 @@ chunks/symbols, immutable ingest lineage, the checkpoint, and the lifecycle
 event. Repeating submit/resume is idempotent; changed or removed source paths
 create auditable supersession/removal metadata. Embeddings are explicit opt-in
 work and skipped when the provider or configured budget is unavailable.
+
+Post-change validation is a read-only, deterministic check over an applied
+change packet. It verifies the authoritative application, observes the
+configured repository state, records bounded validator results and evidence,
+and creates an idempotent re-index handoff. A successful run also creates a
+verified Work Receipt in the same Postgres transaction. Replay reads the
+recorded result and event history only; it never invokes tools, models, or
+ingestion:
+
+```sh
+bin/fornix --workspace reference-local validation run \
+  --repository reference-repo \
+  --source-root /workspace/fixtures/reference-repo \
+  --application-id <application-id> --proposal-id <proposal-id> \
+  --packet-hash <packet-hash> --expected-tree-hash <expected-tree-hash>
+bin/fornix --workspace reference-local validation status --id <validation-run-id>
+bin/fornix --workspace reference-local validation results --id <validation-run-id>
+bin/fornix --workspace reference-local validation replay --id <validation-run-id>
+bin/fornix --workspace reference-local validation disclose --id <validation-run-id> --level detail
+make smoke-validation
+```
+
+The validator set is explicit and bounded: packet preconditions, affected-file
+limits, path safety, result-tree equality, and re-index discovery. The
+re-index handoff creates a new ingestion identity rather than overwriting the
+prior source history. If the ingestion boundary is unavailable after
+validation commits, the handoff remains visible as a retryable failed state.
 
 The model gateway is exposed at `POST /v1/model/complete`. It always routes
 through an explicitly registered provider and persists one workspace-scoped

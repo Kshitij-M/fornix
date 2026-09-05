@@ -202,6 +202,24 @@ Inspect a receipt without replaying external work:
 bin/fornix receipt disclose --id <receipt-id> --level detail
 ```
 
+Post-change validation closes the repository-change proof loop. After an
+approved packet is applied, Fornix verifies the observed result tree and
+configured mount with a deterministic bounded validator plan, preserves
+hash-only evidence, creates a new ingestion handoff, and records a verified
+Work Receipt. The default path is offline and read-only at the repository
+boundary:
+
+```sh
+make smoke-validation
+```
+
+Validation replay reads only the durable Postgres result/event history and
+cannot execute a model, tool, or ingestion job. See the
+[validation foundation](docs/58-validation-foundation.md),
+[Task 22 completion record](docs/59-loop-22-completion.md), and
+[HTTP API reference](docs/53-http-api-reference.md) for the exact lifecycle,
+budgets, workspace authorization, crash semantics, and operator commands.
+
 OpenAI-compatible chat is disabled by default. The optional smoke reads
 `FORNIX_OPENAI_API_KEY` from the process environment only; never put a key in
 this repository, a test fixture, a command transcript, or an issue. Remote
@@ -259,7 +277,7 @@ fixtures/                   small deterministic development fixtures
 
 Fornix is intentionally being developed as a sequence of small, testable
 control-plane slices that lead toward safe autonomous repository work. The
-current alpha still lacks the complete change-producing workflow, OAuth/SSO,
+current alpha still lacks a fully automated agent-to-change workflow, OAuth/SSO,
 external KMS or secret-manager integration, PostgreSQL row-level security,
 general background evaluation and ingestion scheduling, multi-agent execution
 graphs, a general sandbox provider, external artifact storage, backup/restore
