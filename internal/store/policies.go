@@ -225,7 +225,11 @@ func (s *PolicyStore) List(ctx context.Context, workspaceID string, limit int, c
 		return PolicyPage{}, err
 	}
 	rows.Close()
-	page := PolicyPage{Items: make([]contracts.ValidationPolicyVersion, 0, limit)}
+	// Use the bounded query result as the capacity rather than the raw API
+	// value. This keeps the allocation visibly tied to data already limited by
+	// the query and avoids turning a caller-controlled integer into a memory
+	// allocation at the disclosure boundary.
+	page := PolicyPage{Items: make([]contracts.ValidationPolicyVersion, 0, len(pairs))}
 	for _, pair := range pairs {
 		value, err := s.Get(ctx, workspaceID, pair[0], pair[1])
 		if err != nil {
@@ -521,7 +525,9 @@ func (s *PolicyStore) Audit(ctx context.Context, workspaceID, policyID, version 
 		return PolicyAuditPage{}, err
 	}
 	defer rows.Close()
-	page := PolicyAuditPage{Items: make([]contracts.PolicyAuditRecord, 0, limit)}
+	// The query is limited to MaxPolicyPageSize+1 before rows are materialized;
+	// cap the response allocation by the fixed server-side envelope.
+	page := PolicyAuditPage{Items: make([]contracts.PolicyAuditRecord, 0, contracts.MaxPolicyPageSize)}
 	for rows.Next() {
 		var item contracts.PolicyAuditRecord
 		var actorJSON []byte
