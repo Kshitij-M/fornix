@@ -53,41 +53,42 @@ const (
 // RunObservation is an append-only, bounded accounting record. It contains
 // stable dimensions and references, never arbitrary user text or secrets.
 type RunObservation struct {
-	SchemaVersion  int               `json:"schema_version"`
-	ID             string            `json:"id"`
-	WorkspaceID    string            `json:"workspace_id"`
-	IdempotencyKey string            `json:"idempotency_key"`
-	PayloadHash    string            `json:"payload_hash"`
-	Kind           string            `json:"kind"`
-	Component      string            `json:"component"`
-	Operation      string            `json:"operation"`
-	Outcome        string            `json:"outcome"`
-	Actor          ActorRef          `json:"actor,omitempty"`
-	Task           *EntityRef        `json:"task,omitempty"`
-	Session        *EntityRef        `json:"session,omitempty"`
-	CausationID    string            `json:"causation_id,omitempty"`
-	CorrelationID  string            `json:"correlation_id,omitempty"`
-	SourceKind     string            `json:"source_kind,omitempty"`
-	SourceID       string            `json:"source_id,omitempty"`
-	StartedAt      time.Time         `json:"started_at"`
-	FinishedAt     time.Time         `json:"finished_at,omitempty"`
-	DurationMS     int64             `json:"duration_ms,omitempty"`
-	DBQueries      int               `json:"db_queries,omitempty"`
-	DBRows         int64             `json:"db_rows,omitempty"`
-	InputBytes     int64             `json:"input_bytes,omitempty"`
-	OutputBytes    int64             `json:"output_bytes,omitempty"`
-	InputTokens    int               `json:"input_tokens,omitempty"`
-	OutputTokens   int               `json:"output_tokens,omitempty"`
-	TotalTokens    int               `json:"total_tokens,omitempty"`
-	UsageMeasured  bool              `json:"usage_measured,omitempty"`
-	UsageEstimated bool              `json:"usage_estimated,omitempty"`
-	CostUSD        float64           `json:"cost_usd,omitempty"`
-	CostKnown      bool              `json:"cost_known,omitempty"`
-	RetryCount     int               `json:"retry_count,omitempty"`
-	DuplicateWork  bool              `json:"duplicate_work,omitempty"`
-	ArtifactBytes  int64             `json:"artifact_bytes,omitempty"`
-	Metadata       map[string]string `json:"metadata,omitempty"`
-	Evidence       json.RawMessage   `json:"evidence,omitempty"`
+	SchemaVersion  int                  `json:"schema_version"`
+	ID             string               `json:"id"`
+	WorkspaceID    string               `json:"workspace_id"`
+	IdempotencyKey string               `json:"idempotency_key"`
+	PayloadHash    string               `json:"payload_hash"`
+	Kind           string               `json:"kind"`
+	Component      string               `json:"component"`
+	Operation      string               `json:"operation"`
+	Outcome        string               `json:"outcome"`
+	Actor          ActorRef             `json:"actor,omitempty"`
+	Task           *EntityRef           `json:"task,omitempty"`
+	Session        *EntityRef           `json:"session,omitempty"`
+	Policy         *ValidationPolicyRef `json:"policy,omitempty"`
+	CausationID    string               `json:"causation_id,omitempty"`
+	CorrelationID  string               `json:"correlation_id,omitempty"`
+	SourceKind     string               `json:"source_kind,omitempty"`
+	SourceID       string               `json:"source_id,omitempty"`
+	StartedAt      time.Time            `json:"started_at"`
+	FinishedAt     time.Time            `json:"finished_at,omitempty"`
+	DurationMS     int64                `json:"duration_ms,omitempty"`
+	DBQueries      int                  `json:"db_queries,omitempty"`
+	DBRows         int64                `json:"db_rows,omitempty"`
+	InputBytes     int64                `json:"input_bytes,omitempty"`
+	OutputBytes    int64                `json:"output_bytes,omitempty"`
+	InputTokens    int                  `json:"input_tokens,omitempty"`
+	OutputTokens   int                  `json:"output_tokens,omitempty"`
+	TotalTokens    int                  `json:"total_tokens,omitempty"`
+	UsageMeasured  bool                 `json:"usage_measured,omitempty"`
+	UsageEstimated bool                 `json:"usage_estimated,omitempty"`
+	CostUSD        float64              `json:"cost_usd,omitempty"`
+	CostKnown      bool                 `json:"cost_known,omitempty"`
+	RetryCount     int                  `json:"retry_count,omitempty"`
+	DuplicateWork  bool                 `json:"duplicate_work,omitempty"`
+	ArtifactBytes  int64                `json:"artifact_bytes,omitempty"`
+	Metadata       map[string]string    `json:"metadata,omitempty"`
+	Evidence       json.RawMessage      `json:"evidence,omitempty"`
 }
 
 // TraceSpan is a bounded child timing record. Attributes are restricted to
@@ -111,32 +112,33 @@ type TraceSpan struct {
 // CostLedgerEntry attributes a bounded amount of work. Estimated and measured
 // are separate so a missing provider usage value cannot look exact.
 type CostLedgerEntry struct {
-	SchemaVersion  int               `json:"schema_version"`
-	ID             string            `json:"id"`
-	WorkspaceID    string            `json:"workspace_id"`
-	IdempotencyKey string            `json:"idempotency_key"`
-	PayloadHash    string            `json:"payload_hash"`
-	Category       string            `json:"category"`
-	Basis          string            `json:"basis"`
-	SourceKind     string            `json:"source_kind"`
-	SourceID       string            `json:"source_id"`
-	Actor          ActorRef          `json:"actor,omitempty"`
-	Task           *EntityRef        `json:"task,omitempty"`
-	Session        *EntityRef        `json:"session,omitempty"`
-	CausationID    string            `json:"causation_id,omitempty"`
-	CorrelationID  string            `json:"correlation_id,omitempty"`
-	Units          float64           `json:"units,omitempty"`
-	UnitCostUSD    float64           `json:"unit_cost_usd,omitempty"`
-	AmountUSD      float64           `json:"amount_usd,omitempty"`
-	AmountKnown    bool              `json:"amount_known"`
-	Measured       bool              `json:"measured"`
-	Estimated      bool              `json:"estimated"`
-	InputTokens    int               `json:"input_tokens,omitempty"`
-	OutputTokens   int               `json:"output_tokens,omitempty"`
-	DurationMS     int64             `json:"duration_ms,omitempty"`
-	Bytes          int64             `json:"bytes,omitempty"`
-	DuplicateWork  bool              `json:"duplicate_work,omitempty"`
-	Metadata       map[string]string `json:"metadata,omitempty"`
+	SchemaVersion  int                  `json:"schema_version"`
+	ID             string               `json:"id"`
+	WorkspaceID    string               `json:"workspace_id"`
+	IdempotencyKey string               `json:"idempotency_key"`
+	PayloadHash    string               `json:"payload_hash"`
+	Category       string               `json:"category"`
+	Basis          string               `json:"basis"`
+	SourceKind     string               `json:"source_kind"`
+	SourceID       string               `json:"source_id"`
+	Actor          ActorRef             `json:"actor,omitempty"`
+	Task           *EntityRef           `json:"task,omitempty"`
+	Session        *EntityRef           `json:"session,omitempty"`
+	Policy         *ValidationPolicyRef `json:"policy,omitempty"`
+	CausationID    string               `json:"causation_id,omitempty"`
+	CorrelationID  string               `json:"correlation_id,omitempty"`
+	Units          float64              `json:"units,omitempty"`
+	UnitCostUSD    float64              `json:"unit_cost_usd,omitempty"`
+	AmountUSD      float64              `json:"amount_usd,omitempty"`
+	AmountKnown    bool                 `json:"amount_known"`
+	Measured       bool                 `json:"measured"`
+	Estimated      bool                 `json:"estimated"`
+	InputTokens    int                  `json:"input_tokens,omitempty"`
+	OutputTokens   int                  `json:"output_tokens,omitempty"`
+	DurationMS     int64                `json:"duration_ms,omitempty"`
+	Bytes          int64                `json:"bytes,omitempty"`
+	DuplicateWork  bool                 `json:"duplicate_work,omitempty"`
+	Metadata       map[string]string    `json:"metadata,omitempty"`
 }
 
 // MetricDimensions is deliberately a fixed vocabulary. Workspace is a row
@@ -392,6 +394,14 @@ func (o *RunObservation) Normalize() error {
 	if o.WorkspaceID == "" || o.IdempotencyKey == "" {
 		return fmt.Errorf("workspace_id and idempotency_key are required")
 	}
+	if o.Policy != nil {
+		if err := o.Policy.Normalize(); err != nil {
+			return err
+		}
+		if o.Policy.WorkspaceID != o.WorkspaceID {
+			return fmt.Errorf("policy crosses workspace boundary")
+		}
+	}
 	if len(o.IdempotencyKey) > MaxIdempotencyLength {
 		return fmt.Errorf("idempotency_key is too large")
 	}
@@ -497,6 +507,14 @@ func (c *CostLedgerEntry) Normalize() error {
 	}
 	if c.WorkspaceID == "" || c.IdempotencyKey == "" || c.Category == "" || c.SourceKind == "" || c.SourceID == "" {
 		return fmt.Errorf("cost workspace, idempotency, category, and source are required")
+	}
+	if c.Policy != nil {
+		if err := c.Policy.Normalize(); err != nil {
+			return err
+		}
+		if c.Policy.WorkspaceID != c.WorkspaceID {
+			return fmt.Errorf("policy crosses workspace boundary")
+		}
 	}
 	if !validCostCategory(c.Category) {
 		return fmt.Errorf("unsupported cost category %q", c.Category)

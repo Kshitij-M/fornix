@@ -155,6 +155,7 @@ func (s *EventStore) AppendTx(ctx context.Context, tx pgx.Tx, event contracts.Ev
 	// JSONB gives queryable structure; raw_payload preserves the exact input
 	// bytes for evidence, replay diagnostics, and future migrations.
 	payloadJSON := string(event.Payload)
+	policyID, policyVersion, policyHash := policyEventColumns(event.Policy)
 
 	var sequence int64
 	var recordedAtValue = event.RecordedAt
@@ -162,17 +163,19 @@ func (s *EventStore) AppendTx(ctx context.Context, tx pgx.Tx, event contracts.Ev
 		INSERT INTO fornix.control_events(
 			event_id, event_type, schema_version, workspace_id, scope, actor,
 			task_ref, session_ref, causation_id, correlation_id, idempotency_key,
+			policy_id, policy_version, policy_hash,
 			state_deltas, artifacts, provenance, payload, raw_payload, request_hash,
 			occurred_at
 		) VALUES(
 			$1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8::jsonb,
-			$9, $10, $11, $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb,
-			$16, $17, $18
+			$9, $10, $11, $12, $13, $14, $15::jsonb, $16::jsonb, $17::jsonb,
+			$18::jsonb, $19, $20, $21
 		) RETURNING sequence, recorded_at`,
 		event.EventID, event.EventType, event.SchemaVersion, workspaceID,
 		scopeJSON, actorJSON, taskJSON, sessionJSON, event.CausationID,
-		event.CorrelationID, event.IdempotencyKey, deltasJSON, artifactsJSON,
-		provenanceJSON, payloadJSON, []byte(event.Payload), requestHash,
+		event.CorrelationID, event.IdempotencyKey, policyID, policyVersion,
+		policyHash, deltasJSON, artifactsJSON, provenanceJSON, payloadJSON,
+		[]byte(event.Payload), requestHash,
 		event.OccurredAt).Scan(&sequence, &recordedAtValue)
 	if err != nil {
 		return AppendResult{}, fmt.Errorf("insert control event: %w", err)
@@ -256,8 +259,9 @@ func readAfter(ctx context.Context, queryer eventQueryer, request ReadRequest) (
 	query := `
 		SELECT sequence, event_id, event_type, schema_version, workspace_id,
 		       scope, actor, task_ref, session_ref, causation_id, correlation_id,
-		       idempotency_key, state_deltas, artifacts, provenance, payload,
-		       raw_payload, occurred_at, recorded_at
+		       idempotency_key, policy_id, policy_version, policy_hash,
+		       state_deltas, artifacts, provenance, payload, raw_payload,
+		       occurred_at, recorded_at
 		FROM fornix.control_events
 		WHERE workspace_id=$1 AND sequence>$2`
 	if request.ToSequence > 0 {
@@ -475,6 +479,13 @@ func jsonStringOrEmpty(value any) (string, error) {
 	return jsonString(value)
 }
 
+func policyEventColumns(policy *contracts.ValidationPolicyRef) (any, any, any) {
+	if policy == nil {
+		return nil, nil, nil
+	}
+	return policy.PolicyID, policy.Version, policy.PolicyHash
+}
+
 type eventScanner interface {
 	Scan(dest ...any) error
 }
@@ -483,8 +494,9 @@ func readEventBySequenceTx(ctx context.Context, tx pgx.Tx, workspaceID string, s
 	return scanEvent(tx.QueryRow(ctx, `
 		SELECT sequence, event_id, event_type, schema_version, workspace_id,
 		       scope, actor, task_ref, session_ref, causation_id, correlation_id,
-		       idempotency_key, state_deltas, artifacts, provenance, payload,
-		       raw_payload, occurred_at, recorded_at
+		       idempotency_key, policy_id, policy_version, policy_hash,
+		       state_deltas, artifacts, provenance, payload, raw_payload,
+		       occurred_at, recorded_at
 		FROM fornix.control_events
 		WHERE workspace_id=$1 AND sequence=$2`, workspaceID, sequence))
 }
@@ -493,6 +505,7 @@ func scanEvent(row eventScanner) (contracts.EventEnvelope, error) {
 	var (
 		sequence                                                         int64
 		eventID, eventType, workspaceID, causationID, correlationID, key string
+		policyID, policyVersion, policyHash                              *string
 		schemaVersion                                                    int
 		scopeJSON, actorJSON, taskJSON, sessionJSON, deltasJSON          []byte
 		artifactsJSON, provenanceJSON, payloadJSON, rawPayload           []byte
@@ -501,7 +514,8 @@ func scanEvent(row eventScanner) (contracts.EventEnvelope, error) {
 	if err := row.Scan(
 		&sequence, &eventID, &eventType, &schemaVersion, &workspaceID,
 		&scopeJSON, &actorJSON, &taskJSON, &sessionJSON, &causationID,
-		&correlationID, &key, &deltasJSON, &artifactsJSON, &provenanceJSON,
+		&correlationID, &key, &policyID, &policyVersion, &policyHash,
+		&deltasJSON, &artifactsJSON, &provenanceJSON,
 		&payloadJSON, &rawPayload, &occurred, &recorded,
 	); err != nil {
 		return contracts.EventEnvelope{}, err
@@ -518,6 +532,12 @@ func scanEvent(row eventScanner) (contracts.EventEnvelope, error) {
 		OccurredAt:     occurred.UTC(),
 		RecordedAt:     recorded.UTC(),
 		Payload:        append(json.RawMessage(nil), rawPayload...),
+	}
+	if (policyID == nil) != (policyVersion == nil) || (policyID == nil) != (policyHash == nil) {
+		return contracts.EventEnvelope{}, fmt.Errorf("policy metadata is incomplete")
+	}
+	if policyID != nil {
+		event.Policy = &contracts.ValidationPolicyRef{SchemaVersion: contracts.PolicySchemaVersion, WorkspaceID: workspaceID, PolicyID: *policyID, Version: *policyVersion, PolicyHash: *policyHash}
 	}
 	if len(event.Payload) == 0 {
 		event.Payload = append(json.RawMessage(nil), payloadJSON...)

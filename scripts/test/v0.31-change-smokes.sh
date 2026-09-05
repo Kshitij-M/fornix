@@ -14,8 +14,12 @@ else
   cli_workdir=$(fornix_smoke_container_path "$workdir" "$repo_root")
 fi
 path=".fornix-change-smoke-$workspace.txt"
+cleanup_root=$workdir
+case "$cleanup_root" in
+  /workspace/*) cleanup_root="$repo_root/${cleanup_root#/workspace/}" ;;
+esac
 cleanup() {
-  rm -f "$workdir/$path"
+  rm -f "$cleanup_root/$path"
 }
 trap cleanup EXIT INT TERM
 

@@ -25,6 +25,7 @@ var (
 	ErrChangeTerminal       = errors.New("repository change is terminal")
 	ErrChangeInProgress     = errors.New("repository change application is in progress")
 	ErrChangePacketMismatch = errors.New("repository change packet hash mismatch")
+	ErrChangeBudget         = errors.New("repository change budget exceeded")
 )
 
 // ChangeProposalInput is the store boundary for a planned packet. Contents
@@ -60,6 +61,7 @@ type RepositoryChangeStore struct {
 	pool        *pgxpool.Pool
 	events      *EventStore
 	artifacts   *ArtifactStore
+	policies    *PolicyStore
 	failureHook func(string) error
 }
 
@@ -78,6 +80,14 @@ func NewRepositoryChangeStore(pool *pgxpool.Pool, events *EventStore, artifacts 
 func (s *RepositoryChangeStore) SetFailureHook(hook func(string) error) {
 	if s != nil {
 		s.failureHook = hook
+	}
+}
+
+// SetPolicyStore attaches the workspace policy authority. Existing callers
+// without a policy store retain the pre-policy compatibility path.
+func (s *RepositoryChangeStore) SetPolicyStore(policies *PolicyStore) {
+	if s != nil {
+		s.policies = policies
 	}
 }
 
@@ -102,7 +112,39 @@ func (s *RepositoryChangeStore) Propose(ctx context.Context, input ChangeProposa
 	if err != nil {
 		return contracts.ChangeProposal{}, false, err
 	}
+	requestedChangeBudget := input.Request.Budgets
+	operationTypes := make([]string, 0, len(input.Packet.Operations))
+	seenOperationTypes := make(map[string]struct{}, len(input.Packet.Operations))
+	for _, operation := range input.Packet.Operations {
+		operationType := strings.TrimSpace(operation.Type)
+		if operationType == "" {
+			continue
+		}
+		if _, exists := seenOperationTypes[operationType]; exists {
+			continue
+		}
+		seenOperationTypes[operationType] = struct{}{}
+		operationTypes = append(operationTypes, operationType)
+	}
+	if s.policies != nil {
+		resolution, resolveErr := s.policies.Resolve(ctx, contracts.PolicyEvaluationRequest{
+			WorkspaceID: request.WorkspaceID, Policy: request.Policy,
+			RequestedBudget:       contracts.PolicyBudget{Change: requestedChangeBudget},
+			RequestedApprovalMode: request.ApprovalMode, Operation: "change", OperationTypes: operationTypes,
+		})
+		if resolveErr != nil {
+			return contracts.ChangeProposal{}, false, resolveErr
+		}
+		if resolution.Selected {
+			request.Policy = contracts.ClonePolicyReference(resolution.Ref)
+			request.Budgets = resolution.Budget.Change
+			request.ApprovalMode = resolution.ApprovalMode
+		}
+	}
 	packet := input.Packet
+	if err := validateChangePacketBudget(packet, request.Budgets); err != nil {
+		return contracts.ChangeProposal{}, false, err
+	}
 	packet.SchemaVersion = contracts.ChangeSchemaVersion
 	packet.WorkspaceID = request.WorkspaceID
 	packet.Repository = request.Repository
@@ -137,18 +179,23 @@ func (s *RepositoryChangeStore) Propose(ctx context.Context, input ChangeProposa
 		return contracts.ChangeProposal{}, false, fmt.Errorf("begin change proposal: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if s.policies != nil {
+		if err := s.policies.LockActiveTx(ctx, tx, request.Policy); err != nil {
+			return contracts.ChangeProposal{}, false, err
+		}
+	}
 	var insertedID string
 	err = tx.QueryRow(ctx, `
 		INSERT INTO fornix.change_proposals(
 			id,workspace_id,request_id,idempotency_key,request_hash,packet_hash,status,
 			actor,task_ref,session_ref,agent_run_ref,task_owner_id,task_fence,repository,
-			source,budgets,approval_mode,expected_tree_hash,created_at,updated_at
-		) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10::jsonb,$11::jsonb,$12,$13,$14,$15::jsonb,$16::jsonb,$17,$18,clock_timestamp(),clock_timestamp())
+			source,budgets,approval_mode,expected_tree_hash,policy_id,policy_version,policy_hash,created_at,updated_at
+		) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10::jsonb,$11::jsonb,$12,$13,$14,$15::jsonb,$16::jsonb,$17,$18,$19,$20,$21,clock_timestamp(),clock_timestamp())
 		ON CONFLICT (workspace_id,idempotency_key) DO NOTHING
 		RETURNING id`, request.ID, request.WorkspaceID, request.RequestID, request.IdempotencyKey,
 		requestHash, packetHash, status, actorJSON, taskJSON, sessionJSON, agentRunJSON,
 		request.TaskOwnerID, int64(request.TaskFence), request.Repository, sourceJSON, budgetJSON,
-		request.ApprovalMode, packet.ExpectedTreeHash).Scan(&insertedID)
+		request.ApprovalMode, packet.ExpectedTreeHash, policyID(request.Policy), policyVersion(request.Policy), policyHash(request.Policy)).Scan(&insertedID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		existing, readErr := readChangeProposalByKeyTx(ctx, tx, request.WorkspaceID, request.IdempotencyKey, true)
 		if readErr != nil {
@@ -237,6 +284,27 @@ func (s *RepositoryChangeStore) Propose(ctx context.Context, input ChangeProposa
 	return proposal, false, nil
 }
 
+// validateChangePacketBudget is repeated after policy resolution because the
+// planner may have run with a caller budget that is wider than the selected
+// policy. The authoritative store must never persist a packet outside the
+// effective policy envelope.
+func validateChangePacketBudget(packet contracts.ChangePacket, budget contracts.ChangeBudgets) error {
+	if len(packet.Operations) < 1 || len(packet.Operations) > budget.MaxOperations {
+		return fmt.Errorf("%w: operation count", ErrChangeBudget)
+	}
+	var total int64
+	for _, operation := range packet.Operations {
+		if operation.NewByteSize < 0 || operation.NewByteSize > budget.MaxFileBytes {
+			return fmt.Errorf("%w: file size", ErrChangeBudget)
+		}
+		if total > budget.MaxTotalBytes-operation.NewByteSize {
+			return fmt.Errorf("%w: total bytes", ErrChangeBudget)
+		}
+		total += operation.NewByteSize
+	}
+	return nil
+}
+
 // Get reads a proposal and its immutable operation/artifact references.
 func (s *RepositoryChangeStore) Get(ctx context.Context, workspaceID, proposalID string) (contracts.ChangeProposal, error) {
 	tx, err := s.pool.Begin(ctx)
@@ -304,13 +372,20 @@ func (s *RepositoryChangeStore) Approve(ctx context.Context, request contracts.C
 	if currentPacket != request.PacketHash {
 		return contracts.ChangeApproval{}, contracts.ChangeProposal{}, false, ErrChangePacketMismatch
 	}
+	proposal, err := readChangeProposalTx(ctx, tx, request.WorkspaceID, request.ProposalID, true)
+	if err != nil {
+		return contracts.ChangeApproval{}, contracts.ChangeProposal{}, false, err
+	}
+	if request.Policy != nil && !samePolicyReference(request.Policy, proposal.Policy) {
+		return contracts.ChangeApproval{}, contracts.ChangeProposal{}, false, ErrPolicyConflict
+	}
 	if currentStatus != contracts.ChangeAwaitingApproval && currentStatus != contracts.ChangeProposed {
 		return contracts.ChangeApproval{}, contracts.ChangeProposal{}, false, fmt.Errorf("%w: proposal status %s", ErrChangeApproval, currentStatus)
 	}
 	if request.ExpiresAt != nil && !request.ExpiresAt.After(time.Now().UTC()) {
 		return contracts.ChangeApproval{}, contracts.ChangeProposal{}, false, fmt.Errorf("%w: approval is already expired", ErrChangeApproval)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO fornix.change_approvals(id,workspace_id,proposal_id,packet_hash,decision,reason,actor,idempotency_key,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9)`, request.ID, request.WorkspaceID, request.ProposalID, request.PacketHash, request.Decision, strings.TrimSpace(request.Reason), actorJSON, request.IdempotencyKey, request.ExpiresAt); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO fornix.change_approvals(id,workspace_id,proposal_id,packet_hash,decision,reason,actor,idempotency_key,expires_at,policy_id,policy_version,policy_hash) VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9,$10,$11,$12)`, request.ID, request.WorkspaceID, request.ProposalID, request.PacketHash, request.Decision, strings.TrimSpace(request.Reason), actorJSON, request.IdempotencyKey, request.ExpiresAt, policyID(proposal.Policy), policyVersion(proposal.Policy), policyHash(proposal.Policy)); err != nil {
 		return contracts.ChangeApproval{}, contracts.ChangeProposal{}, false, fmt.Errorf("insert change approval: %w", err)
 	}
 	newStatus := contracts.ChangeApproved
@@ -323,14 +398,14 @@ func (s *RepositoryChangeStore) Approve(ctx context.Context, request contracts.C
 	if _, err := tx.Exec(ctx, `INSERT INTO fornix.change_transitions(workspace_id,proposal_id,from_status,to_status,actor,request_id,reason) VALUES($1,$2,$3,$4,$5::jsonb,$6,$7)`, request.WorkspaceID, request.ProposalID, currentStatus, newStatus, actorJSON, request.IdempotencyKey, strings.TrimSpace(request.Reason)); err != nil {
 		return contracts.ChangeApproval{}, contracts.ChangeProposal{}, false, err
 	}
-	if err := appendChangeEventTx(ctx, tx, s.events, contracts.ChangeProposalRequest{WorkspaceID: request.WorkspaceID, RequestID: request.ID, IdempotencyKey: "change-approval:" + request.WorkspaceID + ":" + request.IdempotencyKey, Actor: request.Actor, CausationID: request.ProposalID, CorrelationID: request.ProposalID}, "change.approval_decided", map[string]any{"proposal_id": request.ProposalID, "packet_hash": request.PacketHash, "decision": request.Decision}); err != nil {
+	if err := appendChangeEventTx(ctx, tx, s.events, contracts.ChangeProposalRequest{WorkspaceID: request.WorkspaceID, RequestID: request.ID, IdempotencyKey: "change-approval:" + request.WorkspaceID + ":" + request.IdempotencyKey, Actor: request.Actor, Policy: proposal.Policy, CausationID: request.ProposalID, CorrelationID: request.ProposalID}, "change.approval_decided", map[string]any{"proposal_id": request.ProposalID, "packet_hash": request.PacketHash, "decision": request.Decision}); err != nil {
 		return contracts.ChangeApproval{}, contracts.ChangeProposal{}, false, err
 	}
 	approval, err := readChangeApprovalByKeyTx(ctx, tx, request.WorkspaceID, request.IdempotencyKey, false)
 	if err != nil {
 		return contracts.ChangeApproval{}, contracts.ChangeProposal{}, false, err
 	}
-	proposal, err := readChangeProposalTx(ctx, tx, request.WorkspaceID, request.ProposalID, false)
+	proposal, err = readChangeProposalTx(ctx, tx, request.WorkspaceID, request.ProposalID, false)
 	if err != nil {
 		return contracts.ChangeApproval{}, contracts.ChangeProposal{}, false, err
 	}
@@ -398,7 +473,10 @@ func (s *RepositoryChangeStore) BeginApplication(ctx context.Context, request co
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return contracts.ChangeApplication{}, contracts.ChangeProposal{}, false, err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO fornix.change_applications(id,workspace_id,proposal_id,packet_hash,idempotency_key,status,expected_tree_hash,actor,task_owner_id,task_fence) VALUES($1,$2,$3,$4,$5,'applying',$6,$7::jsonb,$8,$9)`, request.ID, request.WorkspaceID, request.ProposalID, request.PacketHash, request.IdempotencyKey, changeExpectedTreeHash(proposal), actorJSON, request.TaskOwnerID, int64(request.TaskFence)); err != nil {
+	if request.Policy != nil && !samePolicyReference(request.Policy, proposal.Policy) {
+		return contracts.ChangeApplication{}, contracts.ChangeProposal{}, false, ErrPolicyConflict
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO fornix.change_applications(id,workspace_id,proposal_id,packet_hash,idempotency_key,status,expected_tree_hash,actor,task_owner_id,task_fence,policy_id,policy_version,policy_hash) VALUES($1,$2,$3,$4,$5,'applying',$6,$7::jsonb,$8,$9,$10,$11,$12)`, request.ID, request.WorkspaceID, request.ProposalID, request.PacketHash, request.IdempotencyKey, changeExpectedTreeHash(proposal), actorJSON, request.TaskOwnerID, int64(request.TaskFence), policyID(proposal.Policy), policyVersion(proposal.Policy), policyHash(proposal.Policy)); err != nil {
 		return contracts.ChangeApplication{}, contracts.ChangeProposal{}, false, fmt.Errorf("insert change application: %w", err)
 	}
 	if _, err := tx.Exec(ctx, `UPDATE fornix.change_proposals SET status='applying',updated_at=clock_timestamp() WHERE workspace_id=$1 AND id=$2`, request.WorkspaceID, request.ProposalID); err != nil {
@@ -407,7 +485,7 @@ func (s *RepositoryChangeStore) BeginApplication(ctx context.Context, request co
 	if _, err := tx.Exec(ctx, `INSERT INTO fornix.change_transitions(workspace_id,proposal_id,application_id,from_status,to_status,actor,request_id,reason) VALUES($1,$2,$3,$4,'applying',$5::jsonb,$6,'application admitted')`, request.WorkspaceID, request.ProposalID, request.ID, proposal.Status, actorJSON, request.IdempotencyKey); err != nil {
 		return contracts.ChangeApplication{}, contracts.ChangeProposal{}, false, err
 	}
-	if err := appendChangeEventTx(ctx, tx, s.events, contracts.ChangeProposalRequest{WorkspaceID: request.WorkspaceID, RequestID: request.ID, IdempotencyKey: "change-application:" + request.WorkspaceID + ":" + request.IdempotencyKey, Actor: request.Actor, CausationID: request.ProposalID, CorrelationID: request.ProposalID}, "change.application_started", map[string]any{"proposal_id": request.ProposalID, "application_id": request.ID, "packet_hash": request.PacketHash}); err != nil {
+	if err := appendChangeEventTx(ctx, tx, s.events, contracts.ChangeProposalRequest{WorkspaceID: request.WorkspaceID, RequestID: request.ID, IdempotencyKey: "change-application:" + request.WorkspaceID + ":" + request.IdempotencyKey, Actor: request.Actor, Policy: proposal.Policy, CausationID: request.ProposalID, CorrelationID: request.ProposalID}, "change.application_started", map[string]any{"proposal_id": request.ProposalID, "application_id": request.ID, "packet_hash": request.PacketHash}); err != nil {
 		return contracts.ChangeApplication{}, contracts.ChangeProposal{}, false, err
 	}
 	application, err := readChangeApplicationTx(ctx, tx, request.WorkspaceID, request.ID, false)
@@ -498,7 +576,7 @@ func (s *RepositoryChangeStore) FinalizeApplication(ctx context.Context, input C
 	} else if input.Status == contracts.ChangeRecoveryRequired {
 		eventType = "change.recovery_required"
 	}
-	if err := appendChangeEventTx(ctx, tx, s.events, contracts.ChangeProposalRequest{WorkspaceID: input.WorkspaceID, RequestID: input.ApplicationID, IdempotencyKey: "change-finalize:" + input.WorkspaceID + ":" + input.ApplicationID, Actor: input.Actor, CausationID: input.ProposalID, CorrelationID: input.ProposalID}, eventType, map[string]any{"proposal_id": proposalID, "application_id": input.ApplicationID, "packet_hash": packetHash, "status": input.Status, "result_tree_hash": input.ResultTreeHash}); err != nil {
+	if err := appendChangeEventTx(ctx, tx, s.events, contracts.ChangeProposalRequest{WorkspaceID: input.WorkspaceID, RequestID: input.ApplicationID, IdempotencyKey: "change-finalize:" + input.WorkspaceID + ":" + input.ApplicationID, Actor: input.Actor, Policy: proposal.Policy, CausationID: input.ProposalID, CorrelationID: input.ProposalID}, eventType, map[string]any{"proposal_id": proposalID, "application_id": input.ApplicationID, "packet_hash": packetHash, "status": input.Status, "result_tree_hash": input.ResultTreeHash}); err != nil {
 		return contracts.ChangeApplication{}, contracts.ChangeProposal{}, err
 	}
 	if err := s.fail("application_finalized"); err != nil {
@@ -601,6 +679,7 @@ func appendChangeEventTx(ctx context.Context, tx pgx.Tx, events *EventStore, req
 	}
 	event.Scope = contracts.Scope{WorkspaceID: request.WorkspaceID, Subject: request.Repository}
 	event.Actor = request.Actor
+	event.Policy = contracts.ClonePolicyReference(request.Policy)
 	event.CausationID = request.CausationID
 	event.CorrelationID = request.CorrelationID
 	event.IdempotencyKey = request.IdempotencyKey
@@ -649,7 +728,7 @@ func readChangeProposalByKeyTx(ctx context.Context, tx pgx.Tx, workspaceID, key 
 }
 
 func readChangeProposalTx(ctx context.Context, tx pgx.Tx, workspaceID, id string, forUpdate bool) (contracts.ChangeProposal, error) {
-	query := `SELECT id,workspace_id,request_id,idempotency_key,request_hash,packet_hash,status,actor,task_ref,session_ref,agent_run_ref,task_owner_id,task_fence,repository,source,budgets,approval_mode,expected_tree_hash,diff_artifact_id,created_at,updated_at FROM fornix.change_proposals WHERE workspace_id=$1 AND id=$2`
+	query := `SELECT id,workspace_id,request_id,idempotency_key,request_hash,packet_hash,status,actor,task_ref,session_ref,agent_run_ref,task_owner_id,task_fence,repository,source,budgets,approval_mode,expected_tree_hash,diff_artifact_id,policy_id,policy_version,policy_hash,created_at,updated_at FROM fornix.change_proposals WHERE workspace_id=$1 AND id=$2`
 	if forUpdate {
 		query += ` FOR UPDATE`
 	}
@@ -657,7 +736,8 @@ func readChangeProposalTx(ctx context.Context, tx pgx.Tx, workspaceID, id string
 	var actorJSON, taskJSON, sessionJSON, agentJSON, sourceJSON, budgetJSON []byte
 	var fence int64
 	var diffID *int64
-	err := tx.QueryRow(ctx, query, workspaceID, id).Scan(&proposal.ID, &proposal.WorkspaceID, &proposal.RequestID, &proposal.IdempotencyKey, &proposal.RequestHash, &proposal.PacketHash, &proposal.Status, &actorJSON, &taskJSON, &sessionJSON, &agentJSON, &proposal.TaskOwnerID, &fence, &proposal.Repository, &sourceJSON, &budgetJSON, &proposal.ApprovalMode, &proposal.ExpectedTreeHash, &diffID, &proposal.CreatedAt, &proposal.UpdatedAt)
+	var policyID, policyVersion, policyHash *string
+	err := tx.QueryRow(ctx, query, workspaceID, id).Scan(&proposal.ID, &proposal.WorkspaceID, &proposal.RequestID, &proposal.IdempotencyKey, &proposal.RequestHash, &proposal.PacketHash, &proposal.Status, &actorJSON, &taskJSON, &sessionJSON, &agentJSON, &proposal.TaskOwnerID, &fence, &proposal.Repository, &sourceJSON, &budgetJSON, &proposal.ApprovalMode, &proposal.ExpectedTreeHash, &diffID, &policyID, &policyVersion, &policyHash, &proposal.CreatedAt, &proposal.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return contracts.ChangeProposal{}, ErrChangeNotFound
 	}
@@ -669,6 +749,7 @@ func readChangeProposalTx(ctx context.Context, tx pgx.Tx, workspaceID, id string
 		return contracts.ChangeProposal{}, ErrChangeConflict
 	}
 	proposal.TaskFence = uint64(fence)
+	proposal.Policy = policyReference(policyID, policyVersion, policyHash, proposal.WorkspaceID)
 	if err := json.Unmarshal(actorJSON, &proposal.Actor); err != nil {
 		return contracts.ChangeProposal{}, err
 	}
@@ -732,7 +813,7 @@ func readChangeProposalTx(ctx context.Context, tx pgx.Tx, workspaceID, id string
 }
 
 func readChangeApprovalByKeyTx(ctx context.Context, tx pgx.Tx, workspaceID, key string, forUpdate bool) (contracts.ChangeApproval, error) {
-	query := `SELECT id,workspace_id,proposal_id,packet_hash,decision,reason,actor,idempotency_key,expires_at,created_at FROM fornix.change_approvals WHERE workspace_id=$1 AND idempotency_key=$2`
+	query := `SELECT id,workspace_id,proposal_id,packet_hash,decision,reason,actor,idempotency_key,expires_at,policy_id,policy_version,policy_hash,created_at FROM fornix.change_approvals WHERE workspace_id=$1 AND idempotency_key=$2`
 	if forUpdate {
 		query += ` FOR UPDATE`
 	}
@@ -742,7 +823,8 @@ func readChangeApprovalByKeyTx(ctx context.Context, tx pgx.Tx, workspaceID, key 
 func scanChangeApproval(row pgx.Row) (contracts.ChangeApproval, error) {
 	var approval contracts.ChangeApproval
 	var actorJSON []byte
-	err := row.Scan(&approval.ID, &approval.WorkspaceID, &approval.ProposalID, &approval.PacketHash, &approval.Decision, &approval.Reason, &actorJSON, &approval.IdempotencyKey, &approval.ExpiresAt, &approval.CreatedAt)
+	var policyID, policyVersion, policyHash *string
+	err := row.Scan(&approval.ID, &approval.WorkspaceID, &approval.ProposalID, &approval.PacketHash, &approval.Decision, &approval.Reason, &actorJSON, &approval.IdempotencyKey, &approval.ExpiresAt, &policyID, &policyVersion, &policyHash, &approval.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return contracts.ChangeApproval{}, ErrChangeNotFound
 	}
@@ -752,6 +834,7 @@ func scanChangeApproval(row pgx.Row) (contracts.ChangeApproval, error) {
 	if err := json.Unmarshal(actorJSON, &approval.Actor); err != nil {
 		return contracts.ChangeApproval{}, err
 	}
+	approval.Policy = policyReference(policyID, policyVersion, policyHash, approval.WorkspaceID)
 	return approval, nil
 }
 
@@ -770,14 +853,15 @@ func readChangeApplicationByKeyTx(ctx context.Context, tx pgx.Tx, workspaceID, k
 }
 
 func readChangeApplicationTx(ctx context.Context, tx pgx.Tx, workspaceID, id string, forUpdate bool) (contracts.ChangeApplication, error) {
-	query := `SELECT id,workspace_id,proposal_id,packet_hash,status,expected_tree_hash,result_tree_hash,actor,task_owner_id,task_fence,conflict,failure,created_at,updated_at FROM fornix.change_applications WHERE workspace_id=$1 AND id=$2`
+	query := `SELECT id,workspace_id,proposal_id,packet_hash,status,expected_tree_hash,result_tree_hash,actor,task_owner_id,task_fence,conflict,failure,policy_id,policy_version,policy_hash,created_at,updated_at FROM fornix.change_applications WHERE workspace_id=$1 AND id=$2`
 	if forUpdate {
 		query += ` FOR UPDATE`
 	}
 	var application contracts.ChangeApplication
 	var actorJSON, conflictJSON, failureJSON []byte
+	var policyID, policyVersion, policyHash *string
 	var fence int64
-	err := tx.QueryRow(ctx, query, workspaceID, id).Scan(&application.ID, &application.WorkspaceID, &application.ProposalID, &application.PacketHash, &application.Status, &application.ExpectedTreeHash, &application.ResultTreeHash, &actorJSON, &application.TaskOwnerID, &fence, &conflictJSON, &failureJSON, &application.CreatedAt, &application.UpdatedAt)
+	err := tx.QueryRow(ctx, query, workspaceID, id).Scan(&application.ID, &application.WorkspaceID, &application.ProposalID, &application.PacketHash, &application.Status, &application.ExpectedTreeHash, &application.ResultTreeHash, &actorJSON, &application.TaskOwnerID, &fence, &conflictJSON, &failureJSON, &policyID, &policyVersion, &policyHash, &application.CreatedAt, &application.UpdatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return contracts.ChangeApplication{}, ErrChangeNotFound
 	}
@@ -788,6 +872,7 @@ func readChangeApplicationTx(ctx context.Context, tx pgx.Tx, workspaceID, id str
 		return contracts.ChangeApplication{}, ErrChangeConflict
 	}
 	application.TaskFence = uint64(fence)
+	application.Policy = policyReference(policyID, policyVersion, policyHash, application.WorkspaceID)
 	if err := json.Unmarshal(actorJSON, &application.Actor); err != nil {
 		return contracts.ChangeApplication{}, err
 	}
@@ -825,4 +910,46 @@ func decodeOptionalJSON(raw []byte, destination any) error {
 func hashBytes(raw []byte) string {
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
+}
+
+func policyID(ref *contracts.ValidationPolicyRef) any {
+	if ref == nil || strings.TrimSpace(ref.PolicyID) == "" {
+		return nil
+	}
+	return ref.PolicyID
+}
+
+func policyVersion(ref *contracts.ValidationPolicyRef) any {
+	if ref == nil || strings.TrimSpace(ref.Version) == "" {
+		return nil
+	}
+	return ref.Version
+}
+
+func policyHash(ref *contracts.ValidationPolicyRef) any {
+	if ref == nil || strings.TrimSpace(ref.PolicyHash) == "" {
+		return nil
+	}
+	return ref.PolicyHash
+}
+
+func policyReference(id, version, hash *string, workspaceID string) *contracts.ValidationPolicyRef {
+	if id == nil || version == nil || strings.TrimSpace(*id) == "" || strings.TrimSpace(*version) == "" {
+		return nil
+	}
+	return &contracts.ValidationPolicyRef{SchemaVersion: contracts.PolicySchemaVersion, WorkspaceID: workspaceID, PolicyID: *id, Version: *version, PolicyHash: valueOrEmpty(hash)}
+}
+
+func valueOrEmpty(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+
+func samePolicyReference(left, right *contracts.ValidationPolicyRef) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.WorkspaceID == right.WorkspaceID && left.PolicyID == right.PolicyID && left.Version == right.Version && (left.PolicyHash == "" || right.PolicyHash == "" || left.PolicyHash == right.PolicyHash)
 }

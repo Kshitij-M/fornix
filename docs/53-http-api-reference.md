@@ -272,6 +272,48 @@ the corresponding validation and handoff tools. See
 and [`59-loop-22-completion.md`](59-loop-22-completion.md) for qualification
 evidence and remaining limitations.
 
+## Validation policy packs
+
+Validation policies are workspace-scoped, declarative, content-addressed
+admission snapshots. Their rules reference only validators registered in the
+running binary; policies cannot contain executable code, shell commands,
+credentials, prompts, or arbitrary callbacks. A version is immutable after
+creation. Only active versions admit new work, while retirement preserves all
+historical references. Rollback is activation of an earlier immutable version.
+
+| Method | Route | Purpose | Required capability |
+| --- | --- | --- | --- |
+| `GET` | `/v1/policies` | List authorized policy versions with bounded pagination | `policy:read` |
+| `POST` | `/v1/policies` | Create one immutable policy version idempotently | `policy:create` |
+| `GET` | `/v1/policies/{policy_id}/{version}` | Read an exact workspace policy version | `policy:read` |
+| `POST` | `/v1/policies/{policy_id}/{version}/activate` | Activate an exact version | `policy:activate` |
+| `POST` | `/v1/policies/{policy_id}/{version}/default` | Bind the workspace default to an active version | `policy:activate` |
+| `POST` | `/v1/policies/{policy_id}/{version}/retire` | Retire a version from new admission | `policy:retire` |
+| `POST` | `/v1/policies/resolve` | Resolve the active/default policy for admission | `policy:resolve` |
+| `POST` | `/v1/policies/dry-run-resolve` | Resolve without writing lifecycle or audit state | `policy:resolve` |
+| `POST` | `/v1/policies/compare` | Compare two exact versions in one workspace | `policy:compare` |
+| `GET` | `/v1/policies/audit` | Read bounded lifecycle audit history | `policy:read` |
+
+Use `Idempotency-Key` on policy creation and lifecycle mutations. Reusing a
+key with the same normalized payload returns the original durable result;
+changing the payload fails closed. A request can tighten a policy's budgets or
+approval mode, but cannot widen limits or weaken the mandatory
+`change.preconditions`, `change.files`, `change.safety`, and `change.tree`
+validators. Workspace isolation, actor propagation, task fencing, evidence
+integrity, append-only history, and replay safety are non-disableable floors.
+
+Change proposals and validation runs pin the exact policy ID, version, and
+hash. Those fields continue through approvals, applications, validation
+handoffs, Work Receipts, events, observations, and cost records. Replay uses
+the recorded policy snapshot and never consults a newer default or invokes
+external work. Policy selection is optional for compatibility; when omitted,
+the historical deterministic validator behavior remains in force.
+
+The CLI exposes `fornix policy list`, `create`, `get`, `activate`, `default`,
+`retire`, `resolve`, `dry-run-resolve`, `compare`, and `audit`. The MCP shim
+exposes matching `fornix__policy_*` tools. All three surfaces use the same
+workspace authorization and redaction rules.
+
 ## Compatibility data-plane routes
 
 These routes support the original memo, chunk, symbol, coordination, and

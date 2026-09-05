@@ -43,7 +43,7 @@ engineering history:
   summaries. A completion note is the more reliable source when a historical
   foundation intention differs from the current implementation.
 
-The project currently has 22 completed implementation loops. Those loops build
+The project currently has 23 completed implementation loops. Those loops build
 the control-plane substrate; they are not 19 claims that the complete
 repository-maintenance product is finished. The pairs below are the detailed
 engineering record for each one.
@@ -74,6 +74,7 @@ engineering record for each one.
 | 20 | Work Receipts and Verified Change Packet foundation | [`54-work-receipt-foundation.md`](54-work-receipt-foundation.md) | [`55-loop-20-completion.md`](55-loop-20-completion.md) |
 | 21 | Approval-gated repository change artifacts and application | [`56-repository-change-foundation.md`](56-repository-change-foundation.md) | [`57-loop-21-completion.md`](57-loop-21-completion.md) |
 | 22 | Deterministic post-change validation and re-index handoff | [`58-validation-foundation.md`](58-validation-foundation.md) | [`59-loop-22-completion.md`](59-loop-22-completion.md) |
+| 23 | Workspace validation policy packs and verified change admission | [`60-validation-policy-packs-foundation.md`](60-validation-policy-packs-foundation.md) | [`61-loop-23-completion.md`](61-loop-23-completion.md) |
 
 ## Cross-cutting decisions
 

@@ -164,38 +164,44 @@ func (b *ValidationBudget) Normalize() error {
 // ValidationRequest is the authenticated input for one validation identity.
 // ChangeApplicationID and PacketHash bind validation to one approved result.
 type ValidationRequest struct {
-	SchemaVersion       int              `json:"schema_version,omitempty"`
-	ID                  string           `json:"id,omitempty"`
-	RequestID           string           `json:"request_id,omitempty"`
-	IdempotencyKey      string           `json:"idempotency_key"`
-	CausationID         string           `json:"causation_id,omitempty"`
-	CorrelationID       string           `json:"correlation_id,omitempty"`
-	WorkspaceID         string           `json:"workspace_id"`
-	Actor               ActorRef         `json:"actor,omitempty"`
-	Task                *EntityRef       `json:"task,omitempty"`
-	Session             *EntityRef       `json:"session,omitempty"`
-	AgentRun            *EntityRef       `json:"agent_run,omitempty"`
-	TaskOwnerID         string           `json:"task_owner_id,omitempty"`
-	TaskFence           uint64           `json:"task_fence,omitempty"`
-	ChangeApplicationID string           `json:"change_application_id"`
-	ProposalID          string           `json:"proposal_id"`
-	PacketHash          string           `json:"packet_hash"`
-	ExpectedTreeHash    string           `json:"expected_tree_hash"`
-	Repository          string           `json:"repository"`
-	Source              RepositorySource `json:"source"`
-	SourceManifestHash  string           `json:"source_manifest_hash,omitempty"`
-	Validators          []ValidatorRef   `json:"validators,omitempty"`
-	Budget              ValidationBudget `json:"budget,omitempty"`
-	DryRun              bool             `json:"dry_run,omitempty"`
+	SchemaVersion       int                  `json:"schema_version,omitempty"`
+	ID                  string               `json:"id,omitempty"`
+	RequestID           string               `json:"request_id,omitempty"`
+	IdempotencyKey      string               `json:"idempotency_key"`
+	CausationID         string               `json:"causation_id,omitempty"`
+	CorrelationID       string               `json:"correlation_id,omitempty"`
+	WorkspaceID         string               `json:"workspace_id"`
+	Actor               ActorRef             `json:"actor,omitempty"`
+	Task                *EntityRef           `json:"task,omitempty"`
+	Session             *EntityRef           `json:"session,omitempty"`
+	AgentRun            *EntityRef           `json:"agent_run,omitempty"`
+	Policy              *ValidationPolicyRef `json:"policy,omitempty"`
+	TaskOwnerID         string               `json:"task_owner_id,omitempty"`
+	TaskFence           uint64               `json:"task_fence,omitempty"`
+	ChangeApplicationID string               `json:"change_application_id"`
+	ProposalID          string               `json:"proposal_id"`
+	PacketHash          string               `json:"packet_hash"`
+	ExpectedTreeHash    string               `json:"expected_tree_hash"`
+	Repository          string               `json:"repository"`
+	Source              RepositorySource     `json:"source"`
+	SourceManifestHash  string               `json:"source_manifest_hash,omitempty"`
+	Validators          []ValidatorRef       `json:"validators,omitempty"`
+	Budget              ValidationBudget     `json:"budget,omitempty"`
+	DryRun              bool                 `json:"dry_run,omitempty"`
 }
 
 // ValidationPlan is the deterministic validator plan derived from a request.
 type ValidationPlan struct {
-	SchemaVersion int              `json:"schema_version"`
-	WorkspaceID   string           `json:"workspace_id"`
-	RequestHash   string           `json:"request_hash"`
-	Validators    []ValidatorRef   `json:"validators"`
-	Budget        ValidationBudget `json:"budget"`
+	SchemaVersion int                  `json:"schema_version"`
+	WorkspaceID   string               `json:"workspace_id"`
+	RequestHash   string               `json:"request_hash"`
+	Validators    []ValidatorRef       `json:"validators"`
+	Budget        ValidationBudget     `json:"budget"`
+	Policy        *ValidationPolicyRef `json:"policy,omitempty"`
+	// RequireReindex is an authoritative policy decision captured with the
+	// durable plan. A nil policy retains the historical compatibility behavior
+	// of creating the re-index handoff after a successful validation.
+	RequireReindex bool `json:"require_reindex,omitempty"`
 }
 
 // ValidationFailure is a stable, redacted failure classification. Message is
@@ -232,6 +238,7 @@ type ValidationResult struct {
 	Failure        *ValidationFailure   `json:"failure,omitempty"`
 	Evidence       []ValidationEvidence `json:"evidence,omitempty"`
 	OutputArtifact *ArtifactRef         `json:"output_artifact,omitempty"`
+	Policy         *ValidationPolicyRef `json:"policy,omitempty"`
 	Files          int                  `json:"files,omitempty"`
 	Bytes          int64                `json:"bytes,omitempty"`
 	SQLQueries     int                  `json:"sql_queries,omitempty"`
@@ -242,101 +249,104 @@ type ValidationResult struct {
 // ValidationReport is the bounded deterministic summary of one validation
 // run. Detailed validator output belongs in content-addressed artifacts.
 type ValidationReport struct {
-	SchemaVersion    int                `json:"schema_version"`
-	RunID            string             `json:"run_id"`
-	WorkspaceID      string             `json:"workspace_id"`
-	Status           string             `json:"status"`
-	Outcome          string             `json:"outcome"`
-	PacketHash       string             `json:"packet_hash"`
-	ExpectedTreeHash string             `json:"expected_tree_hash"`
-	ObservedTreeHash string             `json:"observed_tree_hash,omitempty"`
-	ResultCount      int                `json:"result_count"`
-	PassedCount      int                `json:"passed_count"`
-	FailedCount      int                `json:"failed_count"`
-	AbstainedCount   int                `json:"abstained_count"`
-	Files            int                `json:"files,omitempty"`
-	Bytes            int64              `json:"bytes,omitempty"`
-	SQLQueries       int                `json:"sql_queries,omitempty"`
-	DurationMS       int64              `json:"duration_ms,omitempty"`
-	Results          []ValidationResult `json:"results,omitempty"`
-	ReportHash       string             `json:"report_hash"`
-	ReplayHash       string             `json:"replay_hash,omitempty"`
-	LastError        string             `json:"last_error,omitempty"`
+	SchemaVersion    int                  `json:"schema_version"`
+	RunID            string               `json:"run_id"`
+	WorkspaceID      string               `json:"workspace_id"`
+	Status           string               `json:"status"`
+	Outcome          string               `json:"outcome"`
+	PacketHash       string               `json:"packet_hash"`
+	ExpectedTreeHash string               `json:"expected_tree_hash"`
+	ObservedTreeHash string               `json:"observed_tree_hash,omitempty"`
+	ResultCount      int                  `json:"result_count"`
+	PassedCount      int                  `json:"passed_count"`
+	FailedCount      int                  `json:"failed_count"`
+	AbstainedCount   int                  `json:"abstained_count"`
+	Files            int                  `json:"files,omitempty"`
+	Bytes            int64                `json:"bytes,omitempty"`
+	SQLQueries       int                  `json:"sql_queries,omitempty"`
+	DurationMS       int64                `json:"duration_ms,omitempty"`
+	Results          []ValidationResult   `json:"results,omitempty"`
+	ReportHash       string               `json:"report_hash"`
+	ReplayHash       string               `json:"replay_hash,omitempty"`
+	Policy           *ValidationPolicyRef `json:"policy,omitempty"`
+	LastError        string               `json:"last_error,omitempty"`
 }
 
 // ValidationRun is the durable lifecycle and replay identity of a validation.
 // Its result history is append-only; Status is an operational current view.
 type ValidationRun struct {
-	SchemaVersion       int               `json:"schema_version"`
-	ID                  string            `json:"id"`
-	RequestID           string            `json:"request_id"`
-	IdempotencyKey      string            `json:"idempotency_key"`
-	RequestHash         string            `json:"request_hash"`
-	WorkspaceID         string            `json:"workspace_id"`
-	ChangeApplicationID string            `json:"change_application_id"`
-	ProposalID          string            `json:"proposal_id"`
-	PacketHash          string            `json:"packet_hash"`
-	ExpectedTreeHash    string            `json:"expected_tree_hash"`
-	ObservedTreeHash    string            `json:"observed_tree_hash,omitempty"`
-	SourceManifestHash  string            `json:"source_manifest_hash,omitempty"`
-	Repository          string            `json:"repository"`
-	SourceRoot          string            `json:"source_root"`
-	Actor               ActorRef          `json:"actor"`
-	Task                *EntityRef        `json:"task,omitempty"`
-	Session             *EntityRef        `json:"session,omitempty"`
-	AgentRun            *EntityRef        `json:"agent_run,omitempty"`
-	TaskOwnerID         string            `json:"task_owner_id,omitempty"`
-	TaskFence           uint64            `json:"task_fence,omitempty"`
-	Plan                ValidationPlan    `json:"plan"`
-	Budget              ValidationBudget  `json:"budget"`
-	Status              string            `json:"status"`
-	Outcome             string            `json:"outcome,omitempty"`
-	DryRun              bool              `json:"dry_run,omitempty"`
-	ResultCount         int               `json:"result_count"`
-	PassedCount         int               `json:"passed_count"`
-	FailedCount         int               `json:"failed_count"`
-	AbstainedCount      int               `json:"abstained_count"`
-	Report              *ValidationReport `json:"report,omitempty"`
-	ReportArtifact      *ArtifactRef      `json:"report_artifact,omitempty"`
-	ReportHash          string            `json:"report_hash,omitempty"`
-	ReplayHash          string            `json:"replay_hash,omitempty"`
-	LastError           string            `json:"last_error,omitempty"`
-	CreatedAt           time.Time         `json:"created_at"`
-	UpdatedAt           time.Time         `json:"updated_at"`
-	StartedAt           *time.Time        `json:"started_at,omitempty"`
-	FinishedAt          *time.Time        `json:"finished_at,omitempty"`
+	SchemaVersion       int                  `json:"schema_version"`
+	ID                  string               `json:"id"`
+	RequestID           string               `json:"request_id"`
+	IdempotencyKey      string               `json:"idempotency_key"`
+	RequestHash         string               `json:"request_hash"`
+	WorkspaceID         string               `json:"workspace_id"`
+	ChangeApplicationID string               `json:"change_application_id"`
+	ProposalID          string               `json:"proposal_id"`
+	PacketHash          string               `json:"packet_hash"`
+	ExpectedTreeHash    string               `json:"expected_tree_hash"`
+	ObservedTreeHash    string               `json:"observed_tree_hash,omitempty"`
+	SourceManifestHash  string               `json:"source_manifest_hash,omitempty"`
+	Repository          string               `json:"repository"`
+	SourceRoot          string               `json:"source_root"`
+	Actor               ActorRef             `json:"actor"`
+	Task                *EntityRef           `json:"task,omitempty"`
+	Session             *EntityRef           `json:"session,omitempty"`
+	AgentRun            *EntityRef           `json:"agent_run,omitempty"`
+	TaskOwnerID         string               `json:"task_owner_id,omitempty"`
+	TaskFence           uint64               `json:"task_fence,omitempty"`
+	Plan                ValidationPlan       `json:"plan"`
+	Budget              ValidationBudget     `json:"budget"`
+	Policy              *ValidationPolicyRef `json:"policy,omitempty"`
+	Status              string               `json:"status"`
+	Outcome             string               `json:"outcome,omitempty"`
+	DryRun              bool                 `json:"dry_run,omitempty"`
+	ResultCount         int                  `json:"result_count"`
+	PassedCount         int                  `json:"passed_count"`
+	FailedCount         int                  `json:"failed_count"`
+	AbstainedCount      int                  `json:"abstained_count"`
+	Report              *ValidationReport    `json:"report,omitempty"`
+	ReportArtifact      *ArtifactRef         `json:"report_artifact,omitempty"`
+	ReportHash          string               `json:"report_hash,omitempty"`
+	ReplayHash          string               `json:"replay_hash,omitempty"`
+	LastError           string               `json:"last_error,omitempty"`
+	CreatedAt           time.Time            `json:"created_at"`
+	UpdatedAt           time.Time            `json:"updated_at"`
+	StartedAt           *time.Time           `json:"started_at,omitempty"`
+	FinishedAt          *time.Time           `json:"finished_at,omitempty"`
 }
 
 // ReindexHandoff is a durable request to create the next repository source
 // snapshot. It never overwrites the source that was validated or indexed.
 type ReindexHandoff struct {
-	SchemaVersion        int                `json:"schema_version"`
-	ID                   string             `json:"id"`
-	WorkspaceID          string             `json:"workspace_id"`
-	RequestID            string             `json:"request_id"`
-	IdempotencyKey       string             `json:"idempotency_key"`
-	RequestHash          string             `json:"request_hash"`
-	ValidationRunID      string             `json:"validation_run_id"`
-	ChangeApplicationID  string             `json:"change_application_id"`
-	Repository           string             `json:"repository"`
-	SourceRoot           string             `json:"source_root"`
-	MountRoot            string             `json:"-"`
-	PreviousManifestHash string             `json:"previous_manifest_hash,omitempty"`
-	ExpectedTreeHash     string             `json:"expected_tree_hash"`
-	ObservedTreeHash     string             `json:"observed_tree_hash"`
-	ManifestHash         string             `json:"manifest_hash,omitempty"`
-	IngestJobID          string             `json:"ingest_job_id,omitempty"`
-	Status               string             `json:"status"`
-	Actor                ActorRef           `json:"actor"`
-	Task                 *EntityRef         `json:"task,omitempty"`
-	Session              *EntityRef         `json:"session,omitempty"`
-	TaskOwnerID          string             `json:"task_owner_id,omitempty"`
-	TaskFence            uint64             `json:"task_fence,omitempty"`
-	Failure              *ValidationFailure `json:"failure,omitempty"`
-	CreatedAt            time.Time          `json:"created_at"`
-	UpdatedAt            time.Time          `json:"updated_at"`
-	SubmittedAt          *time.Time         `json:"submitted_at,omitempty"`
-	CompletedAt          *time.Time         `json:"completed_at,omitempty"`
+	SchemaVersion        int                  `json:"schema_version"`
+	ID                   string               `json:"id"`
+	WorkspaceID          string               `json:"workspace_id"`
+	RequestID            string               `json:"request_id"`
+	IdempotencyKey       string               `json:"idempotency_key"`
+	RequestHash          string               `json:"request_hash"`
+	ValidationRunID      string               `json:"validation_run_id"`
+	ChangeApplicationID  string               `json:"change_application_id"`
+	Repository           string               `json:"repository"`
+	SourceRoot           string               `json:"source_root"`
+	MountRoot            string               `json:"-"`
+	PreviousManifestHash string               `json:"previous_manifest_hash,omitempty"`
+	ExpectedTreeHash     string               `json:"expected_tree_hash"`
+	ObservedTreeHash     string               `json:"observed_tree_hash"`
+	ManifestHash         string               `json:"manifest_hash,omitempty"`
+	IngestJobID          string               `json:"ingest_job_id,omitempty"`
+	Status               string               `json:"status"`
+	Actor                ActorRef             `json:"actor"`
+	Task                 *EntityRef           `json:"task,omitempty"`
+	Session              *EntityRef           `json:"session,omitempty"`
+	TaskOwnerID          string               `json:"task_owner_id,omitempty"`
+	TaskFence            uint64               `json:"task_fence,omitempty"`
+	Policy               *ValidationPolicyRef `json:"policy,omitempty"`
+	Failure              *ValidationFailure   `json:"failure,omitempty"`
+	CreatedAt            time.Time            `json:"created_at"`
+	UpdatedAt            time.Time            `json:"updated_at"`
+	SubmittedAt          *time.Time           `json:"submitted_at,omitempty"`
+	CompletedAt          *time.Time           `json:"completed_at,omitempty"`
 }
 
 // ValidationReplayRequest selects a recorded validation history. Replay is a
@@ -439,6 +449,14 @@ func (r *ValidationRequest) Normalize() error {
 			return fmt.Errorf("%s crosses workspace boundary", name)
 		}
 	}
+	if r.Policy != nil {
+		if err := r.Policy.Normalize(); err != nil {
+			return err
+		}
+		if r.Policy.WorkspaceID != r.WorkspaceID {
+			return fmt.Errorf("policy crosses workspace boundary")
+		}
+	}
 	if r.Task != nil && (strings.TrimSpace(r.TaskOwnerID) == "" || r.TaskFence == 0) {
 		return fmt.Errorf("task-bound validation requires task_owner_id and task_fence")
 	}
@@ -512,7 +530,15 @@ func (r ValidationRequest) Plan() (ValidationPlan, error) {
 		}
 		return validators[i].Version < validators[j].Version
 	})
-	return ValidationPlan{SchemaVersion: ValidationSchemaVersion, WorkspaceID: r.WorkspaceID, RequestHash: r.RequestHash(), Validators: validators, Budget: r.Budget}, nil
+	return ValidationPlan{SchemaVersion: ValidationSchemaVersion, WorkspaceID: r.WorkspaceID, RequestHash: r.RequestHash(), Validators: validators, Budget: r.Budget, Policy: cloneValidationPolicyRef(r.Policy)}, nil
+}
+
+func cloneValidationPolicyRef(ref *ValidationPolicyRef) *ValidationPolicyRef {
+	if ref == nil {
+		return nil
+	}
+	copy := *ref
+	return &copy
 }
 
 // StableHash returns a deterministic immutable identity for one check result.

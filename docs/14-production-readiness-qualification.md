@@ -103,6 +103,13 @@ still requires safe patch application and reviewer-facing change validation.
   applications produce a derived Work Receipt. Dry-run, duplicate delivery,
   crash rollback, approval-hash, artifact, and live Postgres concurrency tests
   cover the first vertical slice.
+- Workspace-scoped declarative validation policy packs are now typed,
+  content-hashed, immutable, and auditable. Active/default lifecycle bindings,
+  exact validator resolution, tightening-only budgets, mandatory safety floors,
+  approval/re-index controls, fail-closed workspace checks, and policy
+  propagation through changes, validation, handoffs, receipts, events, and
+  accounting are covered by Postgres integration tests and authenticated
+  policy HTTP/CLI/MCP surfaces.
 
 ## Production gaps
 
@@ -144,6 +151,10 @@ still requires safe patch application and reviewer-facing change validation.
   rather than raw prompts or rendered context. The reference workflow now
   consumes a durable bounded repository ingest job; automatic ingest scheduling
   and full parser-quality indexing remain future work.
+- Policy packs are declarative and limited to the built-in validator catalog.
+  They are not a general policy programming language, do not execute arbitrary
+  code, and do not yet provide organization-wide policy distribution,
+  delegated policy administration, or policy-as-code review workflows.
 - The projection runtime is an internal pull API; no background subscriber or
   public replay API is provided yet.
 - Lease transitions are current coordination state rather than an append-only
@@ -180,6 +191,7 @@ make smoke-reference-workflow
 make smoke-reference-openai
 make smoke-ingestion
 make smoke-changes
+make smoke-policy
 ```
 
 Postgres-backed results and measured latency/storage/replay throughput are

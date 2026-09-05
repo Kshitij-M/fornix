@@ -147,6 +147,7 @@ type ChangeProposalRequest struct {
 	Task           *EntityRef             `json:"task,omitempty"`
 	Session        *EntityRef             `json:"session,omitempty"`
 	AgentRun       *EntityRef             `json:"agent_run,omitempty"`
+	Policy         *ValidationPolicyRef   `json:"policy,omitempty"`
 	TaskOwnerID    string                 `json:"task_owner_id,omitempty"`
 	TaskFence      uint64                 `json:"task_fence,omitempty"`
 	Repository     string                 `json:"repository"`
@@ -166,6 +167,7 @@ type ChangePacket struct {
 	Operations       []ChangeOperation    `json:"operations"`
 	Budgets          ChangeBudgets        `json:"budgets"`
 	ExpectedTreeHash string               `json:"expected_tree_hash"`
+	Policy           *ValidationPolicyRef `json:"policy,omitempty"`
 }
 
 // ChangeProposal is the durable proposal read shape.
@@ -183,6 +185,7 @@ type ChangeProposal struct {
 	Task             *EntityRef           `json:"task,omitempty"`
 	Session          *EntityRef           `json:"session,omitempty"`
 	AgentRun         *EntityRef           `json:"agent_run,omitempty"`
+	Policy           *ValidationPolicyRef `json:"policy,omitempty"`
 	TaskOwnerID      string               `json:"task_owner_id,omitempty"`
 	TaskFence        uint64               `json:"task_fence,omitempty"`
 	Repository       string               `json:"repository"`
@@ -197,68 +200,72 @@ type ChangeProposal struct {
 
 // ChangeApprovalRequest records a decision over one exact packet hash.
 type ChangeApprovalRequest struct {
-	SchemaVersion  int        `json:"schema_version,omitempty"`
-	ID             string     `json:"id,omitempty"`
-	WorkspaceID    string     `json:"workspace_id"`
-	ProposalID     string     `json:"proposal_id"`
-	PacketHash     string     `json:"packet_hash"`
-	Decision       string     `json:"decision"`
-	Reason         string     `json:"reason,omitempty"`
-	Actor          ActorRef   `json:"actor"`
-	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
-	IdempotencyKey string     `json:"idempotency_key"`
+	SchemaVersion  int                  `json:"schema_version,omitempty"`
+	ID             string               `json:"id,omitempty"`
+	WorkspaceID    string               `json:"workspace_id"`
+	ProposalID     string               `json:"proposal_id"`
+	PacketHash     string               `json:"packet_hash"`
+	Decision       string               `json:"decision"`
+	Reason         string               `json:"reason,omitempty"`
+	Actor          ActorRef             `json:"actor"`
+	Policy         *ValidationPolicyRef `json:"policy,omitempty"`
+	ExpiresAt      *time.Time           `json:"expires_at,omitempty"`
+	IdempotencyKey string               `json:"idempotency_key"`
 }
 
 // ChangeApproval is the durable audit record for one decision.
 type ChangeApproval struct {
-	ID             string     `json:"id"`
-	WorkspaceID    string     `json:"workspace_id"`
-	ProposalID     string     `json:"proposal_id"`
-	PacketHash     string     `json:"packet_hash"`
-	Decision       string     `json:"decision"`
-	Reason         string     `json:"reason,omitempty"`
-	Actor          ActorRef   `json:"actor"`
-	IdempotencyKey string     `json:"idempotency_key"`
-	ExpiresAt      *time.Time `json:"expires_at,omitempty"`
-	CreatedAt      time.Time  `json:"created_at"`
+	ID             string               `json:"id"`
+	WorkspaceID    string               `json:"workspace_id"`
+	ProposalID     string               `json:"proposal_id"`
+	PacketHash     string               `json:"packet_hash"`
+	Decision       string               `json:"decision"`
+	Reason         string               `json:"reason,omitempty"`
+	Actor          ActorRef             `json:"actor"`
+	Policy         *ValidationPolicyRef `json:"policy,omitempty"`
+	IdempotencyKey string               `json:"idempotency_key"`
+	ExpiresAt      *time.Time           `json:"expires_at,omitempty"`
+	CreatedAt      time.Time            `json:"created_at"`
 }
 
 // ChangeApplicationRequest starts or resumes an approved application.
 type ChangeApplicationRequest struct {
-	SchemaVersion  int      `json:"schema_version,omitempty"`
-	ID             string   `json:"id,omitempty"`
-	WorkspaceID    string   `json:"workspace_id"`
-	ProposalID     string   `json:"proposal_id"`
-	PacketHash     string   `json:"packet_hash"`
-	IdempotencyKey string   `json:"idempotency_key"`
-	Actor          ActorRef `json:"actor"`
-	TaskOwnerID    string   `json:"task_owner_id,omitempty"`
-	TaskFence      uint64   `json:"task_fence,omitempty"`
-	DryRun         bool     `json:"dry_run,omitempty"`
+	SchemaVersion  int                  `json:"schema_version,omitempty"`
+	ID             string               `json:"id,omitempty"`
+	WorkspaceID    string               `json:"workspace_id"`
+	ProposalID     string               `json:"proposal_id"`
+	PacketHash     string               `json:"packet_hash"`
+	IdempotencyKey string               `json:"idempotency_key"`
+	Actor          ActorRef             `json:"actor"`
+	Policy         *ValidationPolicyRef `json:"policy,omitempty"`
+	TaskOwnerID    string               `json:"task_owner_id,omitempty"`
+	TaskFence      uint64               `json:"task_fence,omitempty"`
+	DryRun         bool                 `json:"dry_run,omitempty"`
 }
 
 // ChangeApplication is the durable application attempt and verification
 // result. RecoveryRequired is explicit because filesystem effects are external
 // to the Postgres transaction.
 type ChangeApplication struct {
-	ID               string            `json:"id"`
-	WorkspaceID      string            `json:"workspace_id"`
-	ProposalID       string            `json:"proposal_id"`
-	PacketHash       string            `json:"packet_hash"`
-	Status           string            `json:"status"`
-	ExpectedTreeHash string            `json:"expected_tree_hash,omitempty"`
-	ResultTreeHash   string            `json:"result_tree_hash,omitempty"`
-	DiffArtifact     *ArtifactRef      `json:"diff_artifact,omitempty"`
-	ResultArtifact   *ArtifactRef      `json:"result_artifact,omitempty"`
-	Receipt          *WorkReceipt      `json:"receipt,omitempty"`
-	Conflict         *ChangeConflict   `json:"conflict,omitempty"`
-	Failure          *ChangeFailure    `json:"failure,omitempty"`
-	Operations       []ChangeOperation `json:"operations,omitempty"`
-	Actor            ActorRef          `json:"actor"`
-	TaskOwnerID      string            `json:"task_owner_id,omitempty"`
-	TaskFence        uint64            `json:"task_fence,omitempty"`
-	CreatedAt        time.Time         `json:"created_at"`
-	UpdatedAt        time.Time         `json:"updated_at"`
+	ID               string               `json:"id"`
+	WorkspaceID      string               `json:"workspace_id"`
+	ProposalID       string               `json:"proposal_id"`
+	PacketHash       string               `json:"packet_hash"`
+	Status           string               `json:"status"`
+	ExpectedTreeHash string               `json:"expected_tree_hash,omitempty"`
+	ResultTreeHash   string               `json:"result_tree_hash,omitempty"`
+	DiffArtifact     *ArtifactRef         `json:"diff_artifact,omitempty"`
+	ResultArtifact   *ArtifactRef         `json:"result_artifact,omitempty"`
+	Receipt          *WorkReceipt         `json:"receipt,omitempty"`
+	Conflict         *ChangeConflict      `json:"conflict,omitempty"`
+	Failure          *ChangeFailure       `json:"failure,omitempty"`
+	Operations       []ChangeOperation    `json:"operations,omitempty"`
+	Actor            ActorRef             `json:"actor"`
+	TaskOwnerID      string               `json:"task_owner_id,omitempty"`
+	TaskFence        uint64               `json:"task_fence,omitempty"`
+	Policy           *ValidationPolicyRef `json:"policy,omitempty"`
+	CreatedAt        time.Time            `json:"created_at"`
+	UpdatedAt        time.Time            `json:"updated_at"`
 }
 
 // ChangeConflict describes a fail-closed source or post-state mismatch.
@@ -339,6 +346,14 @@ func (r ChangeProposalRequest) Normalize() (ChangeProposalRequest, error) {
 	if r.AgentRun != nil && r.AgentRun.WorkspaceID != "" && r.AgentRun.WorkspaceID != r.WorkspaceID {
 		return ChangeProposalRequest{}, fmt.Errorf("agent run crosses workspace boundary")
 	}
+	if r.Policy != nil {
+		if err := r.Policy.Normalize(); err != nil {
+			return ChangeProposalRequest{}, err
+		}
+		if r.Policy.WorkspaceID != r.WorkspaceID {
+			return ChangeProposalRequest{}, fmt.Errorf("policy crosses workspace boundary")
+		}
+	}
 	if r.Task != nil && (r.TaskOwnerID == "" || r.TaskFence == 0) {
 		return ChangeProposalRequest{}, fmt.Errorf("task-bound change requires owner and fence")
 	}
@@ -393,9 +408,10 @@ func (r ChangeProposalRequest) RequestHash() string {
 			ContentHash                               string
 			NewMode                                   uint32
 		} `json:"operations"`
-		ApprovalMode string        `json:"approval_mode"`
-		Budgets      ChangeBudgets `json:"budgets"`
-	}{SchemaVersion: r.SchemaVersion, WorkspaceID: r.WorkspaceID, Repository: r.Repository, IdempotencyKey: r.IdempotencyKey, Source: normalizedSource(r.Source), ApprovalMode: r.ApprovalMode, Budgets: r.Budgets}
+		ApprovalMode string               `json:"approval_mode"`
+		Budgets      ChangeBudgets        `json:"budgets"`
+		Policy       *ValidationPolicyRef `json:"policy,omitempty"`
+	}{SchemaVersion: r.SchemaVersion, WorkspaceID: r.WorkspaceID, Repository: r.Repository, IdempotencyKey: r.IdempotencyKey, Source: normalizedSource(r.Source), ApprovalMode: r.ApprovalMode, Budgets: r.Budgets, Policy: r.Policy}
 	for _, op := range r.Operations {
 		hash := ""
 		if len(op.Content) > 0 {

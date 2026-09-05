@@ -43,6 +43,7 @@ type ValidationStore struct {
 	artifacts     *ArtifactStore
 	receipts      *WorkReceiptStore
 	observability *ObservabilityStore
+	policies      *PolicyStore
 	failureHook   func(string) error
 }
 
@@ -66,6 +67,29 @@ func (s *ValidationStore) SetReceiptStore(receipts *WorkReceiptStore) {
 	if s != nil {
 		s.receipts = receipts
 	}
+}
+
+// SetPolicyStore attaches the immutable policy resolver used for new
+// validation admission. Existing runs keep their persisted policy snapshot.
+func (s *ValidationStore) SetPolicyStore(policies *PolicyStore) {
+	if s != nil {
+		s.policies = policies
+	}
+}
+
+// ResolvePolicy exposes the store-owned admission resolver to the validation
+// service without allowing callers to bypass the Postgres policy snapshot.
+func (s *ValidationStore) ResolvePolicy(ctx context.Context, request contracts.PolicyEvaluationRequest) (contracts.PolicyResolution, error) {
+	if s == nil || s.policies == nil {
+		return contracts.PolicyResolution{}, fmt.Errorf("policy store is not configured")
+	}
+	return s.policies.Resolve(ctx, request)
+}
+
+// PolicyStoreConfigured reports whether new validation admissions are policy
+// aware. It lets compatibility-mode unit tests keep their historical setup.
+func (s *ValidationStore) PolicyStoreConfigured() bool {
+	return s != nil && s.policies != nil
 }
 
 // SetFailureHook installs deterministic crash points for transaction tests.
@@ -128,8 +152,30 @@ func (s *ValidationStore) Start(ctx context.Context, input StartValidationInput)
 		return contracts.ValidationRun{}, false, fmt.Errorf("validation store is not configured")
 	}
 	request := input.Request
+	requestedValidationBudget := request.Budget
+	requestedValidators := append([]contracts.ValidatorRef(nil), request.Validators...)
 	if err := request.Normalize(); err != nil {
 		return contracts.ValidationRun{}, false, err
+	}
+	policySelected := false
+	policyRequiresReindex := false
+	if s.policies != nil {
+		resolution, resolveErr := s.policies.Resolve(ctx, contracts.PolicyEvaluationRequest{
+			WorkspaceID: request.WorkspaceID, Policy: request.Policy,
+			RequestedValidators: requestedValidators,
+			RequestedBudget:     contracts.PolicyBudget{Validation: requestedValidationBudget},
+			Operation:           "validation",
+		})
+		if resolveErr != nil {
+			return contracts.ValidationRun{}, false, resolveErr
+		}
+		if resolution.Selected {
+			policySelected = true
+			policyRequiresReindex = resolution.RequireReindex
+			request.Policy = contracts.ClonePolicyReference(resolution.Ref)
+			request.Validators = append([]contracts.ValidatorRef(nil), resolution.Validators...)
+			request.Budget = resolution.Budget.Validation
+		}
 	}
 	plan := input.Plan
 	if plan.SchemaVersion == 0 {
@@ -138,6 +184,12 @@ func (s *ValidationStore) Start(ctx context.Context, input StartValidationInput)
 		if err != nil {
 			return contracts.ValidationRun{}, false, err
 		}
+	}
+	if policySelected {
+		// The caller-supplied plan is not trusted for policy-controlled
+		// behavior. Keep its structural identity check above, then overwrite
+		// this operational decision from the exact Postgres policy version.
+		plan.RequireReindex = policyRequiresReindex
 	}
 	if plan.WorkspaceID != request.WorkspaceID || plan.RequestHash != request.RequestHash() {
 		return contracts.ValidationRun{}, false, fmt.Errorf("validation plan does not match request")
@@ -172,6 +224,11 @@ func (s *ValidationStore) Start(ctx context.Context, input StartValidationInput)
 		return contracts.ValidationRun{}, false, fmt.Errorf("begin validation start: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if s.policies != nil {
+		if err := s.policies.LockActiveTx(ctx, tx, request.Policy); err != nil {
+			return contracts.ValidationRun{}, false, err
+		}
+	}
 	if err := s.validateChangeAuthorityTx(ctx, tx, request); err != nil {
 		return contracts.ValidationRun{}, false, err
 	}
@@ -181,15 +238,15 @@ func (s *ValidationStore) Start(ctx context.Context, input StartValidationInput)
 			id,workspace_id,request_id,idempotency_key,request_hash,
 			change_application_id,proposal_id,packet_hash,expected_tree_hash,
 			source_manifest_hash,repository,source_root,actor,task_ref,session_ref,
-			agent_run_ref,task_owner_id,task_fence,plan,budget,status,dry_run)
+			agent_run_ref,task_owner_id,task_fence,plan,budget,status,dry_run,policy_id,policy_version,policy_hash)
 		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,
-			$15::jsonb,$16::jsonb,$17,$18,$19::jsonb,$20::jsonb,'pending',$21)
+			$15::jsonb,$16::jsonb,$17,$18,$19::jsonb,$20::jsonb,'pending',$21,$22,$23,$24)
 		ON CONFLICT (workspace_id,idempotency_key) DO NOTHING
 		RETURNING id`, request.ID, request.WorkspaceID, request.RequestID, request.IdempotencyKey,
 		requestHash, request.ChangeApplicationID, request.ProposalID, request.PacketHash,
 		request.ExpectedTreeHash, request.SourceManifestHash, request.Repository,
 		request.Source.SourceRoot, actorJSON, taskJSON, sessionJSON, agentJSON,
-		request.TaskOwnerID, int64(request.TaskFence), planJSON, budgetJSON, request.DryRun).Scan(&insertedID)
+		request.TaskOwnerID, int64(request.TaskFence), planJSON, budgetJSON, request.DryRun, policyID(request.Policy), policyVersion(request.Policy), policyHash(request.Policy)).Scan(&insertedID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		existing, readErr := readValidationRunByKeyTx(ctx, tx, request.WorkspaceID, request.IdempotencyKey, true)
 		if readErr != nil {
@@ -376,6 +433,7 @@ func (s *ValidationStore) Commit(ctx context.Context, input ValidationCommitInpu
 			return contracts.ValidationRun{}, nil, false, fmt.Errorf("persist validation evidence: %w", evidenceErr)
 		}
 		result.Evidence = append(result.Evidence, contracts.ValidationEvidence{Kind: "evidence", SourceReference: strconv.FormatInt(evidenceResult.Record.ID, 10), Hash: evidenceResult.Record.EvidenceHash, Role: "validator_result"})
+		result.Policy = contracts.ClonePolicyReference(run.Policy)
 		result.ResultHash = result.StableHash()
 		failureJSON, _ := jsonOrEmpty(result.Failure)
 		evidenceJSON, _ := json.Marshal(result.Evidence)
@@ -441,6 +499,7 @@ func (s *ValidationStore) Commit(ctx context.Context, input ValidationCommitInpu
 	report.SchemaVersion, report.RunID, report.WorkspaceID = contracts.ValidationSchemaVersion, run.ID, run.WorkspaceID
 	report.Status, report.Outcome = status, outcome
 	report.PacketHash, report.ExpectedTreeHash = run.PacketHash, run.ExpectedTreeHash
+	report.Policy = contracts.ClonePolicyReference(run.Policy)
 	report.ObservedTreeHash = strings.ToLower(strings.TrimSpace(input.ObservedTree))
 	if report.ObservedTreeHash == "" {
 		report.ObservedTreeHash = run.ObservedTreeHash
@@ -480,11 +539,11 @@ func (s *ValidationStore) Commit(ctx context.Context, input ValidationCommitInpu
 		return contracts.ValidationRun{}, nil, false, err
 	}
 	var handoff *contracts.ReindexHandoff
-	if status == contracts.ValidationPassed {
+	if status == contracts.ValidationPassed && (run.Policy == nil || run.Plan.RequireReindex) {
 		value := contracts.ReindexHandoff{SchemaVersion: contracts.ValidationSchemaVersion, ID: "reindex-" + run.ID, WorkspaceID: run.WorkspaceID, RequestID: run.RequestID, IdempotencyKey: "reindex:" + run.ID, RequestHash: run.RequestHash, ValidationRunID: run.ID, ChangeApplicationID: run.ChangeApplicationID, Repository: run.Repository, SourceRoot: run.SourceRoot, PreviousManifestHash: run.SourceManifestHash, ExpectedTreeHash: run.ExpectedTreeHash, ObservedTreeHash: report.ObservedTreeHash, ManifestHash: input.Discovery.ManifestHash, Status: contracts.ReindexHandoffPending, Actor: input.Actor, Task: run.Task, Session: run.Session, TaskOwnerID: run.TaskOwnerID, TaskFence: run.TaskFence, CreatedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
 		taskJSON, _ := jsonOrEmpty(value.Task)
 		sessionJSON, _ := jsonOrEmpty(value.Session)
-		if _, err := tx.Exec(ctx, `INSERT INTO fornix.reindex_handoffs(id,workspace_id,request_id,idempotency_key,request_hash,validation_run_id,change_application_id,repository,source_root,previous_manifest_hash,expected_tree_hash,observed_tree_hash,manifest_hash,status,actor,task_ref,session_ref,task_owner_id,task_fence) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16::jsonb,$17::jsonb,$18,$19) ON CONFLICT (workspace_id,validation_run_id) DO NOTHING`, value.ID, value.WorkspaceID, value.RequestID, value.IdempotencyKey, value.RequestHash, value.ValidationRunID, value.ChangeApplicationID, value.Repository, value.SourceRoot, value.PreviousManifestHash, value.ExpectedTreeHash, value.ObservedTreeHash, value.ManifestHash, value.Status, actorJSON, taskJSON, sessionJSON, value.TaskOwnerID, int64(value.TaskFence)); err != nil {
+		if _, err := tx.Exec(ctx, `INSERT INTO fornix.reindex_handoffs(id,workspace_id,request_id,idempotency_key,request_hash,validation_run_id,change_application_id,repository,source_root,previous_manifest_hash,expected_tree_hash,observed_tree_hash,manifest_hash,status,actor,task_ref,session_ref,task_owner_id,task_fence,policy_id,policy_version,policy_hash) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16::jsonb,$17::jsonb,$18,$19,$20,$21,$22) ON CONFLICT (workspace_id,validation_run_id) DO NOTHING`, value.ID, value.WorkspaceID, value.RequestID, value.IdempotencyKey, value.RequestHash, value.ValidationRunID, value.ChangeApplicationID, value.Repository, value.SourceRoot, value.PreviousManifestHash, value.ExpectedTreeHash, value.ObservedTreeHash, value.ManifestHash, value.Status, actorJSON, taskJSON, sessionJSON, value.TaskOwnerID, int64(value.TaskFence), policyID(run.Policy), policyVersion(run.Policy), policyHash(run.Policy)); err != nil {
 			return contracts.ValidationRun{}, nil, false, fmt.Errorf("create re-index handoff: %w", err)
 		}
 		loaded, loadErr := readHandoffByRunTx(ctx, tx, run.WorkspaceID, run.ID, false)
@@ -505,7 +564,7 @@ func (s *ValidationStore) Commit(ctx context.Context, input ValidationCommitInpu
 	if handoff != nil {
 		payload["reindex_handoff_id"] = handoff.ID
 	}
-	event, err := validationEvent("validation.completed", contracts.ValidationRequest{WorkspaceID: run.WorkspaceID, RequestID: run.RequestID, IdempotencyKey: "validation-completed:" + run.ID, Actor: input.Actor, CausationID: run.ID, CorrelationID: run.RequestID, Repository: run.Repository}, payload)
+	event, err := validationEvent("validation.completed", contracts.ValidationRequest{WorkspaceID: run.WorkspaceID, RequestID: run.RequestID, IdempotencyKey: "validation-completed:" + run.ID, Actor: input.Actor, Policy: run.Policy, CausationID: run.ID, CorrelationID: run.RequestID, Repository: run.Repository}, payload)
 	if err != nil {
 		return contracts.ValidationRun{}, nil, false, err
 	}
@@ -583,7 +642,7 @@ func (s *ValidationStore) Cancel(ctx context.Context, workspaceID, runID string,
 	if _, err := tx.Exec(ctx, `INSERT INTO fornix.validation_transitions(workspace_id,validation_run_id,from_status,to_status,outcome,actor,request_id,reason) VALUES($1,$2,$3,'cancelled','skipped',$4::jsonb,$5,'operator cancellation')`, run.WorkspaceID, run.ID, run.Status, actorJSON, run.RequestID); err != nil {
 		return contracts.ValidationRun{}, err
 	}
-	event, err := validationEvent("validation.cancelled", contracts.ValidationRequest{WorkspaceID: run.WorkspaceID, RequestID: run.RequestID, IdempotencyKey: "validation-cancelled:" + run.ID, Actor: actor, CausationID: run.ID, CorrelationID: run.RequestID, Repository: run.Repository}, map[string]any{"validation_run_id": run.ID})
+	event, err := validationEvent("validation.cancelled", contracts.ValidationRequest{WorkspaceID: run.WorkspaceID, RequestID: run.RequestID, IdempotencyKey: "validation-cancelled:" + run.ID, Actor: actor, Policy: run.Policy, CausationID: run.ID, CorrelationID: run.RequestID, Repository: run.Repository}, map[string]any{"validation_run_id": run.ID})
 	if err != nil {
 		return contracts.ValidationRun{}, err
 	}
@@ -623,6 +682,13 @@ func (s *ValidationStore) ListResults(ctx context.Context, workspaceID, runID st
 	if workspaceID == "" || runID == "" {
 		return nil, fmt.Errorf("workspace_id and validation_run_id are required")
 	}
+	// Result rows intentionally remain compatible with the pre-policy schema:
+	// the run is the authoritative policy pin. Reattach that pin while reading
+	// results so replay hashes the same semantic values that Commit hashed.
+	run, err := s.Get(ctx, workspaceID, runID)
+	if err != nil {
+		return nil, err
+	}
 	if limit <= 0 || limit > contracts.MaxValidationChecks {
 		limit = contracts.MaxValidationChecks
 	}
@@ -642,6 +708,7 @@ func (s *ValidationStore) ListResults(ctx context.Context, workspaceID, runID st
 		if scanErr != nil {
 			return nil, scanErr
 		}
+		result.Policy = contracts.ClonePolicyReference(run.Policy)
 		results = append(results, result)
 	}
 	return results, rows.Err()
@@ -922,6 +989,9 @@ func (s *ValidationStore) validateChangeAuthorityTx(ctx context.Context, tx pgx.
 	if proposal.PacketHash != request.PacketHash || proposal.ExpectedTreeHash != request.ExpectedTreeHash || strings.TrimSpace(proposal.Repository) != strings.TrimSpace(request.Repository) {
 		return fmt.Errorf("%w: proposal hashes do not match", ErrValidationAuthority)
 	}
+	if !samePolicyReference(request.Policy, proposal.Policy) {
+		return fmt.Errorf("%w: validation policy does not match proposal", ErrValidationAuthority)
+	}
 	proposalRoot, requestRoot := filepath.Clean(strings.TrimSpace(proposal.Source.SourceRoot)), filepath.Clean(strings.TrimSpace(request.Source.SourceRoot))
 	if !filepath.IsAbs(proposalRoot) || !filepath.IsAbs(requestRoot) || proposalRoot != requestRoot {
 		return fmt.Errorf("%w: proposal source root does not match request", ErrValidationAuthority)
@@ -996,6 +1066,9 @@ func validationEvent(eventType string, request contracts.ValidationRequest, payl
 	if payload == nil {
 		payload = make(map[string]any)
 	}
+	if request.Policy != nil {
+		payload["policy_id"], payload["policy_version"], payload["policy_hash"] = request.Policy.PolicyID, request.Policy.Version, request.Policy.PolicyHash
+	}
 	if runID, ok := payload["validation_run_id"].(string); ok && strings.TrimSpace(runID) != "" {
 		// EventStore's bounded RunID filter uses this generic field so replay
 		// can read both request and completion events without event-specific SQL.
@@ -1008,6 +1081,7 @@ func validationEvent(eventType string, request contracts.ValidationRequest, payl
 	event.Scope = contracts.Scope{WorkspaceID: request.WorkspaceID, Subject: request.Repository}
 	event.Actor, event.Task, event.Session = request.Actor, request.Task, request.Session
 	event.CausationID, event.CorrelationID, event.IdempotencyKey = request.CausationID, request.CorrelationID, request.IdempotencyKey
+	event.Policy = contracts.ClonePolicyReference(request.Policy)
 	event.Provenance = contracts.Provenance{SourcePaths: []string{"post-change-validation"}}
 	return event, nil
 }
@@ -1039,6 +1113,7 @@ func validationReceiptRequest(run contracts.ValidationRun, report contracts.Vali
 		IdempotencyKey: "validation-receipt:" + run.WorkspaceID + ":" + run.ID,
 		WorkspaceID:    run.WorkspaceID, Actor: input.Actor, WorkKind: contracts.WorkReceiptReferenceValidation,
 		WorkID: run.ID, Task: run.Task, Session: run.Session, TaskOwnerID: run.TaskOwnerID, TaskFence: run.TaskFence,
+		Policy:             run.Policy,
 		SourceManifestHash: run.SourceManifestHash, ReplayHash: replayHash,
 		Steps: []contracts.WorkReceiptStep{{Ordinal: 0, ID: "post-change-validation", Name: "verified post-change validation", Kind: "validation", Status: "succeeded", SourceKind: contracts.WorkReceiptReferenceValidation, SourceID: run.ID, SourceHash: report.ReportHash, InputHash: run.RequestHash, OutputHash: replayHash, ReferenceRoles: []string{"validation", "change_application", "replay"}, DurationMS: report.DurationMS}},
 		References: []contracts.WorkReceiptReference{
@@ -1107,7 +1182,7 @@ func readValidationRunByKeyTx(ctx context.Context, tx pgx.Tx, workspaceID, key s
 }
 
 func readValidationRunTx(ctx context.Context, tx pgx.Tx, workspaceID, runID string, lock bool) (contracts.ValidationRun, error) {
-	query := `SELECT id,workspace_id,request_id,idempotency_key,request_hash,change_application_id,proposal_id,packet_hash,expected_tree_hash,observed_tree_hash,source_manifest_hash,repository,source_root,actor,task_ref,session_ref,agent_run_ref,task_owner_id,task_fence,plan,budget,status,outcome,dry_run,result_count,passed_count,failed_count,abstained_count,report,report_hash,report_artifact_id,replay_hash,last_error,created_at,updated_at,started_at,finished_at FROM fornix.validation_runs WHERE workspace_id=$1 AND id=$2`
+	query := `SELECT id,workspace_id,request_id,idempotency_key,request_hash,change_application_id,proposal_id,packet_hash,expected_tree_hash,observed_tree_hash,source_manifest_hash,repository,source_root,actor,task_ref,session_ref,agent_run_ref,task_owner_id,task_fence,plan,budget,status,outcome,dry_run,result_count,passed_count,failed_count,abstained_count,report,report_hash,report_artifact_id,replay_hash,last_error,policy_id,policy_version,policy_hash,created_at,updated_at,started_at,finished_at FROM fornix.validation_runs WHERE workspace_id=$1 AND id=$2`
 	if lock {
 		query += ` FOR UPDATE`
 	}
@@ -1115,7 +1190,8 @@ func readValidationRunTx(ctx context.Context, tx pgx.Tx, workspaceID, runID stri
 	var actor, task, session, agent, planJSON, budgetJSON, reportJSON []byte
 	var fence int64
 	var reportArtifactID *int64
-	err := tx.QueryRow(ctx, query, workspaceID, runID).Scan(&run.ID, &run.WorkspaceID, &run.RequestID, &run.IdempotencyKey, &run.RequestHash, &run.ChangeApplicationID, &run.ProposalID, &run.PacketHash, &run.ExpectedTreeHash, &run.ObservedTreeHash, &run.SourceManifestHash, &run.Repository, &run.SourceRoot, &actor, &task, &session, &agent, &run.TaskOwnerID, &fence, &planJSON, &budgetJSON, &run.Status, &run.Outcome, &run.DryRun, &run.ResultCount, &run.PassedCount, &run.FailedCount, &run.AbstainedCount, &reportJSON, &run.ReportHash, &reportArtifactID, &run.ReplayHash, &run.LastError, &run.CreatedAt, &run.UpdatedAt, &run.StartedAt, &run.FinishedAt)
+	var policyID, policyVersion, policyHash *string
+	err := tx.QueryRow(ctx, query, workspaceID, runID).Scan(&run.ID, &run.WorkspaceID, &run.RequestID, &run.IdempotencyKey, &run.RequestHash, &run.ChangeApplicationID, &run.ProposalID, &run.PacketHash, &run.ExpectedTreeHash, &run.ObservedTreeHash, &run.SourceManifestHash, &run.Repository, &run.SourceRoot, &actor, &task, &session, &agent, &run.TaskOwnerID, &fence, &planJSON, &budgetJSON, &run.Status, &run.Outcome, &run.DryRun, &run.ResultCount, &run.PassedCount, &run.FailedCount, &run.AbstainedCount, &reportJSON, &run.ReportHash, &reportArtifactID, &run.ReplayHash, &run.LastError, &policyID, &policyVersion, &policyHash, &run.CreatedAt, &run.UpdatedAt, &run.StartedAt, &run.FinishedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return contracts.ValidationRun{}, ErrValidationNotFound
 	}
@@ -1127,6 +1203,7 @@ func readValidationRunTx(ctx context.Context, tx pgx.Tx, workspaceID, runID stri
 	}
 	run.SchemaVersion = contracts.ValidationSchemaVersion
 	run.TaskFence = uint64(fence)
+	run.Policy = policyReference(policyID, policyVersion, policyHash, run.WorkspaceID)
 	if err := json.Unmarshal(actor, &run.Actor); err != nil {
 		return contracts.ValidationRun{}, err
 	}
@@ -1135,6 +1212,9 @@ func readValidationRunTx(ctx context.Context, tx pgx.Tx, workspaceID, runID stri
 	run.AgentRun, _ = decodeEntityRef(agent)
 	if err := json.Unmarshal(planJSON, &run.Plan); err != nil {
 		return contracts.ValidationRun{}, err
+	}
+	if run.Policy == nil && run.Plan.Policy != nil {
+		run.Policy = contracts.ClonePolicyReference(run.Plan.Policy)
 	}
 	if err := json.Unmarshal(budgetJSON, &run.Budget); err != nil {
 		return contracts.ValidationRun{}, err
@@ -1193,14 +1273,15 @@ func readHandoffByRunTx(ctx context.Context, tx pgx.Tx, workspaceID, runID strin
 }
 
 func readHandoffTx(ctx context.Context, tx pgx.Tx, workspaceID, id string, lock bool) (contracts.ReindexHandoff, error) {
-	query := `SELECT id,workspace_id,request_id,idempotency_key,request_hash,validation_run_id,change_application_id,repository,source_root,previous_manifest_hash,expected_tree_hash,observed_tree_hash,manifest_hash,ingest_job_id,status,actor,task_ref,session_ref,task_owner_id,task_fence,failure,created_at,updated_at,submitted_at,completed_at FROM fornix.reindex_handoffs WHERE workspace_id=$1 AND id=$2`
+	query := `SELECT id,workspace_id,request_id,idempotency_key,request_hash,validation_run_id,change_application_id,repository,source_root,previous_manifest_hash,expected_tree_hash,observed_tree_hash,manifest_hash,ingest_job_id,status,actor,task_ref,session_ref,task_owner_id,task_fence,failure,policy_id,policy_version,policy_hash,created_at,updated_at,submitted_at,completed_at FROM fornix.reindex_handoffs WHERE workspace_id=$1 AND id=$2`
 	if lock {
 		query += ` FOR UPDATE`
 	}
 	var handoff contracts.ReindexHandoff
 	var actor, task, session, failure []byte
+	var policyID, policyVersion, policyHash *string
 	var fence int64
-	err := tx.QueryRow(ctx, query, workspaceID, id).Scan(&handoff.ID, &handoff.WorkspaceID, &handoff.RequestID, &handoff.IdempotencyKey, &handoff.RequestHash, &handoff.ValidationRunID, &handoff.ChangeApplicationID, &handoff.Repository, &handoff.SourceRoot, &handoff.PreviousManifestHash, &handoff.ExpectedTreeHash, &handoff.ObservedTreeHash, &handoff.ManifestHash, &handoff.IngestJobID, &handoff.Status, &actor, &task, &session, &handoff.TaskOwnerID, &fence, &failure, &handoff.CreatedAt, &handoff.UpdatedAt, &handoff.SubmittedAt, &handoff.CompletedAt)
+	err := tx.QueryRow(ctx, query, workspaceID, id).Scan(&handoff.ID, &handoff.WorkspaceID, &handoff.RequestID, &handoff.IdempotencyKey, &handoff.RequestHash, &handoff.ValidationRunID, &handoff.ChangeApplicationID, &handoff.Repository, &handoff.SourceRoot, &handoff.PreviousManifestHash, &handoff.ExpectedTreeHash, &handoff.ObservedTreeHash, &handoff.ManifestHash, &handoff.IngestJobID, &handoff.Status, &actor, &task, &session, &handoff.TaskOwnerID, &fence, &failure, &policyID, &policyVersion, &policyHash, &handoff.CreatedAt, &handoff.UpdatedAt, &handoff.SubmittedAt, &handoff.CompletedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return contracts.ReindexHandoff{}, ErrHandoffNotFound
 	}
@@ -1208,6 +1289,7 @@ func readHandoffTx(ctx context.Context, tx pgx.Tx, workspaceID, id string, lock 
 		return contracts.ReindexHandoff{}, err
 	}
 	handoff.SchemaVersion, handoff.TaskFence = contracts.ValidationSchemaVersion, uint64(fence)
+	handoff.Policy = policyReference(policyID, policyVersion, policyHash, handoff.WorkspaceID)
 	if err := json.Unmarshal(actor, &handoff.Actor); err != nil {
 		return contracts.ReindexHandoff{}, err
 	}

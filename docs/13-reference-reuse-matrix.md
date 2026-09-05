@@ -18,6 +18,7 @@ pattern; do not copy code solely because a README names a feature.
 | Evidence disclosure | FornixDB + agentmemory | Gist/detail/raw drill-down, source citations, supersession, integrity checks | Immutable Postgres evidence with hard disclosure budgets |
 | Task runtime | Orloj | Desired/current state, leases, retries, idempotency, dead letters, replay | Implement as focused Postgres control-plane packages |
 | Governance | Orloj | Roles, operation allowlists, approval gates, fail-closed policy | Define workspace and identity contracts before broadening access |
+| Validation admission | Orloj + DeepSeek Harness + ClawMem + agentmemory + FornixDB | Explicit capability admission, declarative approval seams, fail-closed evidence gates, lifecycle/audit discipline, bounded budgets | Independently reimplemented as immutable workspace policy packs; registered validators only; exact hashes and Postgres audit/history |
 | Observability | agentmemory + Orloj | Structured logs, traces, task history, queue metrics, Prometheus | Instrument cost and stage boundaries before tuning retrieval |
 | Code graph | Coordination baseline | Tree-sitter indexing, symbol edges, watcher debounce/backoff | Add repository/version/artifact provenance |
 

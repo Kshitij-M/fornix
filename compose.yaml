@@ -45,6 +45,9 @@ services:
       - "8201:8201"
     volumes:
       - .:/workspace:ro
+      # The reference change/validation smokes need one explicitly configured
+      # writable mount. The rest of the source tree remains read-only.
+      - ./fixtures/reference-repo:/workspace/fixtures/reference-repo:rw
 
   watcher:
     build:

@@ -30,6 +30,7 @@ import (
 	"github.com/omaveda/fornix/internal/contracts"
 	"github.com/omaveda/fornix/internal/ingest"
 	"github.com/omaveda/fornix/internal/model"
+	policyruntime "github.com/omaveda/fornix/internal/policy"
 	"github.com/omaveda/fornix/internal/retrieval"
 	"github.com/omaveda/fornix/internal/scheduler"
 	"github.com/omaveda/fornix/internal/store"
@@ -58,6 +59,7 @@ type server struct {
 	evaluations       *store.EvaluationStore
 	workReceipts      *store.WorkReceiptStore
 	validations       *store.ValidationStore
+	policies          *store.PolicyStore
 	validation        *validationruntime.Service
 	changes           *change.Service
 	toolRegistry      *tool.Registry
@@ -112,6 +114,7 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 	retrievalSurfaces := store.NewRetrievalSurfaceStore(pool)
 	authStore := store.NewAuthStore(pool)
 	operatorStore := store.NewOperatorStore(pool, events)
+	policyStore := store.NewPolicyStore(pool, events, nil)
 	modelRegistry := model.NewRegistry()
 	ollamaProvider, err := model.NewOllamaProvider(model.OllamaConfig{
 		Endpoint: contracts.ModelEndpoint{
@@ -208,6 +211,7 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 		evaluations:       evaluations,
 		workReceipts:      workReceipts,
 		validations:       store.NewValidationStore(pool, events, evidenceStore, artifactStore, observability),
+		policies:          policyStore,
 		changes:           changeService,
 		toolRegistry:      toolRegistry,
 		toolRuns:          toolRuns,
@@ -237,6 +241,12 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 		pool.Close()
 		return nil, fmt.Errorf("configure validation registry: %w", err)
 	}
+	policyStore.SetResolver(&policyruntime.Resolver{Lookup: func(ref contracts.ValidatorRef) bool {
+		_, ok := validatorRegistry.Lookup(ref)
+		return ok
+	}})
+	changeStore.SetPolicyStore(policyStore)
+	srv.validations.SetPolicyStore(policyStore)
 	srv.validation = &validationruntime.Service{Registry: validatorRegistry, Runs: srv.validations, Discovery: ingest.Discover}
 	srv.validations.SetReceiptStore(workReceipts)
 	srv.validation.SubmitHandoff = func(handoffCtx context.Context, handoff contracts.ReindexHandoff) (contracts.IngestJob, error) {
@@ -2466,6 +2476,45 @@ func (s *server) routes() http.Handler {
 	mux.HandleFunc("/healthz", s.handleLiveness)
 	mux.HandleFunc("/readyz", s.handleReadiness)
 	mux.HandleFunc("/v1/health", s.handleHealth)
+	mux.HandleFunc("/v1/policies", func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method {
+		case http.MethodGet:
+			s.handlePolicyList(w, r)
+		case http.MethodPost:
+			s.handlePolicyCreate(w, r)
+		default:
+			writeErr(w, http.StatusMethodNotAllowed, "GET or POST only")
+		}
+	})
+	mux.HandleFunc("/v1/policies/resolve", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handlePolicyResolve(w, r, false)
+	})
+	mux.HandleFunc("/v1/policies/dry-run-resolve", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handlePolicyResolve(w, r, true)
+	})
+	mux.HandleFunc("/v1/policies/compare", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handlePolicyCompare(w, r)
+	})
+	mux.HandleFunc("/v1/policies/audit", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeErr(w, http.StatusMethodNotAllowed, "GET only")
+			return
+		}
+		s.handlePolicyAudit(w, r)
+	})
+	mux.HandleFunc("/v1/policies/", s.handlePolicies)
 	mux.HandleFunc("/v1/operator/workspaces/bootstrap", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeErr(w, http.StatusMethodNotAllowed, "POST only")

@@ -412,7 +412,7 @@ func Plan(request contracts.ChangeProposalRequest, source contracts.ChangeSource
 		}
 		operations = append(operations, operation)
 	}
-	packet := contracts.ChangePacket{SchemaVersion: contracts.ChangeSchemaVersion, WorkspaceID: normalized.WorkspaceID, Repository: normalized.Repository, Source: source, Operations: operations, Budgets: normalized.Budgets}
+	packet := contracts.ChangePacket{SchemaVersion: contracts.ChangeSchemaVersion, WorkspaceID: normalized.WorkspaceID, Repository: normalized.Repository, Source: source, Operations: operations, Budgets: normalized.Budgets, Policy: clonePolicyRef(normalized.Policy)}
 	result := PlannedChange{Packet: packet, Contents: contents}
 	result.ExpectedTreeHash = predictedTreeHash(source, operations)
 	result.Packet.ExpectedTreeHash = result.ExpectedTreeHash

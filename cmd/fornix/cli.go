@@ -79,6 +79,8 @@ func runCLI(args []string) error {
 		return cli.changeCommand(parts[1:])
 	case "validation":
 		return cli.validationCommand(parts[1:])
+	case "policy":
+		return cli.policyCommand(parts[1:])
 	case "reference-workflow":
 		return cli.referenceWorkflow(parts[1:])
 	default:
@@ -87,7 +89,7 @@ func runCLI(args []string) error {
 }
 
 func (c *operatorCLI) usage() error {
-	return errors.New("usage: fornix [--url URL] [--key KEY] [--workspace ID] <health|workspace|identity|role|api-key|ingest|task|run|retrieve|evaluation|metrics|artifact|evidence|receipt|change|validation|reference-workflow>")
+	return errors.New("usage: fornix [--url URL] [--key KEY] [--workspace ID] <health|workspace|identity|role|api-key|ingest|task|run|retrieve|evaluation|metrics|artifact|evidence|receipt|change|validation|policy|reference-workflow>")
 }
 
 func (c *operatorCLI) workspaceCommand(args []string) error {
@@ -385,6 +387,82 @@ func (c *operatorCLI) validationCommand(args []string) error {
 	default:
 		return fmt.Errorf("unknown validation command %q", args[0])
 	}
+}
+
+// policyCommand exposes the deterministic policy lifecycle without adding a
+// second authority. It deliberately sends JSON over the authenticated HTTP
+// API so CLI, API, and MCP requests share identical authorization and audit
+// semantics.
+func (c *operatorCLI) policyCommand(args []string) error {
+	if len(args) == 0 || args[0] == "list" {
+		path := "/v1/policies?workspace_id=" + url.QueryEscape(c.workspace) + "&limit=" + strconv.Itoa(intValue(args[1:], "limit", 50))
+		if cursor := valueArg(args[1:], "cursor", ""); cursor != "" {
+			path += "&cursor=" + url.QueryEscape(cursor)
+		}
+		return c.requestPrint(http.MethodGet, path, nil, false)
+	}
+	switch args[0] {
+	case "create":
+		policyID := valueArg(args[1:], "id", "default")
+		version := valueArg(args[1:], "version", "1")
+		validators := make([]any, 0)
+		for _, raw := range splitCSV(valueArg(args[1:], "validators", "")) {
+			parts := strings.SplitN(raw, "@", 2)
+			validatorVersion := "1"
+			if len(parts) == 2 && strings.TrimSpace(parts[1]) != "" {
+				validatorVersion = strings.TrimSpace(parts[1])
+			}
+			if strings.TrimSpace(parts[0]) != "" {
+				validators = append(validators, map[string]any{"validator": map[string]any{"id": strings.TrimSpace(parts[0]), "version": validatorVersion}, "required": true})
+			}
+		}
+		pack := map[string]any{
+			"workspace_id": c.workspace, "policy_id": policyID, "version": version,
+			"rules": validators, "require_reindex": valueArg(args[1:], "require-reindex", "false") == "true",
+			"approval": map[string]any{"mode": valueArg(args[1:], "approval", "required")},
+		}
+		body := map[string]any{"workspace_id": c.workspace, "pack": pack, "idempotency_key": valueArg(args[1:], "idempotency", "policy:create:"+c.workspace+":"+policyID+":"+version)}
+		return c.requestPrint(http.MethodPost, "/v1/policies", body, false)
+	case "get":
+		return c.requestPrint(http.MethodGet, c.policyPath(valueArg(args[1:], "id", ""), valueArg(args[1:], "version", "1"))+"?workspace_id="+url.QueryEscape(c.workspace), nil, false)
+	case "activate", "default", "retire":
+		policyID := valueArg(args[1:], "id", "")
+		version := valueArg(args[1:], "version", "1")
+		body := map[string]any{"workspace_id": c.workspace, "policy_hash": valueArg(args[1:], "hash", ""), "reason": valueArg(args[1:], "reason", "operator policy "+args[0]), "idempotency_key": valueArg(args[1:], "idempotency", "policy:"+args[0]+":"+c.workspace+":"+policyID+":"+version)}
+		return c.requestPrint(http.MethodPost, c.policyPath(policyID, version)+"/"+args[0], body, false)
+	case "resolve", "dry-run-resolve":
+		body := map[string]any{"workspace_id": c.workspace, "requested_approval_mode": valueArg(args[1:], "approval", "")}
+		if policyID := valueArg(args[1:], "id", ""); policyID != "" {
+			body["policy"] = map[string]any{"workspace_id": c.workspace, "policy_id": policyID, "version": valueArg(args[1:], "version", "1"), "policy_hash": valueArg(args[1:], "hash", "")}
+		}
+		path := "/v1/policies/resolve"
+		if args[0] == "dry-run-resolve" {
+			path = "/v1/policies/dry-run-resolve"
+		}
+		return c.requestPrint(http.MethodPost, path, body, false)
+	case "compare":
+		left := map[string]any{"workspace_id": c.workspace, "policy_id": valueArg(args[1:], "left-id", ""), "version": valueArg(args[1:], "left-version", "1"), "policy_hash": valueArg(args[1:], "left-hash", "")}
+		right := map[string]any{"workspace_id": c.workspace, "policy_id": valueArg(args[1:], "right-id", ""), "version": valueArg(args[1:], "right-version", "1"), "policy_hash": valueArg(args[1:], "right-hash", "")}
+		return c.requestPrint(http.MethodPost, "/v1/policies/compare", map[string]any{"workspace_id": c.workspace, "left": left, "right": right}, false)
+	case "audit":
+		path := "/v1/policies/audit?workspace_id=" + url.QueryEscape(c.workspace) + "&limit=" + strconv.Itoa(intValue(args[1:], "limit", 50))
+		if policyID := valueArg(args[1:], "id", ""); policyID != "" {
+			path += "&policy_id=" + url.QueryEscape(policyID)
+		}
+		if version := valueArg(args[1:], "version", ""); version != "" {
+			path += "&version=" + url.QueryEscape(version)
+		}
+		if cursor := valueArg(args[1:], "cursor", ""); cursor != "" {
+			path += "&cursor=" + url.QueryEscape(cursor)
+		}
+		return c.requestPrint(http.MethodGet, path, nil, false)
+	default:
+		return fmt.Errorf("unknown policy command %q", args[0])
+	}
+}
+
+func (c *operatorCLI) policyPath(policyID, version string) string {
+	return "/v1/policies/" + url.PathEscape(policyID) + "/" + url.PathEscape(version)
 }
 
 func (c *operatorCLI) validationBody(args []string) map[string]any {
