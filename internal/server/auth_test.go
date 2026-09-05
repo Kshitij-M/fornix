@@ -149,6 +149,59 @@ func TestSecurityMiddlewareAuthorizesEvaluationOperatorSurface(t *testing.T) {
 	}
 }
 
+func TestSecurityMiddlewareAuthorizesPolicySurfaceAndSeparatesCapabilities(t *testing.T) {
+	srv, _, workspaceID, token := newServerAuthTest(t, []contracts.Permission{
+		contracts.PermissionPolicyRead,
+		contracts.PermissionPolicyCreate,
+		contracts.PermissionPolicyActivate,
+		contracts.PermissionPolicyRetire,
+		contracts.PermissionPolicyResolve,
+		contracts.PermissionPolicyCompare,
+	})
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	handler := withRequestMiddleware(srv.securityMiddleware(next), 1<<20)
+	cases := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodGet, "/v1/policies?workspace_id=" + workspaceID, ""},
+		{http.MethodPost, "/v1/policies", `{"workspace_id":"` + workspaceID + `","idempotency_key":"policy-auth","pack":{"policy_id":"safe","version":"1"}}`},
+		{http.MethodGet, "/v1/policies/safe/1?workspace_id=" + workspaceID, ""},
+		{http.MethodPost, "/v1/policies/safe/1/activate", `{"workspace_id":"` + workspaceID + `"}`},
+		{http.MethodPost, "/v1/policies/safe/1/default", `{"workspace_id":"` + workspaceID + `"}`},
+		{http.MethodPost, "/v1/policies/safe/1/retire", `{"workspace_id":"` + workspaceID + `"}`},
+		{http.MethodPost, "/v1/policies/resolve", `{"workspace_id":"` + workspaceID + `"}`},
+		{http.MethodPost, "/v1/policies/dry-run-resolve", `{"workspace_id":"` + workspaceID + `"}`},
+		{http.MethodPost, "/v1/policies/compare", `{"workspace_id":"` + workspaceID + `","left":{"workspace_id":"` + workspaceID + `","policy_id":"safe","version":"1"},"right":{"workspace_id":"` + workspaceID + `","policy_id":"safe","version":"1"}}`},
+		{http.MethodGet, "/v1/policies/audit?workspace_id=" + workspaceID, ""},
+	}
+	for _, item := range cases {
+		request := httptest.NewRequest(item.method, item.path, strings.NewReader(item.body))
+		request.Header.Set("Authorization", "Bearer "+token)
+		request.Header.Set("X-Request-ID", "policy-auth-"+item.method+"-"+item.path)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("authorized %s %s response=%d body=%s", item.method, item.path, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestSecurityMiddlewareDeniesPolicyMutationWithoutPolicyCapability(t *testing.T) {
+	srv, _, workspaceID, token := newServerAuthTest(t, []contracts.Permission{contracts.PermissionPolicyRead})
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { t.Fatal("denied policy mutation reached handler") })
+	handler := withRequestMiddleware(srv.securityMiddleware(next), 1<<20)
+	request := httptest.NewRequest(http.MethodPost, "/v1/policies", strings.NewReader(`{"workspace_id":"`+workspaceID+`"}`))
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("X-Request-ID", "policy-auth-deny")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("policy mutation response=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestSecurityMiddlewareAuthorizesWorkReceiptSurface(t *testing.T) {
 	srv, _, workspaceID, token := newServerAuthTest(t, []contracts.Permission{
 		contracts.PermissionReceiptRead,

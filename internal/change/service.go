@@ -62,6 +62,16 @@ func (s *Service) Propose(ctx context.Context, input PlanInput) (contracts.Chang
 	if err != nil {
 		return contracts.ChangeProposal{}, false, PlannedChange{}, err
 	}
+	// The store may tighten the packet budget after the planner captured the
+	// filesystem snapshot. Return the persisted packet/hash so API callers never
+	// receive a pre-policy view that disagrees with the authoritative proposal.
+	planned.Packet.WorkspaceID = proposal.WorkspaceID
+	planned.Packet.Repository = proposal.Repository
+	planned.Packet.Source = proposal.Source
+	planned.Packet.Budgets = proposal.Budgets
+	planned.Packet.Policy = clonePolicyRef(proposal.Policy)
+	planned.Packet.ExpectedTreeHash = proposal.ExpectedTreeHash
+	planned.ExpectedTreeHash = proposal.ExpectedTreeHash
 	return proposal, duplicate, planned, nil
 }
 
@@ -87,7 +97,7 @@ func (s *Service) Apply(ctx context.Context, request contracts.ChangeApplication
 		}
 		packet := proposalPacket(proposal)
 		result, err := (Executor{}).Apply(ctx, root, packet, s.contentResolver(), true)
-		return contracts.ChangeApplication{WorkspaceID: proposal.WorkspaceID, ProposalID: proposal.ID, PacketHash: proposal.PacketHash, Status: proposal.Status, ExpectedTreeHash: proposal.ExpectedTreeHash, ResultTreeHash: result.ResultTreeHash, Operations: proposal.Operations, Actor: request.Actor}, proposal, err
+		return contracts.ChangeApplication{WorkspaceID: proposal.WorkspaceID, ProposalID: proposal.ID, PacketHash: proposal.PacketHash, Status: proposal.Status, ExpectedTreeHash: proposal.ExpectedTreeHash, ResultTreeHash: result.ResultTreeHash, Operations: proposal.Operations, Actor: request.Actor, Policy: contracts.ClonePolicyReference(proposal.Policy)}, proposal, err
 	}
 	application, proposal, duplicate, err := s.Store.BeginApplication(ctx, request)
 	if err != nil {
@@ -188,7 +198,16 @@ func proposalPacket(proposal contracts.ChangeProposal) contracts.ChangePacket {
 		Operations:       proposal.Operations,
 		Budgets:          proposal.Budgets,
 		ExpectedTreeHash: proposal.ExpectedTreeHash,
+		Policy:           clonePolicyRef(proposal.Policy),
 	}
+}
+
+func clonePolicyRef(ref *contracts.ValidationPolicyRef) *contracts.ValidationPolicyRef {
+	if ref == nil {
+		return nil
+	}
+	copy := *ref
+	return &copy
 }
 
 // Get returns one workspace-scoped proposal.

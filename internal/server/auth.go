@@ -257,6 +257,22 @@ func permissionForRequest(r *http.Request) contracts.Permission {
 		return contracts.PermissionReceiptWrite
 	case path == "/v1/changes/dry-run" || path == "/v1/changes":
 		return contracts.PermissionChangePropose
+	case path == "/v1/policies/resolve":
+		return contracts.PermissionPolicyResolve
+	case path == "/v1/policies/dry-run-resolve":
+		return contracts.PermissionPolicyResolve
+	case path == "/v1/policies/compare":
+		return contracts.PermissionPolicyCompare
+	case path == "/v1/policies" && r.Method == http.MethodPost:
+		return contracts.PermissionPolicyCreate
+	case strings.HasPrefix(path, "/v1/policies/") && strings.HasSuffix(path, "/activate"):
+		return contracts.PermissionPolicyActivate
+	case strings.HasPrefix(path, "/v1/policies/") && strings.HasSuffix(path, "/default"):
+		return contracts.PermissionPolicyActivate
+	case strings.HasPrefix(path, "/v1/policies/") && strings.HasSuffix(path, "/retire"):
+		return contracts.PermissionPolicyRetire
+	case strings.HasPrefix(path, "/v1/policies"):
+		return contracts.PermissionPolicyRead
 	case path == "/v1/changes/disclose":
 		return contracts.PermissionChangeDisclose
 	case path == "/v1/validations" || strings.HasPrefix(path, "/v1/validations/"):

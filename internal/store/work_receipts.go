@@ -134,14 +134,14 @@ func (s *WorkReceiptStore) finalizeTx(ctx context.Context, tx pgx.Tx, receipt co
 			id, workspace_id, work_kind, work_id, request_id, idempotency_key,
 			request_hash, canonical_hash, status, actor, task_ref, session_ref,
 			task_owner_id, task_fence, source_manifest_hash, replay_hash, cost,
-			verification, canonical_payload, created_at, verified_at
+			verification, canonical_payload, policy_id, policy_version, policy_hash, created_at, verified_at
 		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11::jsonb,$12::jsonb,
-			$13,$14,$15,$16,$17::jsonb,$18::jsonb,$19,$20,$21)
+			$13,$14,$15,$16,$17::jsonb,$18::jsonb,$19,$20,$21,$22,$23,$24)
 		ON CONFLICT DO NOTHING`, receipt.ID, receipt.WorkspaceID, receipt.WorkKind,
 		receipt.WorkID, receipt.RequestID, receipt.IdempotencyKey, receipt.RequestHash,
 		receipt.CanonicalHash, receipt.Status, actorJSON, taskJSON, sessionJSON,
 		receipt.TaskOwnerID, int64(receipt.TaskFence), receipt.SourceManifestHash,
-		receipt.ReplayHash, costJSON, verificationJSON, payload, receipt.CreatedAt, receipt.VerifiedAt)
+		receipt.ReplayHash, costJSON, verificationJSON, payload, policyID(receipt.Policy), policyVersion(receipt.Policy), policyHash(receipt.Policy), receipt.CreatedAt, receipt.VerifiedAt)
 	if err != nil {
 		return contracts.WorkReceipt{}, false, fmt.Errorf("insert work receipt: %w", err)
 	}

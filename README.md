@@ -141,6 +141,10 @@ The current implementation includes the following tested slices:
   durable approval decisions, structured filesystem application, post-state
   verification, recovery-required classification, and Verified Change Packet
   receipts;
+- immutable workspace-scoped validation policy packs with deterministic
+  validator resolution, tightening-only budgets, approval/re-index controls,
+  lifecycle audit, exact policy pinning, and fail-closed verified change
+  admission;
 - operator workspace/bootstrap, inspection, evaluation, disclosure, and
   durable repository-ingestion commands.
 

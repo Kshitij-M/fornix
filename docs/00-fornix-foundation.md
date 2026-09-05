@@ -150,6 +150,10 @@ authoritative structured state
   optional embedding gates, and CLI/HTTP/MCP submit/status/resume/cancel
   operations. The reference workflow consumes this job rather than manually
   posting fixture chunks.
+- Workspace-scoped declarative validation policy packs with immutable hashes,
+  tightening-only budgets, mandatory safety validators, approval and re-index
+  controls, lifecycle audit, and exact policy propagation through verified
+  change admission.
 
 ## Current gaps
 

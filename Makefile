@@ -17,10 +17,13 @@ FORNIX_URL ?= http://localhost:8201
 # or command-line value still wins, while the fallback matches CI and the
 # development-only key used by the smoke scripts.
 FORNIX_KEY ?= $(shell value=$$(sed -n 's/^FORNIX_KEY=//p' .env 2>/dev/null | head -n 1); if [ -n "$$value" ]; then printf '%s' "$$value"; else printf '%s' 'fornix-ci-test-key'; fi)
+# Docker Compose mounts this fixture at the container path below. Override it
+# with the host path when the service is running directly on the host.
+FORNIX_REFERENCE_WORKDIR ?= /workspace/fixtures/reference-repo
 PROJECTION_PG_DSN ?= postgres://fornix:fornix-dev-only@host.docker.internal:55433/fornix?sslmode=disable
 FORNIX_TEST_PG_DSN ?=
 
-.PHONY: fmt fmt-check test test-race vet build python-install python-check docs-check check verify hooks-install install-hooks hooks-uninstall uninstall-hooks hooks-check smoke smoke-events smoke-projection smoke-leases smoke-tasks smoke-retrieval smoke-provenance smoke-model smoke-tools smoke-agent smoke-scheduler smoke-identity smoke-artifacts smoke-artifact-output smoke-observability smoke-retrieval-quality smoke-retrieval-evaluation smoke-reference-workflow smoke-reference-openai smoke-ingestion smoke-work-receipts smoke-changes smoke-validation operator-reference dev-up dev-up-ai dev-up-watcher dev-run dev-logs dev-down
+.PHONY: fmt fmt-check test test-race vet build python-install python-check docs-check check verify hooks-install install-hooks hooks-uninstall uninstall-hooks hooks-check smoke smoke-events smoke-projection smoke-leases smoke-tasks smoke-retrieval smoke-provenance smoke-model smoke-tools smoke-agent smoke-scheduler smoke-identity smoke-artifacts smoke-artifact-output smoke-observability smoke-retrieval-quality smoke-retrieval-evaluation smoke-reference-workflow smoke-reference-openai smoke-ingestion smoke-work-receipts smoke-changes smoke-validation smoke-policy operator-reference dev-up dev-up-ai dev-up-watcher dev-run dev-logs dev-down
 
 fmt:
 	$(GOFMT_CMD) -w $(GO_FILES)
@@ -109,22 +112,25 @@ smoke-retrieval-evaluation:
 	FORNIX_RETRIEVAL_EVAL_PG_DSN=$(PROJECTION_PG_DSN) FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) scripts/test/v0.26-retrieval-evaluation-smokes.sh
 
 smoke-reference-workflow:
-	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) scripts/test/v0.27-reference-workflow-smokes.sh
+	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) FORNIX_REFERENCE_WORKDIR=$(FORNIX_REFERENCE_WORKDIR) scripts/test/v0.27-reference-workflow-smokes.sh
 
 smoke-reference-openai:
 	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) scripts/test/v0.28-openai-smoke.sh
 
 smoke-ingestion:
-	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) scripts/test/v0.29-ingestion-smokes.sh
+	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) FORNIX_REFERENCE_WORKDIR=$(FORNIX_REFERENCE_WORKDIR) scripts/test/v0.29-ingestion-smokes.sh
 
 smoke-work-receipts:
-	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) scripts/test/v0.30-work-receipt-smokes.sh
+	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) FORNIX_REFERENCE_WORKDIR=$(FORNIX_REFERENCE_WORKDIR) scripts/test/v0.30-work-receipt-smokes.sh
 
 smoke-changes:
-	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_REFERENCE_WORKDIR=$${FORNIX_REFERENCE_WORKDIR:-$$(pwd)/fixtures/reference-repo} scripts/test/v0.31-change-smokes.sh
+	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_REFERENCE_WORKDIR=$(FORNIX_REFERENCE_WORKDIR) scripts/test/v0.31-change-smokes.sh
 
 smoke-validation:
-	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) FORNIX_REFERENCE_WORKDIR=$${FORNIX_REFERENCE_WORKDIR:-$$(pwd)/fixtures/reference-repo} scripts/test/v0.32-validation-smokes.sh
+	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) FORNIX_REFERENCE_WORKDIR=$(FORNIX_REFERENCE_WORKDIR) scripts/test/v0.32-validation-smokes.sh
+
+smoke-policy:
+	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) scripts/test/v0.33-policy-smokes.sh
 
 operator-reference: build
 	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) bin/fornix reference-workflow --workspace $${FORNIX_WORKSPACE_ID:-reference-local} --fixture fixtures/reference-repo
@@ -147,11 +153,12 @@ smoke:
 	FORNIX_OBSERVABILITY_PG_DSN=$(PROJECTION_PG_DSN) FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) scripts/test/v0.24-observability-smokes.sh
 	FORNIX_EVAL_PG_DSN=$(PROJECTION_PG_DSN) scripts/test/v0.25-retrieval-quality-smokes.sh
 	FORNIX_RETRIEVAL_EVAL_PG_DSN=$(PROJECTION_PG_DSN) FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) scripts/test/v0.26-retrieval-evaluation-smokes.sh
-	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) scripts/test/v0.27-reference-workflow-smokes.sh
-	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) scripts/test/v0.29-ingestion-smokes.sh
-	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) scripts/test/v0.30-work-receipt-smokes.sh
-	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_REFERENCE_WORKDIR=$${FORNIX_REFERENCE_WORKDIR:-$$(pwd)/fixtures/reference-repo} scripts/test/v0.31-change-smokes.sh
-	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) FORNIX_REFERENCE_WORKDIR=$${FORNIX_REFERENCE_WORKDIR:-$$(pwd)/fixtures/reference-repo} scripts/test/v0.32-validation-smokes.sh
+	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) FORNIX_REFERENCE_WORKDIR=$(FORNIX_REFERENCE_WORKDIR) scripts/test/v0.27-reference-workflow-smokes.sh
+	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) FORNIX_REFERENCE_WORKDIR=$(FORNIX_REFERENCE_WORKDIR) scripts/test/v0.29-ingestion-smokes.sh
+	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) FORNIX_REFERENCE_WORKDIR=$(FORNIX_REFERENCE_WORKDIR) scripts/test/v0.30-work-receipt-smokes.sh
+	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_REFERENCE_WORKDIR=$(FORNIX_REFERENCE_WORKDIR) scripts/test/v0.31-change-smokes.sh
+	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) FORNIX_REFERENCE_WORKDIR=$(FORNIX_REFERENCE_WORKDIR) scripts/test/v0.32-validation-smokes.sh
+	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) scripts/test/v0.33-policy-smokes.sh
 
 check: fmt-check test vet python-check docs-check
 

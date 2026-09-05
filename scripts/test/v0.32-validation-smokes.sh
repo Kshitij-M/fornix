@@ -15,7 +15,11 @@ else
   cli_workdir=$(fornix_smoke_container_path "$workdir" "$repo_root")
 fi
 path=".fornix-validation-smoke-$workspace.txt"
-trap 'rm -f "$workdir/$path"' EXIT INT TERM
+cleanup_root=$workdir
+case "$cleanup_root" in
+  /workspace/*) cleanup_root="$repo_root/${cleanup_root#/workspace/}" ;;
+esac
+trap 'rm -f "$cleanup_root/$path"' EXIT INT TERM
 
 cli() {
   if [ -x "$repo_root/bin/fornix" ]; then

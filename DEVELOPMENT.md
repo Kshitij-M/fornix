@@ -19,7 +19,9 @@ admit a scoped task
 
 The current alpha demonstrates this path with a deterministic, read-only
 reference workflow. It is a control-plane showcase, not yet a finished
-unattended repository-change product. Use the [product vision](docs/01-product-vision.md)
+unattended repository-change product. The Docker development composition keeps
+the workspace read-only and mounts only `fixtures/reference-repo` writable for
+the explicit change/validation smokes. Use the [product vision](docs/01-product-vision.md)
 to understand why each local command exists and the
 [qualification note](docs/14-production-readiness-qualification.md) before
 interpreting a passing smoke as production readiness.
@@ -75,6 +77,7 @@ make smoke-reference-workflow
 make smoke-reference-openai
 make smoke-ingestion
 make smoke-validation
+make smoke-policy
 make operator-reference
 make dev-up
 make dev-run
@@ -446,6 +449,47 @@ gate summaries; oversized reports use the Postgres artifact plane:
 
 ```sh
 make smoke-observability
+```
+
+Task 23 adds workspace-scoped validation policy packs. Policy versions are
+declarative, content-hashed, immutable after creation, and resolved only from
+the registered validator catalog. A policy can tighten global change and
+validation budgets, require approval, and require or suppress the post-change
+re-index handoff; it cannot remove the mandatory safety validators or the
+workspace, actor, task-fence, evidence, append-only, and replay safety floors.
+Only active versions admit new proposals or validation runs. Retirement does
+not rewrite historical records; rollback means activating an earlier immutable
+version. The exact policy reference and hash are carried through the change,
+validation, handoff, receipt, event, and accounting records.
+
+With the service running, the operator CLI exposes the same authenticated
+policy authority as HTTP and MCP:
+
+```sh
+bin/fornix --workspace reference-local policy list
+bin/fornix --workspace reference-local policy create --id repository-safety --version 1
+bin/fornix --workspace reference-local policy activate --id repository-safety --version 1 --hash <policy-hash>
+bin/fornix --workspace reference-local policy default --id repository-safety --version 1 --hash <policy-hash>
+bin/fornix --workspace reference-local policy resolve
+bin/fornix --workspace reference-local policy dry-run-resolve
+bin/fornix --workspace reference-local policy compare --left-id repository-safety --left-version 1 --right-id repository-safety --right-version 2
+bin/fornix --workspace reference-local policy audit --id repository-safety
+```
+
+The corresponding routes are `GET/POST /v1/policies`,
+`GET /v1/policies/{policy_id}/{version}`,
+`POST /v1/policies/{policy_id}/{version}/{activate|default|retire}`,
+`POST /v1/policies/resolve`, `POST /v1/policies/dry-run-resolve`,
+`POST /v1/policies/compare`, and `GET /v1/policies/audit`. They require the
+workspace policy capabilities, preserve authenticated actor/audit metadata,
+bound pagination and request bodies, and redact secrets and arbitrary policy
+text from errors and telemetry. Dry-run resolution is read-only and does not
+create a lifecycle, event, receipt, or validation record.
+
+Run the policy lifecycle smoke after rebuilding:
+
+```sh
+make smoke-policy
 ```
 
 ## Repository rules

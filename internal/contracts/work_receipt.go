@@ -171,6 +171,7 @@ type WorkReceipt struct {
 	Session            *EntityRef              `json:"session,omitempty"`
 	TaskOwnerID        string                  `json:"task_owner_id,omitempty"`
 	TaskFence          uint64                  `json:"task_fence,omitempty"`
+	Policy             *ValidationPolicyRef    `json:"policy,omitempty"`
 	SourceManifestHash string                  `json:"source_manifest_hash,omitempty"`
 	ReplayHash         string                  `json:"replay_hash,omitempty"`
 	Steps              []WorkReceiptStep       `json:"steps"`
@@ -199,6 +200,7 @@ type WorkReceiptFinalizeRequest struct {
 	Session            *EntityRef             `json:"session,omitempty"`
 	TaskOwnerID        string                 `json:"task_owner_id,omitempty"`
 	TaskFence          uint64                 `json:"task_fence,omitempty"`
+	Policy             *ValidationPolicyRef   `json:"policy,omitempty"`
 	SourceManifestHash string                 `json:"source_manifest_hash,omitempty"`
 	ReplayHash         string                 `json:"replay_hash,omitempty"`
 	Steps              []WorkReceiptStep      `json:"steps"`
@@ -289,6 +291,14 @@ func (r *WorkReceiptFinalizeRequest) Normalize() error {
 	if r.Session != nil && (r.Session.Kind != "session" || strings.TrimSpace(r.Session.ID) == "" || r.Session.WorkspaceID != r.WorkspaceID) {
 		return fmt.Errorf("session reference must be workspace-scoped")
 	}
+	if r.Policy != nil {
+		if err := r.Policy.Normalize(); err != nil {
+			return err
+		}
+		if r.Policy.WorkspaceID != r.WorkspaceID {
+			return fmt.Errorf("policy reference must be workspace-scoped")
+		}
+	}
 	if r.Task != nil && (r.TaskOwnerID == "" || r.TaskFence == 0) {
 		return fmt.Errorf("task-bound receipt requires task_owner_id and task_fence")
 	}
@@ -369,7 +379,7 @@ func (r WorkReceiptFinalizeRequest) ToReceipt(now time.Time) (WorkReceipt, error
 		WorkKind: r.WorkKind, WorkID: r.WorkID, RequestID: r.RequestID,
 		IdempotencyKey: r.IdempotencyKey, Status: WorkReceiptStatusVerified,
 		Actor: r.Actor, Task: r.Task, Session: r.Session, TaskOwnerID: r.TaskOwnerID,
-		TaskFence: r.TaskFence, SourceManifestHash: r.SourceManifestHash,
+		TaskFence: r.TaskFence, Policy: ClonePolicyReference(r.Policy), SourceManifestHash: r.SourceManifestHash,
 		ReplayHash: r.ReplayHash, Steps: append([]WorkReceiptStep(nil), r.Steps...),
 		Evidence:   append([]WorkReceiptEvidence(nil), r.Evidence...),
 		Artifacts:  append([]WorkReceiptArtifact(nil), r.Artifacts...),
@@ -391,6 +401,10 @@ func cloneWorkReceiptFinalizeRequest(r WorkReceiptFinalizeRequest) WorkReceiptFi
 	if r.Session != nil {
 		session := *r.Session
 		r.Session = &session
+	}
+	if r.Policy != nil {
+		policy := *r.Policy
+		r.Policy = &policy
 	}
 	r.Steps = append([]WorkReceiptStep(nil), r.Steps...)
 	for i := range r.Steps {
@@ -448,7 +462,7 @@ func (r *WorkReceipt) Normalize() error {
 		SchemaVersion: r.SchemaVersion, ReceiptID: r.ID, RequestID: r.RequestID,
 		IdempotencyKey: r.IdempotencyKey, WorkspaceID: r.WorkspaceID, Actor: r.Actor,
 		WorkKind: r.WorkKind, WorkID: r.WorkID, Task: r.Task, Session: r.Session,
-		TaskOwnerID: r.TaskOwnerID, TaskFence: r.TaskFence, SourceManifestHash: r.SourceManifestHash,
+		TaskOwnerID: r.TaskOwnerID, TaskFence: r.TaskFence, Policy: ClonePolicyReference(r.Policy), SourceManifestHash: r.SourceManifestHash,
 		ReplayHash: r.ReplayHash, Steps: r.Steps, Evidence: r.Evidence, Artifacts: r.Artifacts,
 		References: r.References, Cost: r.Cost,
 	}
@@ -523,6 +537,7 @@ func (r WorkReceipt) logicalPayload() any {
 		Session            *EntityRef              `json:"session,omitempty"`
 		TaskOwnerID        string                  `json:"task_owner_id,omitempty"`
 		TaskFence          uint64                  `json:"task_fence,omitempty"`
+		Policy             *ValidationPolicyRef    `json:"policy,omitempty"`
 		SourceManifestHash string                  `json:"source_manifest_hash,omitempty"`
 		ReplayHash         string                  `json:"replay_hash,omitempty"`
 		Steps              []WorkReceiptStep       `json:"steps"`
@@ -531,22 +546,23 @@ func (r WorkReceipt) logicalPayload() any {
 		References         []WorkReceiptReference  `json:"references,omitempty"`
 		Cost               WorkReceiptCost         `json:"cost"`
 		Verification       WorkReceiptVerification `json:"verification"`
-	}{r.SchemaVersion, r.WorkspaceID, r.WorkKind, r.WorkID, r.Status, redactedActor(r.Actor), r.Task, r.Session, r.TaskOwnerID, r.TaskFence, r.SourceManifestHash, r.ReplayHash, r.Steps, r.Evidence, r.Artifacts, r.References, r.Cost, verification}
+	}{r.SchemaVersion, r.WorkspaceID, r.WorkKind, r.WorkID, r.Status, redactedActor(r.Actor), r.Task, r.Session, r.TaskOwnerID, r.TaskFence, r.Policy, r.SourceManifestHash, r.ReplayHash, r.Steps, r.Evidence, r.Artifacts, r.References, r.Cost, verification}
 }
 
 func (r WorkReceipt) requestPayload() any {
 	payload := r.logicalPayload()
 	return struct {
-		WorkspaceID string     `json:"workspace_id"`
-		WorkKind    string     `json:"work_kind"`
-		WorkID      string     `json:"work_id"`
-		Actor       ActorRef   `json:"actor"`
-		Task        *EntityRef `json:"task,omitempty"`
-		Session     *EntityRef `json:"session,omitempty"`
-		TaskOwnerID string     `json:"task_owner_id,omitempty"`
-		TaskFence   uint64     `json:"task_fence,omitempty"`
-		Payload     any        `json:"payload"`
-	}{r.WorkspaceID, r.WorkKind, r.WorkID, redactedActor(r.Actor), r.Task, r.Session, r.TaskOwnerID, r.TaskFence, payload}
+		WorkspaceID string               `json:"workspace_id"`
+		WorkKind    string               `json:"work_kind"`
+		WorkID      string               `json:"work_id"`
+		Actor       ActorRef             `json:"actor"`
+		Task        *EntityRef           `json:"task,omitempty"`
+		Session     *EntityRef           `json:"session,omitempty"`
+		TaskOwnerID string               `json:"task_owner_id,omitempty"`
+		TaskFence   uint64               `json:"task_fence,omitempty"`
+		Policy      *ValidationPolicyRef `json:"policy,omitempty"`
+		Payload     any                  `json:"payload"`
+	}{r.WorkspaceID, r.WorkKind, r.WorkID, redactedActor(r.Actor), r.Task, r.Session, r.TaskOwnerID, r.TaskFence, r.Policy, payload}
 }
 
 func normalizeWorkReceiptStep(s *WorkReceiptStep, _ int) error {

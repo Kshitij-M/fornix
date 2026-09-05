@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -14,15 +15,17 @@ import (
 
 	"github.com/omaveda/fornix/internal/change"
 	"github.com/omaveda/fornix/internal/contracts"
+	policyruntime "github.com/omaveda/fornix/internal/policy"
 	"github.com/omaveda/fornix/internal/store"
 )
 
 type changeIntegration struct {
-	service *change.Service
-	store   *store.RepositoryChangeStore
-	pool    *pgxpool.Pool
-	root    string
-	work    string
+	service  *change.Service
+	store    *store.RepositoryChangeStore
+	policies *store.PolicyStore
+	pool     *pgxpool.Pool
+	root     string
+	work     string
 }
 
 func newChangeIntegration(t *testing.T) *changeIntegration {
@@ -50,9 +53,13 @@ func newChangeIntegration(t *testing.T) *changeIntegration {
 	artifacts := store.NewArtifactStore(pool)
 	events := store.NewEventStore(pool)
 	changeStore := store.NewRepositoryChangeStore(pool, events, artifacts)
+	policies := store.NewPolicyStore(pool, events, &policyruntime.Resolver{Lookup: func(ref contracts.ValidatorRef) bool {
+		return ref.Version == "1" && strings.HasPrefix(ref.ID, "change.")
+	}})
+	changeStore.SetPolicyStore(policies)
 	service := change.NewService(changeStore, artifacts)
 	service.SetReceiptStore(store.NewWorkReceiptStore(pool))
-	integration := &changeIntegration{service: service, store: changeStore, pool: pool, root: root, work: workspace}
+	integration := &changeIntegration{service: service, store: changeStore, policies: policies, pool: pool, root: root, work: workspace}
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cleanupCancel()
@@ -72,6 +79,13 @@ func newChangeIntegration(t *testing.T) *changeIntegration {
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.idempotency_records WHERE workspace_id=$1`, workspace)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.task_execution_leases WHERE workspace_id=$1`, workspace)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.tasks WHERE workspace_id=$1`, workspace)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.validation_policy_defaults WHERE workspace_id=$1`, workspace)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.validation_policy_idempotency WHERE workspace_id=$1`, workspace)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.validation_policy_audit WHERE workspace_id=$1`, workspace)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.validation_policy_transitions WHERE workspace_id=$1`, workspace)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.validation_policy_rules WHERE workspace_id=$1`, workspace)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.validation_policy_versions WHERE workspace_id=$1`, workspace)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.validation_policies WHERE workspace_id=$1`, workspace)
 		pool.Close()
 	})
 	return integration
@@ -83,6 +97,98 @@ func changeRequest(workspace, key, root string, content []byte) contracts.Change
 		Actor:      contracts.ActorRef{ID: "operator", Kind: "user", WorkspaceID: workspace},
 		Source:     contracts.ChangeSourceSnapshot{WorkspaceID: workspace, Repository: "repo", SourceRoot: root},
 		Operations: []contracts.ChangeOperationInput{{ID: "op-1", Type: contracts.ChangeOpCreate, Path: "result.txt", Content: content}},
+	}
+}
+
+func TestRepositoryChangePinsActiveValidationPolicyThroughAdmissionAndEvents(t *testing.T) {
+	integration := newChangeIntegration(t)
+	policy, created, err := integration.policies.Create(context.Background(), contracts.PolicyCreateRequest{
+		WorkspaceID: integration.work, RequestID: "policy-create", IdempotencyKey: "policy-create",
+		Actor: contracts.ActorRef{ID: "operator", Kind: "user", WorkspaceID: integration.work},
+		Pack:  contracts.ValidationPolicyPack{WorkspaceID: integration.work, PolicyID: "change-admission", Version: "1", Approval: contracts.PolicyApprovalConfig{Mode: contracts.PolicyApprovalRequired}},
+	})
+	if err != nil || !created {
+		t.Fatalf("policy create = %+v, created=%v, err=%v", policy, created, err)
+	}
+	if _, _, err := integration.policies.Activate(context.Background(), contracts.PolicyLifecycleRequest{WorkspaceID: integration.work, Policy: policy.Pack.Ref(), RequestID: "policy-activate", IdempotencyKey: "policy-activate", Actor: policy.Actor}); err != nil {
+		t.Fatal(err)
+	}
+	request := changeRequest(integration.work, "policy-proposal", integration.root, []byte("policy content"))
+	policyRef := policy.Pack.Ref()
+	request.Policy = &policyRef
+	proposal, _, _, err := integration.service.Propose(context.Background(), change.PlanInput{Request: request, Root: integration.root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proposal.Policy == nil || proposal.Policy.PolicyHash != policy.PolicyHash || proposal.Status != contracts.ChangeAwaitingApproval {
+		t.Fatalf("proposal policy pin = %+v", proposal)
+	}
+	if _, _, _, err := integration.service.Approve(context.Background(), contracts.ChangeApprovalRequest{WorkspaceID: integration.work, ProposalID: proposal.ID, PacketHash: proposal.PacketHash, Decision: "approved", IdempotencyKey: "policy-approval", Actor: request.Actor, Policy: &policyRef}); err != nil {
+		t.Fatal(err)
+	}
+	application, _, err := integration.service.Apply(context.Background(), contracts.ChangeApplicationRequest{WorkspaceID: integration.work, ProposalID: proposal.ID, PacketHash: proposal.PacketHash, IdempotencyKey: "policy-application", Actor: request.Actor, Policy: &policyRef}, integration.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if application.Policy == nil || application.Policy.PolicyHash != policy.PolicyHash {
+		t.Fatalf("application policy pin = %+v", application)
+	}
+	var eventCount int
+	if err := integration.pool.QueryRow(context.Background(), `SELECT count(*) FROM fornix.control_events WHERE workspace_id=$1 AND policy_id=$2 AND policy_version=$3 AND policy_hash=$4`, integration.work, policy.PolicyID, policy.Version, policy.PolicyHash).Scan(&eventCount); err != nil {
+		t.Fatal(err)
+	}
+	if eventCount < 4 {
+		t.Fatalf("policy was not propagated to all change events: %d", eventCount)
+	}
+}
+
+func TestRepositoryChangePolicyPreservesCallerTighterBudget(t *testing.T) {
+	integration := newChangeIntegration(t)
+	policy, _, err := integration.policies.Create(context.Background(), contracts.PolicyCreateRequest{
+		WorkspaceID: integration.work, RequestID: "policy-budget-create", IdempotencyKey: "policy-budget-create",
+		Actor: contracts.ActorRef{ID: "operator", Kind: "user", WorkspaceID: integration.work},
+		Pack:  contracts.ValidationPolicyPack{WorkspaceID: integration.work, PolicyID: "budget-policy", Version: "1", Budget: contracts.PolicyBudget{Change: contracts.ChangeBudgets{MaxOperations: 8, MaxFileBytes: 4096, MaxTotalBytes: 8192}}, Approval: contracts.PolicyApprovalConfig{Mode: contracts.PolicyApprovalRequired}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := integration.policies.Activate(context.Background(), contracts.PolicyLifecycleRequest{WorkspaceID: integration.work, Policy: policy.Pack.Ref(), RequestID: "policy-budget-activate", IdempotencyKey: "policy-budget-activate", Actor: policy.Actor}); err != nil {
+		t.Fatal(err)
+	}
+	request := changeRequest(integration.work, "policy-budget-proposal", integration.root, []byte("small"))
+	request.Policy = func() *contracts.ValidationPolicyRef { ref := policy.Pack.Ref(); return &ref }()
+	request.Budgets = contracts.ChangeBudgets{MaxOperations: 1, MaxFileBytes: 128, MaxTotalBytes: 128}
+	proposal, _, planned, err := integration.service.Propose(context.Background(), change.PlanInput{Request: request, Root: integration.root})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if proposal.Budgets != request.Budgets {
+		t.Fatalf("caller tightening was lost: proposal=%+v request=%+v", proposal.Budgets, request.Budgets)
+	}
+	if planned.Packet.StableHash() != proposal.PacketHash || planned.ExpectedTreeHash != proposal.ExpectedTreeHash {
+		t.Fatalf("returned plan disagrees with persisted proposal: planned_hash=%s proposal_hash=%s", planned.Packet.StableHash(), proposal.PacketHash)
+	}
+}
+
+func TestRepositoryChangeStoreCannotBypassNarrowPolicyBudget(t *testing.T) {
+	integration := newChangeIntegration(t)
+	policy, _, err := integration.policies.Create(context.Background(), contracts.PolicyCreateRequest{
+		WorkspaceID: integration.work, RequestID: "policy-narrow-create", IdempotencyKey: "policy-narrow-create",
+		Actor: contracts.ActorRef{ID: "operator", Kind: "user", WorkspaceID: integration.work},
+		Pack:  contracts.ValidationPolicyPack{WorkspaceID: integration.work, PolicyID: "narrow-policy", Version: "1", Budget: contracts.PolicyBudget{Change: contracts.ChangeBudgets{MaxOperations: 1, MaxFileBytes: 4096, MaxTotalBytes: 8192}}, Approval: contracts.PolicyApprovalConfig{Mode: contracts.PolicyApprovalRequired}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := integration.policies.Activate(context.Background(), contracts.PolicyLifecycleRequest{WorkspaceID: integration.work, Policy: policy.Pack.Ref(), RequestID: "policy-narrow-activate", IdempotencyKey: "policy-narrow-activate", Actor: policy.Actor}); err != nil {
+		t.Fatal(err)
+	}
+	request := changeRequest(integration.work, "policy-narrow-proposal", integration.root, []byte("first"))
+	request.Operations = append(request.Operations, contracts.ChangeOperationInput{ID: "op-2", Type: contracts.ChangeOpCreate, Path: "second.txt", Content: []byte("second")})
+	ref := policy.Pack.Ref()
+	request.Policy = &ref
+	if _, _, _, err := integration.service.Propose(context.Background(), change.PlanInput{Request: request, Root: integration.root}); !errors.Is(err, store.ErrChangeBudget) {
+		t.Fatalf("policy budget bypass was not rejected: %v", err)
 	}
 }
 

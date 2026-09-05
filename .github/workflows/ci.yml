@@ -294,6 +294,15 @@ jobs:
           FORNIX_BOOTSTRAP_KEY: fornix-ci-bootstrap-key
           FORNIX_REFERENCE_WORKDIR: ${{ github.workspace }}/fixtures/reference-repo
         run: scripts/test/v0.32-validation-smokes.sh
+      - name: Run validation policy integration tests
+        env:
+          FORNIX_TEST_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+        run: go test ./internal/contracts ./internal/policy ./internal/server ./internal/store -run 'Test(Policy|SecurityMiddleware.*Policy)' -count=1 -v
+      - name: Run validation policy smoke
+        env:
+          FORNIX_URL: http://localhost:8201
+          FORNIX_KEY: fornix-ci-test-key
+        run: scripts/test/v0.33-policy-smokes.sh
 
   vulnerabilities:
     name: Vulnerability scan

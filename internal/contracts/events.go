@@ -84,23 +84,24 @@ type StateDelta struct {
 // RecordedAt are assigned by the Postgres event store; all other fields are
 // part of the caller's immutable event request.
 type EventEnvelope struct {
-	EventID        string              `json:"event_id"`
-	Sequence       uint64              `json:"sequence,omitempty"`
-	EventType      string              `json:"event_type"`
-	SchemaVersion  int                 `json:"schema_version"`
-	OccurredAt     time.Time           `json:"occurred_at"`
-	RecordedAt     time.Time           `json:"recorded_at,omitempty"`
-	Scope          Scope               `json:"scope"`
-	Actor          ActorRef            `json:"actor,omitempty"`
-	Task           *EntityRef          `json:"task,omitempty"`
-	Session        *EntityRef          `json:"session,omitempty"`
-	CausationID    string              `json:"causation_id,omitempty"`
-	CorrelationID  string              `json:"correlation_id,omitempty"`
-	IdempotencyKey string              `json:"idempotency_key,omitempty"`
-	StateDeltas    []StateDelta        `json:"state_deltas,omitempty"`
-	Artifacts      []ArtifactReference `json:"artifacts,omitempty"`
-	Provenance     Provenance          `json:"provenance,omitempty"`
-	Payload        json.RawMessage     `json:"payload"`
+	EventID        string               `json:"event_id"`
+	Sequence       uint64               `json:"sequence,omitempty"`
+	EventType      string               `json:"event_type"`
+	SchemaVersion  int                  `json:"schema_version"`
+	OccurredAt     time.Time            `json:"occurred_at"`
+	RecordedAt     time.Time            `json:"recorded_at,omitempty"`
+	Scope          Scope                `json:"scope"`
+	Actor          ActorRef             `json:"actor,omitempty"`
+	Task           *EntityRef           `json:"task,omitempty"`
+	Session        *EntityRef           `json:"session,omitempty"`
+	Policy         *ValidationPolicyRef `json:"policy,omitempty"`
+	CausationID    string               `json:"causation_id,omitempty"`
+	CorrelationID  string               `json:"correlation_id,omitempty"`
+	IdempotencyKey string               `json:"idempotency_key,omitempty"`
+	StateDeltas    []StateDelta         `json:"state_deltas,omitempty"`
+	Artifacts      []ArtifactReference  `json:"artifacts,omitempty"`
+	Provenance     Provenance           `json:"provenance,omitempty"`
+	Payload        json.RawMessage      `json:"payload"`
 }
 
 // NewEvent creates a valid event request with a generated identity and raw
@@ -133,6 +134,7 @@ func (e EventEnvelope) Clone() EventEnvelope {
 	clone.Payload = append(json.RawMessage(nil), e.Payload...)
 	clone.Task = cloneEntityRef(e.Task)
 	clone.Session = cloneEntityRef(e.Session)
+	clone.Policy = ClonePolicyReference(e.Policy)
 	clone.StateDeltas = make([]StateDelta, len(e.StateDeltas))
 	for i, delta := range e.StateDeltas {
 		clone.StateDeltas[i] = delta
@@ -207,6 +209,14 @@ func (e *EventEnvelope) Normalize() error {
 	}
 	if err := validateEntityRef(e.Session, "session"); err != nil {
 		return err
+	}
+	if e.Policy != nil {
+		if err := e.Policy.Normalize(); err != nil {
+			return fmt.Errorf("policy reference: %w", err)
+		}
+		if e.Policy.WorkspaceID != e.Scope.WorkspaceID {
+			return fmt.Errorf("policy reference crosses workspace boundary")
+		}
 	}
 	if len(e.Payload) == 0 {
 		e.Payload = json.RawMessage(`{}`)
@@ -341,18 +351,19 @@ func cleanStrings(values []string) []string {
 // a retried logical request can use a newly generated event ID.
 func RequestHash(event EventEnvelope) (string, error) {
 	input := struct {
-		EventType     string              `json:"event_type"`
-		SchemaVersion int                 `json:"schema_version"`
-		Scope         Scope               `json:"scope"`
-		Actor         ActorRef            `json:"actor,omitempty"`
-		Task          *EntityRef          `json:"task,omitempty"`
-		Session       *EntityRef          `json:"session,omitempty"`
-		CausationID   string              `json:"causation_id,omitempty"`
-		CorrelationID string              `json:"correlation_id,omitempty"`
-		StateDeltas   []StateDelta        `json:"state_deltas,omitempty"`
-		Artifacts     []ArtifactReference `json:"artifacts,omitempty"`
-		Provenance    Provenance          `json:"provenance,omitempty"`
-		Payload       json.RawMessage     `json:"payload"`
+		EventType     string               `json:"event_type"`
+		SchemaVersion int                  `json:"schema_version"`
+		Scope         Scope                `json:"scope"`
+		Actor         ActorRef             `json:"actor,omitempty"`
+		Task          *EntityRef           `json:"task,omitempty"`
+		Session       *EntityRef           `json:"session,omitempty"`
+		Policy        *ValidationPolicyRef `json:"policy,omitempty"`
+		CausationID   string               `json:"causation_id,omitempty"`
+		CorrelationID string               `json:"correlation_id,omitempty"`
+		StateDeltas   []StateDelta         `json:"state_deltas,omitempty"`
+		Artifacts     []ArtifactReference  `json:"artifacts,omitempty"`
+		Provenance    Provenance           `json:"provenance,omitempty"`
+		Payload       json.RawMessage      `json:"payload"`
 	}{
 		EventType:     event.EventType,
 		SchemaVersion: event.SchemaVersion,
@@ -360,6 +371,7 @@ func RequestHash(event EventEnvelope) (string, error) {
 		Actor:         event.Actor,
 		Task:          event.Task,
 		Session:       event.Session,
+		Policy:        event.Policy,
 		CausationID:   event.CausationID,
 		CorrelationID: event.CorrelationID,
 		StateDeltas:   event.StateDeltas,

@@ -7,7 +7,13 @@ url=${FORNIX_URL:-http://localhost:8201}
 workspace="reference-smoke-$$"
 key=${FORNIX_KEY:-}
 bootstrap_key=${FORNIX_BOOTSTRAP_KEY:-}
-workdir=${FORNIX_REFERENCE_WORKDIR:-/workspace/fixtures/reference-repo}
+if [ -n "${FORNIX_REFERENCE_WORKDIR:-}" ]; then
+  workdir=$FORNIX_REFERENCE_WORKDIR
+elif [ -x "$repo_root/bin/fornix" ]; then
+  workdir="$repo_root/fixtures/reference-repo"
+else
+  workdir=/workspace/fixtures/reference-repo
+fi
 
 if [ -x "$repo_root/bin/fornix" ]; then
   out=$(FORNIX_URL="$url" FORNIX_KEY="$key" FORNIX_BOOTSTRAP_KEY="$bootstrap_key" \

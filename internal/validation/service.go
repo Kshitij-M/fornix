@@ -74,7 +74,14 @@ func (s *Service) Validate(ctx context.Context, request contracts.ValidationRequ
 		if request.SourceManifestHash == "" {
 			request.SourceManifestHash = proposal.Source.ManifestHash
 		}
+		if request.Policy == nil {
+			request.Policy = contracts.ClonePolicyReference(proposal.Policy)
+		} else if proposal.Policy != nil && !samePolicy(request.Policy, proposal.Policy) {
+			return Result{}, fmt.Errorf("validation policy does not match the applied change")
+		}
 	}
+	requestedValidationBudget := request.Budget
+	requestedValidators := append([]contracts.ValidatorRef(nil), request.Validators...)
 	if err := request.Normalize(); err != nil {
 		return Result{}, err
 	}
@@ -91,6 +98,41 @@ func (s *Service) Validate(ctx context.Context, request contracts.ValidationRequ
 	if err != nil {
 		return Result{}, err
 	}
+	if request.Policy == nil {
+		request.Policy = contracts.ClonePolicyReference(proposal.Policy)
+	} else if proposal.Policy != nil && !samePolicy(request.Policy, proposal.Policy) {
+		return Result{}, fmt.Errorf("validation policy does not match the applied change")
+	}
+	var policyResolution contracts.PolicyResolution
+	if s.Runs.PolicyStoreConfigured() {
+		var resolveErr error
+		policyResolution, resolveErr = s.Runs.ResolvePolicy(ctx, contracts.PolicyEvaluationRequest{
+			WorkspaceID: request.WorkspaceID, Policy: request.Policy,
+			RequestedValidators: requestedValidators,
+			RequestedBudget:     contracts.PolicyBudget{Validation: requestedValidationBudget},
+			Operation:           "validation",
+		})
+		if resolveErr != nil {
+			return Result{}, resolveErr
+		}
+		if policyResolution.Selected {
+			request.Policy = contracts.ClonePolicyReference(policyResolution.Ref)
+			request.Validators = append([]contracts.ValidatorRef(nil), policyResolution.Validators...)
+			request.Budget = policyResolution.Budget.Validation
+		}
+	}
+	// Policy resolution may replace validators and hard budgets. Rebuild the
+	// plan after that authoritative decision so its request hash and persisted
+	// snapshot cannot describe the pre-policy request.
+	plan, err = request.Plan()
+	if err != nil {
+		return Result{}, err
+	}
+	for _, reference := range plan.Validators {
+		if _, ok := s.Registry.Lookup(reference); !ok {
+			return Result{}, fmt.Errorf("validator %s@%s is not registered", reference.ID, reference.Version)
+		}
+	}
 	// The authoritative proposal is the source of truth when the caller used
 	// the compact request form. Rebuild the plan so the persisted request hash
 	// covers the resolved manifest as well as the other authority fields.
@@ -100,6 +142,9 @@ func (s *Service) Validate(ctx context.Context, request contracts.ValidationRequ
 		if err != nil {
 			return Result{}, err
 		}
+	}
+	if policyResolution.Selected {
+		plan.RequireReindex = policyResolution.RequireReindex
 	}
 	if request.DryRun {
 		dry := s.execute(ctx, request, plan, application, proposal, "dry-run")
@@ -155,7 +200,7 @@ func (s *Service) Resume(ctx context.Context, workspaceID, runID, sourceRoot, mo
 	if err != nil {
 		return Result{}, err
 	}
-	request := contracts.ValidationRequest{SchemaVersion: contracts.ValidationSchemaVersion, ID: run.ID, RequestID: run.RequestID, IdempotencyKey: run.IdempotencyKey, WorkspaceID: run.WorkspaceID, Actor: run.Actor, Task: run.Task, Session: run.Session, AgentRun: run.AgentRun, TaskOwnerID: run.TaskOwnerID, TaskFence: run.TaskFence, ChangeApplicationID: run.ChangeApplicationID, ProposalID: run.ProposalID, PacketHash: run.PacketHash, ExpectedTreeHash: run.ExpectedTreeHash, Repository: run.Repository, Source: contracts.RepositorySource{Repository: run.Repository, SourceRoot: sourceRoot, MountRoot: mountRoot}, SourceManifestHash: run.SourceManifestHash, Validators: run.Plan.Validators, Budget: run.Budget}
+	request := contracts.ValidationRequest{SchemaVersion: contracts.ValidationSchemaVersion, ID: run.ID, RequestID: run.RequestID, IdempotencyKey: run.IdempotencyKey, WorkspaceID: run.WorkspaceID, Actor: run.Actor, Task: run.Task, Session: run.Session, AgentRun: run.AgentRun, Policy: contracts.ClonePolicyReference(run.Policy), TaskOwnerID: run.TaskOwnerID, TaskFence: run.TaskFence, ChangeApplicationID: run.ChangeApplicationID, ProposalID: run.ProposalID, PacketHash: run.PacketHash, ExpectedTreeHash: run.ExpectedTreeHash, Repository: run.Repository, Source: contracts.RepositorySource{Repository: run.Repository, SourceRoot: sourceRoot, MountRoot: mountRoot}, SourceManifestHash: run.SourceManifestHash, Validators: run.Plan.Validators, Budget: run.Budget}
 	return s.Validate(ctx, request, sourceRoot, mountRoot)
 }
 
@@ -193,7 +238,7 @@ func (s *Service) execute(ctx context.Context, request contracts.ValidationReque
 	if err != nil {
 		return executionResult{Run: failedExecutionRun(request, runID, contracts.ValidationFailure{Code: contracts.ValidationFailureValidator, Message: "validator execution failed"})}
 	}
-	report := contracts.ValidationReport{SchemaVersion: contracts.ValidationSchemaVersion, RunID: runID, WorkspaceID: request.WorkspaceID, PacketHash: request.PacketHash, ExpectedTreeHash: request.ExpectedTreeHash, ObservedTreeHash: observation.ResultTreeHash, Results: results, Files: observation.Files, Bytes: observation.Bytes, DurationMS: time.Since(started).Milliseconds()}
+	report := contracts.ValidationReport{SchemaVersion: contracts.ValidationSchemaVersion, RunID: runID, WorkspaceID: request.WorkspaceID, PacketHash: request.PacketHash, ExpectedTreeHash: request.ExpectedTreeHash, ObservedTreeHash: observation.ResultTreeHash, Results: results, Files: observation.Files, Bytes: observation.Bytes, DurationMS: time.Since(started).Milliseconds(), Policy: contracts.ClonePolicyReference(request.Policy)}
 	runStatus, runOutcome := contracts.ValidationPending, contracts.ValidationOutcomeSkipped
 	if request.DryRun {
 		report.Status = "dry_run"
@@ -205,12 +250,19 @@ func (s *Service) execute(ctx context.Context, request contracts.ValidationReque
 	if request.DryRun {
 		runStatus = contracts.ValidationAbstained
 	}
-	return executionResult{Run: contracts.ValidationRun{ID: runID, WorkspaceID: request.WorkspaceID, RequestID: request.RequestID, RequestHash: plan.RequestHash, ChangeApplicationID: request.ChangeApplicationID, ProposalID: request.ProposalID, PacketHash: request.PacketHash, ExpectedTreeHash: request.ExpectedTreeHash, SourceManifestHash: request.SourceManifestHash, Repository: request.Repository, SourceRoot: request.Source.SourceRoot, Actor: request.Actor, Task: request.Task, Session: request.Session, AgentRun: request.AgentRun, TaskOwnerID: request.TaskOwnerID, TaskFence: request.TaskFence, Plan: plan, Budget: request.Budget, Status: runStatus, Outcome: runOutcome, Report: &report}, discovery: discovery}
+	return executionResult{Run: contracts.ValidationRun{ID: runID, WorkspaceID: request.WorkspaceID, RequestID: request.RequestID, RequestHash: plan.RequestHash, ChangeApplicationID: request.ChangeApplicationID, ProposalID: request.ProposalID, PacketHash: request.PacketHash, ExpectedTreeHash: request.ExpectedTreeHash, SourceManifestHash: request.SourceManifestHash, Repository: request.Repository, SourceRoot: request.Source.SourceRoot, Actor: request.Actor, Task: request.Task, Session: request.Session, AgentRun: request.AgentRun, Policy: contracts.ClonePolicyReference(request.Policy), TaskOwnerID: request.TaskOwnerID, TaskFence: request.TaskFence, Plan: plan, Budget: request.Budget, Status: runStatus, Outcome: runOutcome, Report: &report}, discovery: discovery}
 }
 
 func failedExecutionRun(request contracts.ValidationRequest, runID string, failure contracts.ValidationFailure) contracts.ValidationRun {
 	report := contracts.ValidationReport{SchemaVersion: contracts.ValidationSchemaVersion, RunID: runID, WorkspaceID: request.WorkspaceID, Status: contracts.ValidationFailed, Outcome: contracts.ValidationOutcomeFailed, PacketHash: request.PacketHash, ExpectedTreeHash: request.ExpectedTreeHash, LastError: failure.Message}
-	return contracts.ValidationRun{ID: runID, WorkspaceID: request.WorkspaceID, RequestID: request.RequestID, RequestHash: request.RequestHash(), ChangeApplicationID: request.ChangeApplicationID, ProposalID: request.ProposalID, PacketHash: request.PacketHash, ExpectedTreeHash: request.ExpectedTreeHash, SourceManifestHash: request.SourceManifestHash, Repository: request.Repository, SourceRoot: request.Source.SourceRoot, Actor: request.Actor, Task: request.Task, Session: request.Session, AgentRun: request.AgentRun, TaskOwnerID: request.TaskOwnerID, TaskFence: request.TaskFence, Plan: contracts.ValidationPlan{SchemaVersion: contracts.ValidationSchemaVersion, WorkspaceID: request.WorkspaceID, RequestHash: request.RequestHash(), Validators: request.Validators, Budget: request.Budget}, Budget: request.Budget, Report: &report}
+	return contracts.ValidationRun{ID: runID, WorkspaceID: request.WorkspaceID, RequestID: request.RequestID, RequestHash: request.RequestHash(), ChangeApplicationID: request.ChangeApplicationID, ProposalID: request.ProposalID, PacketHash: request.PacketHash, ExpectedTreeHash: request.ExpectedTreeHash, SourceManifestHash: request.SourceManifestHash, Repository: request.Repository, SourceRoot: request.Source.SourceRoot, Actor: request.Actor, Task: request.Task, Session: request.Session, AgentRun: request.AgentRun, Policy: contracts.ClonePolicyReference(request.Policy), TaskOwnerID: request.TaskOwnerID, TaskFence: request.TaskFence, Plan: contracts.ValidationPlan{SchemaVersion: contracts.ValidationSchemaVersion, WorkspaceID: request.WorkspaceID, RequestHash: request.RequestHash(), Validators: request.Validators, Budget: request.Budget, Policy: contracts.ClonePolicyReference(request.Policy)}, Budget: request.Budget, Report: &report}
+}
+
+func samePolicy(left, right *contracts.ValidationPolicyRef) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return left.WorkspaceID == right.WorkspaceID && left.PolicyID == right.PolicyID && left.Version == right.Version && (left.PolicyHash == "" || right.PolicyHash == "" || left.PolicyHash == right.PolicyHash)
 }
 
 func failureResults(runID, workspaceID string, plan contracts.ValidationPlan, message string) []contracts.ValidationResult {

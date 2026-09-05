@@ -16,6 +16,7 @@ import (
 	"github.com/omaveda/fornix/internal/change"
 	"github.com/omaveda/fornix/internal/contracts"
 	"github.com/omaveda/fornix/internal/ingest"
+	policyruntime "github.com/omaveda/fornix/internal/policy"
 	"github.com/omaveda/fornix/internal/store"
 	validationruntime "github.com/omaveda/fornix/internal/validation"
 )
@@ -28,6 +29,7 @@ type validationIntegration struct {
 	changes     *change.Service
 	validations *store.ValidationStore
 	runtime     *validationruntime.Service
+	policies    *store.PolicyStore
 }
 
 func newValidationIntegration(t *testing.T) *validationIntegration {
@@ -56,17 +58,24 @@ func newValidationIntegration(t *testing.T) *validationIntegration {
 	artifacts := store.NewArtifactStore(pool)
 	events := store.NewEventStore(pool)
 	receipts := store.NewWorkReceiptStore(pool)
-	changes := change.NewService(store.NewRepositoryChangeStore(pool, events, artifacts), artifacts)
-	changes.SetReceiptStore(receipts)
-	validations := store.NewValidationStore(pool, events, store.NewEvidenceStore(pool), artifacts, store.NewObservabilityStore(pool))
-	validations.SetReceiptStore(receipts)
 	registry, err := validationruntime.NewDefaultRegistry()
 	if err != nil {
 		pool.Close()
 		t.Fatal(err)
 	}
+	policies := store.NewPolicyStore(pool, events, &policyruntime.Resolver{Lookup: func(ref contracts.ValidatorRef) bool {
+		_, ok := registry.Lookup(ref)
+		return ok
+	}})
+	changeStore := store.NewRepositoryChangeStore(pool, events, artifacts)
+	changeStore.SetPolicyStore(policies)
+	changes := change.NewService(changeStore, artifacts)
+	changes.SetReceiptStore(receipts)
+	validations := store.NewValidationStore(pool, events, store.NewEvidenceStore(pool), artifacts, store.NewObservabilityStore(pool))
+	validations.SetReceiptStore(receipts)
+	validations.SetPolicyStore(policies)
 	runtime := &validationruntime.Service{Registry: registry, Runs: validations, Discovery: ingest.Discover}
-	integration := &validationIntegration{pool: pool, workspace: workspace, root: root, actor: actor, changes: changes, validations: validations, runtime: runtime}
+	integration := &validationIntegration{pool: pool, workspace: workspace, root: root, actor: actor, changes: changes, validations: validations, runtime: runtime, policies: policies}
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cleanupCancel()
@@ -94,6 +103,13 @@ func newValidationIntegration(t *testing.T) *validationIntegration {
 			`DELETE FROM fornix.artifacts WHERE workspace_id=$1`,
 			`DELETE FROM fornix.control_events WHERE workspace_id=$1`,
 			`DELETE FROM fornix.idempotency_records WHERE workspace_id=$1`,
+			`DELETE FROM fornix.validation_policy_defaults WHERE workspace_id=$1`,
+			`DELETE FROM fornix.validation_policy_idempotency WHERE workspace_id=$1`,
+			`DELETE FROM fornix.validation_policy_audit WHERE workspace_id=$1`,
+			`DELETE FROM fornix.validation_policy_transitions WHERE workspace_id=$1`,
+			`DELETE FROM fornix.validation_policy_rules WHERE workspace_id=$1`,
+			`DELETE FROM fornix.validation_policy_versions WHERE workspace_id=$1`,
+			`DELETE FROM fornix.validation_policies WHERE workspace_id=$1`,
 		} {
 			_, _ = pool.Exec(cleanupCtx, query, workspace)
 		}
@@ -224,6 +240,83 @@ func TestValidationEndToEndIsIdempotentReplayableAndReceiptBacked(t *testing.T) 
 	}
 	if _, err := integration.validations.Get(context.Background(), integration.workspace+"-foreign", first.Run.ID); !errors.Is(err, store.ErrValidationNotFound) {
 		t.Fatalf("cross-workspace validation read error = %v", err)
+	}
+}
+
+func TestValidationPinsWorkspaceDefaultPolicyAndReplaysItsReference(t *testing.T) {
+	integration := newValidationIntegration(t)
+	pack := policyPack(integration.workspace, "1")
+	pack.PolicyID = "validation-admission"
+	pack.Approval.Mode = contracts.PolicyApprovalAutomatic
+	policy, created, err := integration.policies.Create(context.Background(), contracts.PolicyCreateRequest{WorkspaceID: integration.workspace, RequestID: "policy-create-validation", IdempotencyKey: "policy-create-validation", Actor: integration.actor, Pack: pack})
+	if err != nil || !created {
+		t.Fatalf("policy create = %+v, created=%v, err=%v", policy, created, err)
+	}
+	if _, _, err := integration.policies.Activate(context.Background(), contracts.PolicyLifecycleRequest{WorkspaceID: integration.workspace, Policy: policy.Pack.Ref(), RequestID: "policy-activate-validation", IdempotencyKey: "policy-activate-validation", Actor: integration.actor}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := integration.policies.SetDefault(context.Background(), contracts.PolicyLifecycleRequest{WorkspaceID: integration.workspace, Policy: policy.Pack.Ref(), RequestID: "policy-default-validation", IdempotencyKey: "policy-default-validation", Actor: integration.actor}); err != nil {
+		t.Fatal(err)
+	}
+	application, proposal := integration.appliedChange(t, "default-policy")
+	result, err := integration.runtime.Validate(context.Background(), validationRequest(integration, application, proposal, "default-policy-validation"), integration.root, integration.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Run.Policy == nil || result.Run.Policy.PolicyHash != policy.PolicyHash || result.Run.Report == nil || result.Run.Report.Policy == nil || result.Run.Report.Policy.PolicyHash != policy.PolicyHash {
+		t.Fatalf("validation policy reference was not preserved: run=%+v report=%+v", result.Run, result.Run.Report)
+	}
+	if result.Handoff != nil {
+		t.Fatalf("policy with require_reindex=false unexpectedly created a handoff: %+v", result.Handoff)
+	}
+	var handoffCount int
+	if err := integration.pool.QueryRow(context.Background(), `SELECT count(*) FROM fornix.reindex_handoffs WHERE workspace_id=$1 AND validation_run_id=$2`, integration.workspace, result.Run.ID).Scan(&handoffCount); err != nil {
+		t.Fatal(err)
+	}
+	if handoffCount != 0 {
+		t.Fatalf("policy with require_reindex=false persisted %d handoffs", handoffCount)
+	}
+	replay, err := integration.validations.Replay(context.Background(), contracts.ValidationReplayRequest{WorkspaceID: integration.workspace, ValidationRunID: result.Run.ID, Limit: 32})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if replay.ReplayHash != result.Run.ReplayHash || len(replay.Events) != 2 {
+		t.Fatalf("policy validation replay changed: %+v", replay)
+	}
+	for _, event := range replay.Events {
+		if event.Policy == nil || event.Policy.PolicyHash != policy.PolicyHash {
+			t.Fatalf("replayed event lost policy reference: %+v", event)
+		}
+	}
+
+	// A later immutable version can tighten the workflow by requiring the
+	// re-index handoff. Activation and default binding are separate so the
+	// test also verifies that only the selected workspace default controls new
+	// admissions.
+	reindexPack := policyPack(integration.workspace, "2")
+	reindexPack.PolicyID = policy.PolicyID
+	reindexPack.RequireReindex = true
+	reindexPack.Approval.Mode = contracts.PolicyApprovalAutomatic
+	reindexPolicy, created, err := integration.policies.Create(context.Background(), contracts.PolicyCreateRequest{
+		WorkspaceID: integration.workspace, RequestID: "policy-create-reindex", IdempotencyKey: "policy-create-reindex", Actor: integration.actor, Pack: reindexPack,
+	})
+	if err != nil || !created {
+		t.Fatalf("reindex policy create = %+v, created=%v, err=%v", reindexPolicy, created, err)
+	}
+	if _, _, err := integration.policies.Activate(context.Background(), contracts.PolicyLifecycleRequest{WorkspaceID: integration.workspace, Policy: reindexPolicy.Pack.Ref(), RequestID: "policy-activate-reindex", IdempotencyKey: "policy-activate-reindex", Actor: integration.actor}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := integration.policies.SetDefault(context.Background(), contracts.PolicyLifecycleRequest{WorkspaceID: integration.workspace, Policy: reindexPolicy.Pack.Ref(), RequestID: "policy-default-reindex", IdempotencyKey: "policy-default-reindex", Actor: integration.actor}); err != nil {
+		t.Fatal(err)
+	}
+	integration.root = t.TempDir()
+	reindexApplication, reindexProposal := integration.appliedChange(t, "default-policy-reindex")
+	reindexed, err := integration.runtime.Validate(context.Background(), validationRequest(integration, reindexApplication, reindexProposal, "default-policy-reindex-validation"), integration.root, integration.root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reindexed.Handoff == nil || reindexed.Handoff.Policy == nil || reindexed.Handoff.Policy.PolicyHash != reindexPolicy.PolicyHash {
+		t.Fatalf("policy with require_reindex=true did not create a pinned handoff: %+v", reindexed.Handoff)
 	}
 }
 

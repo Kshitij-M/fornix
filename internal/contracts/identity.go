@@ -60,6 +60,12 @@ const (
 	PermissionChangeApply     Permission = "change:apply"
 	PermissionChangeValidate  Permission = "change:validate"
 	PermissionChangeDisclose  Permission = "change:disclose"
+	PermissionPolicyRead      Permission = "policy:read"
+	PermissionPolicyCreate    Permission = "policy:create"
+	PermissionPolicyActivate  Permission = "policy:activate"
+	PermissionPolicyRetire    Permission = "policy:retire"
+	PermissionPolicyResolve   Permission = "policy:resolve"
+	PermissionPolicyCompare   Permission = "policy:compare"
 )
 
 // AdminWildcard is written with no whitespace on the wire. The named
@@ -73,7 +79,7 @@ var knownPermissions = map[Permission]struct{}{
 	PermissionEvidenceRead: {}, PermissionEvidenceWrite: {},
 	PermissionAgentRun: {}, PermissionAgentRead: {}, PermissionSchedulerRun: {},
 	PermissionWorkspaceRead: {}, PermissionWorkspaceWrite: {},
-	PermissionIdentityAdmin: {}, PermissionCredentialUse: {}, PermissionEvaluationRead: {}, PermissionEvaluationRun: {}, PermissionEvaluationWrite: {}, PermissionReceiptRead: {}, PermissionReceiptWrite: {}, PermissionChangeRead: {}, PermissionChangePropose: {}, PermissionChangeApprove: {}, PermissionChangeApply: {}, PermissionChangeValidate: {}, PermissionChangeDisclose: {}, AdminWildcard: {},
+	PermissionIdentityAdmin: {}, PermissionCredentialUse: {}, PermissionEvaluationRead: {}, PermissionEvaluationRun: {}, PermissionEvaluationWrite: {}, PermissionReceiptRead: {}, PermissionReceiptWrite: {}, PermissionChangeRead: {}, PermissionChangePropose: {}, PermissionChangeApprove: {}, PermissionChangeApply: {}, PermissionChangeValidate: {}, PermissionChangeDisclose: {}, PermissionPolicyRead: {}, PermissionPolicyCreate: {}, PermissionPolicyActivate: {}, PermissionPolicyRetire: {}, PermissionPolicyResolve: {}, PermissionPolicyCompare: {}, AdminWildcard: {},
 }
 
 // Principal is the authenticated caller presented to authorization checks.

@@ -25,6 +25,7 @@ import traceback
 from typing import Any
 from urllib import request as urlreq
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 
 FORNIX_URL = os.environ.get("FORNIX_URL", "http://localhost:8201").rstrip("/")
 FORNIX_KEY = os.environ.get("FORNIX_KEY", "")
@@ -258,6 +259,109 @@ def tool_change_disclose(args: dict) -> dict:
     if args.get("application_id"):
         body["application_id"] = args["application_id"]
     return _call("POST", "/v1/changes/disclose", body)
+
+
+def _policy_ref(args: dict, prefix: str = "") -> dict:
+    return {
+        "workspace_id": FORNIX_WORKSPACE,
+        "policy_id": str(args.get(prefix + "policy_id") or args.get(prefix + "id") or ""),
+        "version": str(args.get(prefix + "version") or "1"),
+        "policy_hash": str(args.get(prefix + "policy_hash") or args.get(prefix + "hash") or ""),
+    }
+
+
+def _policy_path(policy_id: str, version: str) -> str:
+    return f"/v1/policies/{quote(str(policy_id), safe='')}/{quote(str(version), safe='')}"
+
+
+def tool_policy_list(args: dict) -> dict:
+    limit = min(max(int(args.get("limit") or 50), 1), 100)
+    path = f"/v1/policies?workspace_id={quote(FORNIX_WORKSPACE, safe='')}&limit={limit}"
+    if args.get("cursor"):
+        path += "&cursor=" + quote(str(args["cursor"]), safe="")
+    return _call("GET", path)
+
+
+def tool_policy_get(args: dict) -> dict:
+    policy_id = str(args.get("policy_id") or "").strip()
+    version = str(args.get("version") or "1").strip()
+    if not policy_id:
+        raise ValueError("policy_id required")
+    return _call("GET", _policy_path(policy_id, version) + "?workspace_id=" + quote(FORNIX_WORKSPACE, safe=""))
+
+
+def tool_policy_create(args: dict) -> dict:
+    policy_id = str(args.get("policy_id") or "default").strip()
+    version = str(args.get("version") or "1").strip()
+    rules = []
+    for raw in list(args.get("validators") or []):
+        parts = str(raw).split("@", 1)
+        rules.append({"validator": {"id": parts[0].strip(), "version": parts[1].strip() if len(parts) == 2 else "1"}, "required": True})
+    key = str(args.get("idempotency_key") or f"policy:create:{FORNIX_WORKSPACE}:{policy_id}:{version}")
+    return _call("POST", "/v1/policies", {
+        "workspace_id": FORNIX_WORKSPACE,
+        "idempotency_key": key,
+        "pack": {
+            "workspace_id": FORNIX_WORKSPACE, "policy_id": policy_id, "version": version,
+            "rules": rules,
+            "approval": {"mode": str(args.get("approval") or "required")},
+            "require_reindex": bool(args.get("require_reindex", False)),
+        },
+    }, key)
+
+
+def tool_policy_lifecycle(args: dict, operation: str) -> dict:
+    policy_id = str(args.get("policy_id") or "").strip()
+    version = str(args.get("version") or "1").strip()
+    if not policy_id:
+        raise ValueError("policy_id required")
+    key = str(args.get("idempotency_key") or f"policy:{operation}:{FORNIX_WORKSPACE}:{policy_id}:{version}")
+    return _call("POST", _policy_path(policy_id, version) + "/" + operation, {
+        "workspace_id": FORNIX_WORKSPACE,
+        "policy_hash": str(args.get("policy_hash") or ""),
+        "reason": str(args.get("reason") or "MCP policy operation"),
+        "idempotency_key": key,
+    }, key)
+
+
+def tool_policy_activate(args: dict) -> dict:
+    return tool_policy_lifecycle(args, "activate")
+
+
+def tool_policy_default(args: dict) -> dict:
+    return tool_policy_lifecycle(args, "default")
+
+
+def tool_policy_retire(args: dict) -> dict:
+    return tool_policy_lifecycle(args, "retire")
+
+
+def tool_policy_resolve(args: dict, dry_run: bool = False) -> dict:
+    body = {"workspace_id": FORNIX_WORKSPACE, "requested_approval_mode": str(args.get("approval") or "")}
+    if args.get("policy_id") or args.get("id"):
+        body["policy"] = _policy_ref(args)
+    path = "/v1/policies/dry-run-resolve" if dry_run else "/v1/policies/resolve"
+    return _call("POST", path, body)
+
+
+def tool_policy_compare(args: dict) -> dict:
+    return _call("POST", "/v1/policies/compare", {
+        "workspace_id": FORNIX_WORKSPACE,
+        "left": _policy_ref(args, "left_"),
+        "right": _policy_ref(args, "right_"),
+    })
+
+
+def tool_policy_audit(args: dict) -> dict:
+    limit = min(max(int(args.get("limit") or 50), 1), 100)
+    path = f"/v1/policies/audit?workspace_id={quote(FORNIX_WORKSPACE, safe='')}&limit={limit}"
+    if args.get("policy_id"):
+        path += "&policy_id=" + quote(str(args["policy_id"]), safe="")
+    if args.get("version"):
+        path += "&version=" + quote(str(args["version"]), safe="")
+    if args.get("cursor"):
+        path += "&cursor=" + quote(str(args["cursor"]), safe="")
+    return _call("GET", path)
 
 
 def tool_validation_run(args: dict) -> dict:
@@ -594,6 +698,66 @@ TOOLS = [
         "description": "Read a bounded hash-preserving proposal or application disclosure.",
         "inputSchema": {"type": "object", "properties": {"proposal_id": {"type": "string"}, "application_id": {"type": "string"}, "level": {"type": "string", "enum": ["gist", "detail", "raw"]}, "max_bytes": {"type": "integer", "maximum": 1048576}, "max_items": {"type": "integer", "maximum": 100}}},
         "fn": tool_change_disclose,
+    },
+    {
+        "name": "fornix__policy_list",
+        "description": "List immutable workspace-scoped validation policy versions.",
+        "inputSchema": {"type": "object", "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 100}, "cursor": {"type": "string"}}, "additionalProperties": False},
+        "fn": tool_policy_list,
+    },
+    {
+        "name": "fornix__policy_get",
+        "description": "Read one exact validation policy version, including lifecycle status and hash.",
+        "inputSchema": {"type": "object", "properties": {"policy_id": {"type": "string"}, "version": {"type": "string"}}, "required": ["policy_id"], "additionalProperties": False},
+        "fn": tool_policy_get,
+    },
+    {
+        "name": "fornix__policy_create",
+        "description": "Create an immutable declarative validation policy version.",
+        "inputSchema": {"type": "object", "properties": {"policy_id": {"type": "string"}, "version": {"type": "string"}, "validators": {"type": "array", "items": {"type": "string"}}, "approval": {"type": "string", "enum": ["automatic", "required", "denied"]}, "require_reindex": {"type": "boolean"}, "idempotency_key": {"type": "string"}}, "additionalProperties": False},
+        "fn": tool_policy_create,
+    },
+    {
+        "name": "fornix__policy_activate",
+        "description": "Activate an exact policy version; the previous active version is retired transactionally.",
+        "inputSchema": {"type": "object", "properties": {"policy_id": {"type": "string"}, "version": {"type": "string"}, "policy_hash": {"type": "string"}, "reason": {"type": "string"}, "idempotency_key": {"type": "string"}}, "required": ["policy_id", "version"], "additionalProperties": False},
+        "fn": tool_policy_activate,
+    },
+    {
+        "name": "fornix__policy_default",
+        "description": "Bind the workspace default to one active exact policy version.",
+        "inputSchema": {"type": "object", "properties": {"policy_id": {"type": "string"}, "version": {"type": "string"}, "policy_hash": {"type": "string"}, "reason": {"type": "string"}, "idempotency_key": {"type": "string"}}, "required": ["policy_id", "version"], "additionalProperties": False},
+        "fn": tool_policy_default,
+    },
+    {
+        "name": "fornix__policy_retire",
+        "description": "Retire a policy version so it cannot admit new work.",
+        "inputSchema": {"type": "object", "properties": {"policy_id": {"type": "string"}, "version": {"type": "string"}, "policy_hash": {"type": "string"}, "reason": {"type": "string"}, "idempotency_key": {"type": "string"}}, "required": ["policy_id", "version"], "additionalProperties": False},
+        "fn": tool_policy_retire,
+    },
+    {
+        "name": "fornix__policy_resolve",
+        "description": "Resolve the active/default policy into deterministic validators, budgets, and approval requirements.",
+        "inputSchema": {"type": "object", "properties": {"policy_id": {"type": "string"}, "version": {"type": "string"}, "policy_hash": {"type": "string"}, "approval": {"type": "string", "enum": ["automatic", "required", "denied"]}}, "additionalProperties": False},
+        "fn": tool_policy_resolve,
+    },
+    {
+        "name": "fornix__policy_dry_run_resolve",
+        "description": "Resolve policy admission without a durable mutation.",
+        "inputSchema": {"type": "object", "properties": {"policy_id": {"type": "string"}, "version": {"type": "string"}, "policy_hash": {"type": "string"}, "approval": {"type": "string", "enum": ["automatic", "required", "denied"]}}, "additionalProperties": False},
+        "fn": lambda args: tool_policy_resolve(args, True),
+    },
+    {
+        "name": "fornix__policy_compare",
+        "description": "Compare two immutable policy bodies by stable field names and hash.",
+        "inputSchema": {"type": "object", "properties": {"left_policy_id": {"type": "string"}, "left_version": {"type": "string"}, "left_policy_hash": {"type": "string"}, "right_policy_id": {"type": "string"}, "right_version": {"type": "string"}, "right_policy_hash": {"type": "string"}}, "required": ["left_policy_id", "right_policy_id"], "additionalProperties": False},
+        "fn": tool_policy_compare,
+    },
+    {
+        "name": "fornix__policy_audit",
+        "description": "Read bounded append-only policy lifecycle audit history.",
+        "inputSchema": {"type": "object", "properties": {"policy_id": {"type": "string"}, "version": {"type": "string"}, "limit": {"type": "integer", "minimum": 1, "maximum": 100}, "cursor": {"type": "string"}}, "additionalProperties": False},
+        "fn": tool_policy_audit,
     },
     {
         "name": "fornix__validation_run",
