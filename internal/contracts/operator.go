@@ -167,7 +167,8 @@ func (r WorkspaceBootstrapRequest) Normalize() (WorkspaceBootstrapRequest, error
 			PermissionEvidenceRead, PermissionEvidenceWrite, PermissionAgentRun,
 			PermissionAgentRead, PermissionModelInvoke, PermissionToolExecute,
 			PermissionToolApprove, PermissionEvaluationRead, PermissionEvaluationRun,
-			PermissionEvaluationWrite, PermissionSchedulerRun,
+			PermissionEvaluationWrite, PermissionReceiptRead, PermissionReceiptWrite,
+			PermissionSchedulerRun,
 		}
 	}
 	r.Permissions = permissions

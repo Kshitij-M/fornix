@@ -1,0 +1,61 @@
+# Embedded Fornix local-runtime manifest. Credential values are supplied at
+# execution time and are never rendered into this file.
+services:
+  db:
+    image: "{{POSTGRES_IMAGE}}"
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "fornix"
+      POSTGRES_USER: "fornix"
+      POSTGRES_PASSWORD: "${FORNIX_DATABASE_PASSWORD:?FORNIX_DATABASE_PASSWORD is required}"
+    volumes:
+      - fornix-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fornix -d fornix"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    networks:
+      - fornix-internal
+
+  fornix:
+    image: "{{FORNIX_IMAGE}}"
+    restart: unless-stopped
+    command: ["serve"]
+    environment:
+      FORNIX_AUTH_MODE: "workspace"
+      FORNIX_WORKER_ENABLED: "${FORNIX_WORKER_ENABLED:-true}"
+      FORNIX_ENV: "production"
+      FORNIX_LISTEN: ":8201"
+      FORNIX_BOOTSTRAP_KEY: "${FORNIX_BOOTSTRAP_KEY:?FORNIX_BOOTSTRAP_KEY is required}"
+      FORNIX_PG_DSN: "postgres://fornix:${FORNIX_DATABASE_PASSWORD}@db:5432/fornix?sslmode=disable"
+      FORNIX_OPENAI_ENABLED: "${FORNIX_OPENAI_ENABLED:-false}"
+      FORNIX_OPENAI_API_KEY: "${FORNIX_OPENAI_API_KEY:-}"
+      FORNIX_OPENAI_BASE_URL: "${FORNIX_OPENAI_BASE_URL:-https://api.openai.com/v1}"
+      FORNIX_OPENAI_MODEL: "${FORNIX_OPENAI_MODEL:-gpt-4o-mini}"
+{{REPOSITORY_VOLUME}}
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:{{APP_PORT}}:8201"
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/fornix", "--url", "http://127.0.0.1:8201", "health"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      - fornix-internal
+
+networks:
+  fornix-internal:
+    # The application is reachable only through the loopback-bound host port.
+    # The network is intentionally not marked internal so an explicitly
+    # enabled remote model provider can reach its API; the database has no
+    # host port and remains reachable only by the application service.
+    driver: bridge
+
+volumes:
+  fornix-postgres-data:

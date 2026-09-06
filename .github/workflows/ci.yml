@@ -35,6 +35,10 @@ jobs:
         run: make vet
       - name: Build binaries
         run: make build
+      - name: Smoke test the packaged CLI contract
+        run: make smoke-local-cli
+      - name: Validate installer shell syntax
+        run: sh -n scripts/install.sh
 
   python:
     name: Python helper checks
@@ -133,6 +137,10 @@ jobs:
           FORNIX_KEY: fornix-ci-test-key
           FORNIX_TASK_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
         run: scripts/test/v0.14-task-smokes.sh
+      - name: Run task creation idempotency integration test
+        env:
+          FORNIX_TEST_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+        run: go test ./internal/store -run '^TestTaskCreateIdempotency' -count=1 -v
       - name: Run retrieval integration tests
         env:
           FORNIX_TEST_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
@@ -303,6 +311,30 @@ jobs:
           FORNIX_URL: http://localhost:8201
           FORNIX_KEY: fornix-ci-test-key
         run: scripts/test/v0.33-policy-smokes.sh
+
+  local-runtime:
+    name: Managed local runtime smoke
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.25.13'
+          cache: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+      - name: Build the local Fornix image
+        run: docker build --tag fornix-local:ci .
+      - name: Run the disposable CLI/runtime workflow
+        env:
+          FORNIX_LOCAL_IMAGE: fornix-local:ci
+          FORNIX_RUNTIME_PROJECT: fornix-local-ci
+          FORNIX_LOCAL_PORT: '18281'
+        run: scripts/test/v0.35-local-runtime-smokes.sh
 
   vulnerabilities:
     name: Vulnerability scan

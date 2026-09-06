@@ -13,6 +13,7 @@ PYTHON_ENV_BIN := $(PYTHON_VENV)/bin/python
 PYTHON_BIN := $(if $(wildcard $(PYTHON_ENV_BIN)),$(PYTHON_ENV_BIN),$(PYTHON))
 PYTHON_CHECK_BIN := $(if $(wildcard $(PYTHON_BIN)),$(PYTHON_BIN),$(PYTHON))
 FORNIX_URL ?= http://localhost:8201
+DOCKER ?= docker
 # Keep local smokes authenticated when .env is absent. An explicit environment
 # or command-line value still wins, while the fallback matches CI and the
 # development-only key used by the smoke scripts.
@@ -23,7 +24,7 @@ FORNIX_REFERENCE_WORKDIR ?= /workspace/fixtures/reference-repo
 PROJECTION_PG_DSN ?= postgres://fornix:fornix-dev-only@host.docker.internal:55433/fornix?sslmode=disable
 FORNIX_TEST_PG_DSN ?=
 
-.PHONY: fmt fmt-check test test-race vet build python-install python-check docs-check check verify hooks-install install-hooks hooks-uninstall uninstall-hooks hooks-check smoke smoke-events smoke-projection smoke-leases smoke-tasks smoke-retrieval smoke-provenance smoke-model smoke-tools smoke-agent smoke-scheduler smoke-identity smoke-artifacts smoke-artifact-output smoke-observability smoke-retrieval-quality smoke-retrieval-evaluation smoke-reference-workflow smoke-reference-openai smoke-ingestion smoke-work-receipts smoke-changes smoke-validation smoke-policy operator-reference dev-up dev-up-ai dev-up-watcher dev-run dev-logs dev-down
+.PHONY: fmt fmt-check test test-race vet build package-check python-install python-check docs-check check verify hooks-install install-hooks hooks-uninstall uninstall-hooks hooks-check smoke smoke-local-cli smoke-local-runtime smoke-events smoke-projection smoke-leases smoke-tasks smoke-retrieval smoke-provenance smoke-model smoke-tools smoke-agent smoke-scheduler smoke-identity smoke-artifacts smoke-artifact-output smoke-observability smoke-retrieval-quality smoke-retrieval-evaluation smoke-reference-workflow smoke-reference-openai smoke-ingestion smoke-work-receipts smoke-changes smoke-validation smoke-policy operator-reference dev-up dev-up-ai dev-up-watcher dev-run dev-logs dev-down
 
 fmt:
 	$(GOFMT_CMD) -w $(GO_FILES)
@@ -50,6 +51,11 @@ build:
 	$(GO_CMD) build -trimpath -o bin/fornix ./cmd/fornix
 	$(GO_CMD) build -trimpath -o bin/fornix-watcher ./cmd/fornix-watcher
 	$(GO_CMD) build -trimpath -o bin/fornix-eval ./cmd/fornix-eval
+
+package-check:
+	sh -n scripts/install.sh
+	@test -x scripts/install.sh
+	$(GO_CMD) test ./cmd/fornix ./internal/credentials ./internal/profile ./internal/runtime -count=1
 
 python-install:
 	$(PYTHON) -m venv $(PYTHON_VENV)
@@ -159,8 +165,16 @@ smoke:
 	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_REFERENCE_WORKDIR=$(FORNIX_REFERENCE_WORKDIR) scripts/test/v0.31-change-smokes.sh
 	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) FORNIX_REFERENCE_WORKDIR=$(FORNIX_REFERENCE_WORKDIR) scripts/test/v0.32-validation-smokes.sh
 	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) scripts/test/v0.33-policy-smokes.sh
+	$(MAKE) smoke-local-cli
 
-check: fmt-check test vet python-check docs-check
+check: fmt-check test vet python-check docs-check package-check
+
+smoke-local-cli: build
+	scripts/test/v0.34-local-cli-smokes.sh
+
+smoke-local-runtime: build
+	$(DOCKER) build --tag $${FORNIX_LOCAL_IMAGE:-fornix-local:smoke} .
+	FORNIX_LOCAL_IMAGE=$${FORNIX_LOCAL_IMAGE:-fornix-local:smoke} scripts/test/v0.35-local-runtime-smokes.sh
 
 verify: check test-race build
 
