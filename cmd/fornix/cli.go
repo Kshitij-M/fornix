@@ -8,26 +8,42 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/omaveda/fornix/internal/contracts"
+	"github.com/omaveda/fornix/internal/version"
 )
 
 type operatorCLI struct {
-	baseURL      string
-	key          string
-	bootstrapKey string
-	workspace    string
-	jsonOutput   bool
-	client       *http.Client
+	baseURL        string
+	key            string
+	bootstrapKey   string
+	workspace      string
+	jsonOutput     bool
+	suppressOutput bool
+	lastResponse   map[string]any
+	client         *http.Client
 }
 
 func runCLI(args []string) error {
 	if len(args) > 0 && args[0] == "serve" {
 		return errors.New("serve is handled by the main server entrypoint")
+	}
+	if isLocalCommand(args) {
+		return runLocalCLI(args)
+	}
+	if len(args) == 0 || args[0] == "help" || args[0] == "--help" || args[0] == "-h" {
+		printCLIHelp()
+		return nil
+	}
+	if args[0] == "version" {
+		return printVersionCommand(args[1:])
 	}
 	fs := flag.NewFlagSet("fornix", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -37,6 +53,10 @@ func runCLI(args []string) error {
 	workspaceFlag := fs.String("workspace", envOr("FORNIX_WORKSPACE_ID", "default"), "workspace scope")
 	jsonFlag := fs.Bool("json", true, "emit JSON")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			printCLIHelp()
+			return nil
+		}
 		return err
 	}
 	cli := &operatorCLI{baseURL: strings.TrimRight(*urlFlag, "/"), key: *keyFlag, bootstrapKey: *bootstrapFlag, workspace: *workspaceFlag, jsonOutput: *jsonFlag, client: &http.Client{Timeout: 90 * time.Second}}
@@ -89,7 +109,82 @@ func runCLI(args []string) error {
 }
 
 func (c *operatorCLI) usage() error {
-	return errors.New("usage: fornix [--url URL] [--key KEY] [--workspace ID] <health|workspace|identity|role|api-key|ingest|task|run|retrieve|evaluation|metrics|artifact|evidence|receipt|change|validation|policy|reference-workflow>")
+	return errors.New("usage: fornix [global flags] <command>; run 'fornix --help' for commands")
+}
+
+func isLocalCommand(args []string) bool {
+	if len(args) == 0 {
+		return false
+	}
+	switch args[0] {
+	case "start", "stop", "restart", "status", "logs", "doctor", "setup", "demo", "upgrade", "uninstall", "support":
+		return true
+	case "run":
+		if len(args) == 1 {
+			return true
+		}
+		switch args[1] {
+		case "get", "replay", "cancel", "list":
+			return false
+		default:
+			return true
+		}
+	default:
+		return false
+	}
+}
+
+func printCLIHelp() {
+	fmt.Fprintln(os.Stdout, `Fornix — verifiable AI work infrastructure
+
+Usage:
+  fornix start [--repo PATH] [--port PORT]
+  fornix run --repo PATH "PROMPT"
+  fornix demo
+
+Local runtime:
+  start       Start the managed local Fornix and PostgreSQL runtime
+  stop        Stop services without deleting data
+  restart     Restart the managed runtime
+  status      Show local service status
+  logs        Show bounded service logs
+  doctor      Run bounded, redacted diagnostics
+  upgrade     Pull and restart the configured runtime
+  uninstall   Stop Fornix; preserve data unless --purge-data is explicit
+
+Work:
+  run         Execute a bounded repository task or inspect an existing run
+  demo        Run the deterministic offline demonstration
+  task        Create, claim, inspect, and complete tasks
+  ingest      Submit and resume repository indexing
+  retrieve    Build a deterministic context pack
+  evaluation  Inspect or run offline evaluations
+  receipt     Inspect Work Receipts
+  artifact    Disclose or verify artifacts
+  evidence    Disclose evidence and provenance
+  change      Propose, approve, apply, and disclose repository changes
+  validation  Run and inspect post-change validation
+  policy      Inspect and resolve validation policy packs
+
+Identity and diagnostics:
+  setup       Bootstrap the local workspace and actor
+  workspace   Manage workspace metadata
+  identity    Manage workspace identities
+  role        Manage role bindings
+  api-key     Manage workspace API keys
+  metrics     Read workspace metrics
+  version     Print build and schema information
+  help        Print this help
+
+Global options:
+  --url URL           Fornix HTTP URL (advanced/remote mode)
+  --key KEY           Workspace API key (prefer the local profile)
+  --workspace ID      Workspace scope
+  --port PORT         Local loopback port (1024-65535)
+  --json              Emit machine-readable JSON for operator commands
+
+The local default uses the deterministic fake provider and does not require a
+model key. Provider credentials are never printed or stored in repositories.`)
 }
 
 func (c *operatorCLI) workspaceCommand(args []string) error {
@@ -224,7 +319,8 @@ func (c *operatorCLI) taskCommand(args []string) error {
 	}
 	switch args[0] {
 	case "create":
-		body := map[string]any{"workspace_id": c.workspace, "title": valueArg(args[1:], "title", "Reference workflow"), "brief": valueArg(args[1:], "brief", "[fornix-reference-workflow] inspect the repository and produce a report"), "required_capabilities": []string{}, "max_attempts": 2}
+		title := valueArg(args[1:], "title", "Reference workflow")
+		body := map[string]any{"workspace_id": c.workspace, "title": title, "brief": valueArg(args[1:], "brief", "[fornix-reference-workflow] inspect the repository and produce a report"), "required_capabilities": []string{}, "max_attempts": 2, "idempotency_key": valueArg(args[1:], "idempotency", "task:create:"+c.workspace+":"+sha256String(title))}
 		return c.requestPrint(http.MethodPost, "/v1/task", body, false)
 	case "get":
 		return c.requestPrint(http.MethodGet, "/v1/task/"+valueArg(args[1:], "id", "")+"?workspace_id="+url.QueryEscape(c.workspace), nil, false)
@@ -525,10 +621,17 @@ func (c *operatorCLI) changeBody(args []string) (map[string]any, error) {
 func (c *operatorCLI) referenceWorkflow(args []string) error {
 	workspace := valueArg(args, "workspace", c.workspace)
 	workdir := valueArg(args, "workdir", valueArg(args, "fixture", envOr("FORNIX_REFERENCE_WORKDIR", "/workspace/fixtures/reference-repo")))
+	repository := valueArg(args, "repository", "reference-repo")
+	goal := valueArg(args, "goal", "[fornix-reference-workflow] Read README.md and summarize the repository.")
+	provider := valueArg(args, "provider", "fake")
+	model := valueArg(args, "model", "fake-model")
+	prefix := valueArg(args, "idempotency-prefix", "reference:"+workspace)
+	sessionID := valueArg(args, "session", "fornix-reference-worker")
+	workflowName := valueArg(args, "workflow", "fornix-reference")
 	c.workspace = workspace
 	// Bootstrap uses the explicit bootstrap credential, and switches to the
 	// newly-created workspace API key only in memory for the remaining calls.
-	bootstrap := map[string]any{"workspace_id": workspace, "display_name": "Fornix Reference Workspace", "subject": "reference-operator", "default_provider": "fake", "tool_root": workdir, "idempotency_key": "reference-bootstrap:" + workspace}
+	bootstrap := map[string]any{"workspace_id": workspace, "display_name": "Fornix Local Workspace", "subject": "local-operator", "default_provider": provider, "tool_root": workdir, "idempotency_key": prefix + ":bootstrap"}
 	bootstrapResponse, err := c.request(http.MethodPost, "/v1/operator/workspaces/bootstrap", bootstrap, true)
 	if err != nil {
 		return err
@@ -536,7 +639,7 @@ func (c *operatorCLI) referenceWorkflow(args []string) error {
 	if token := nestedString(bootstrapResponse, "api_key_token"); token != "" && c.key == "" {
 		c.key = token
 	}
-	ingest, err := c.request(http.MethodPost, "/v1/operator/ingest/jobs", map[string]any{"workspace_id": workspace, "idempotency_key": "reference-ingest:" + workspace, "source": map[string]any{"repository": "reference-repo", "source_root": workdir, "extract_symbols": true, "embedding": map[string]any{"enabled": false}}, "batch_size": 2}, false)
+	ingest, err := c.request(http.MethodPost, "/v1/operator/ingest/jobs", map[string]any{"workspace_id": workspace, "idempotency_key": prefix + ":ingest", "source": map[string]any{"repository": repository, "source_root": workdir, "extract_symbols": true, "embedding": map[string]any{"enabled": false}}, "batch_size": intValue(args, "batch-size", 2)}, false)
 	if err != nil {
 		return err
 	}
@@ -561,7 +664,7 @@ func (c *operatorCLI) referenceWorkflow(args []string) error {
 		if status == "failed" || status == "cancelled" {
 			return fmt.Errorf("reference ingestion ended in %s", status)
 		}
-		if _, err := c.request(http.MethodPost, "/v1/operator/ingest/jobs/"+url.PathEscape(jobID)+"/resume", map[string]any{"workspace_id": workspace, "batch_size": 2, "worker_id": "fornix-reference-ingest-worker"}, false); err != nil {
+		if _, err := c.request(http.MethodPost, "/v1/operator/ingest/jobs/"+url.PathEscape(jobID)+"/resume", map[string]any{"workspace_id": workspace, "batch_size": intValue(args, "batch-size", 2), "worker_id": sessionID + "-ingest"}, false); err != nil {
 			return err
 		}
 	}
@@ -573,28 +676,43 @@ func (c *operatorCLI) referenceWorkflow(args []string) error {
 	if stringValue(job, "status") != "succeeded" {
 		return errors.New("reference ingestion did not reach succeeded")
 	}
-	sessionID := "fornix-reference-worker"
 	if _, err := c.request(http.MethodPost, "/v1/session", map[string]any{"workspace_id": workspace, "id": sessionID, "host": "fornix-cli", "capabilities": []string{"repository.read", "agent.execute"}}, false); err != nil {
 		return err
 	}
-	taskResponse, err := c.request(http.MethodPost, "/v1/task", map[string]any{"workspace_id": workspace, "title": "Reference repository report", "brief": "[fornix-reference-workflow] inspect README.md and produce a bounded report", "required_capabilities": []string{}, "created_by": "reference-operator", "max_attempts": 2}, false)
+	taskResponse, err := c.request(http.MethodPost, "/v1/task", map[string]any{"workspace_id": workspace, "title": "Fornix repository report", "brief": goal, "required_capabilities": []string{}, "created_by": "local-operator", "max_attempts": 2, "idempotency_key": prefix + ":task"}, false)
 	if err != nil {
 		return err
 	}
 	taskID := stringValue(taskResponse, "id")
-	claim, err := c.request(http.MethodPost, "/v1/task/claim", map[string]any{"workspace_id": workspace, "session_id": sessionID, "lease_ttl_ms": 120000}, false)
+	if taskID == "" {
+		return errors.New("reference workflow did not return a task id")
+	}
+	taskState, err := c.request(http.MethodGet, "/v1/task/"+url.PathEscape(taskID)+"?workspace_id="+url.QueryEscape(workspace), nil, false)
 	if err != nil {
 		return err
 	}
-	fence := uint64ValueFromResponse(claim, "fence")
+	claim := taskState
+	fence := uint64ValueFromResponse(taskState, "execution_fence")
+	status := stringValue(taskState, "status")
+	assignedSession := stringValue(taskState, "assigned_session")
+	if status != contracts.TaskStatusDone && !(assignedSession == sessionID && fence > 0) {
+		claim, err = c.request(http.MethodPost, "/v1/task/claim", map[string]any{"workspace_id": workspace, "session_id": sessionID, "task_id": int64ValueFromString(taskID), "lease_ttl_ms": 120000}, false)
+		if err != nil {
+			return err
+		}
+		fence = uint64ValueFromResponse(claim, "fence")
+	}
+	if fence == 0 {
+		return errors.New("reference workflow did not obtain a task fence")
+	}
 	runRequest := map[string]any{
-		"workspace_id": workspace, "idempotency_key": "reference-run:" + taskID, "goal": "[fornix-reference-workflow] workdir=" + workdir + " Read README.md and summarize the repository.",
-		"provider": map[string]any{"provider": "fake", "model": "fake-model"},
+		"workspace_id": workspace, "idempotency_key": prefix + ":run", "goal": goal,
+		"provider": map[string]any{"provider": provider, "model": model},
 		"task":     map[string]any{"id": taskID, "kind": "task", "workspace_id": workspace},
 		"session":  map[string]any{"id": sessionID, "kind": "session", "workspace_id": workspace}, "task_owner_id": sessionID, "task_fence": fence,
 		"tools":     []any{map[string]any{"name": "fornix.repository.read", "description": "read repository files", "parameters": map[string]any{"type": "object"}}},
-		"retrieval": map[string]any{"workspace_id": workspace, "query": "README repository overview", "repo": "reference-repo", "max_items": 8, "max_bytes": 8192, "max_tokens": 2048},
-		"budget":    map[string]any{"max_turns": 3, "max_model_steps": 4, "max_tool_calls": 2, "max_context_bytes": 32768, "max_output_tokens": 512, "max_wall_time_ms": 30000, "max_cost_usd": 1, "max_tool_attempts": 1},
+		"retrieval": map[string]any{"workspace_id": workspace, "query": valueArg(args, "query", "README repository overview"), "repo": repository, "max_items": 8, "max_bytes": intValue(args, "max-context-bytes", 8192), "max_tokens": intValue(args, "max-context-tokens", 2048)},
+		"budget":    map[string]any{"max_turns": intValue(args, "max-turns", 3), "max_model_steps": 4, "max_tool_calls": 2, "max_context_bytes": intValue(args, "max-context-bytes", 32768), "max_output_tokens": intValue(args, "max-output-tokens", 512), "max_wall_time_ms": durationMS(args, "max-time", 30*time.Second), "max_cost_usd": floatValue(args, "max-cost", 1), "max_tool_attempts": 1},
 	}
 	runResponse, err := c.request(http.MethodPost, "/v1/agent/run", runRequest, false)
 	if err != nil {
@@ -611,16 +729,22 @@ func (c *operatorCLI) referenceWorkflow(args []string) error {
 	if raw, ok := runResponse["run"].(map[string]any); ok {
 		run = raw
 	}
-	report, _ := json.Marshal(map[string]any{"workflow": "fornix-reference", "task_id": taskID, "run_id": runID, "manifest_hash": manifestHash, "output": run["last_output"], "context_hash": run["context_hash"], "state_hash": run["state_hash"]})
-	artifact, err := c.request(http.MethodPost, "/v1/artifacts", map[string]any{"workspace_id": workspace, "kind": "reference-report", "media_type": "application/json", "raw": report, "source_kind": "agent_run", "source_id": runID, "role": "report", "idempotency_key": "reference-report:" + runID}, false)
+	if state := stringValue(run, "state"); state != contracts.AgentRunSucceeded {
+		if state == "" {
+			return errors.New("reference workflow did not return an agent run state")
+		}
+		return fmt.Errorf("reference workflow agent run ended in %s", state)
+	}
+	report, _ := json.Marshal(map[string]any{"workflow": workflowName, "task_id": taskID, "run_id": runID, "manifest_hash": manifestHash, "output": run["last_output"], "context_hash": run["context_hash"], "state_hash": run["state_hash"]})
+	artifact, err := c.request(http.MethodPost, "/v1/artifacts", map[string]any{"workspace_id": workspace, "kind": "fornix-report", "media_type": "application/json", "raw": report, "source_kind": "agent_run", "source_id": runID, "role": "report", "idempotency_key": prefix + ":report"}, false)
 	if err != nil {
 		return err
 	}
-	evidence, err := c.request(http.MethodPost, "/v1/evidence", map[string]any{"workspace_id": workspace, "source_reference": "agent-run:" + runID + ":report", "deduplication_key": "reference-report:" + runID, "kind": "agent-report", "media_type": "application/json", "gist": "deterministic reference workflow report", "detail": "artifact-backed report for the reference workflow", "raw_payload": json.RawMessage(report)}, false)
+	evidence, err := c.request(http.MethodPost, "/v1/evidence", map[string]any{"workspace_id": workspace, "source_reference": "agent-run:" + runID + ":report", "deduplication_key": prefix + ":report", "kind": "agent-report", "media_type": "application/json", "gist": "bounded Fornix repository report", "detail": "artifact-backed report for the Fornix local workflow", "raw_payload": json.RawMessage(report)}, false)
 	if err != nil {
 		return err
 	}
-	complete, err := c.request(http.MethodPost, "/v1/task/"+taskID+"/complete", map[string]any{"workspace_id": workspace, "session_id": sessionID, "fence": fence, "status": "done", "result": "report artifact created", "idempotency_key": "reference-task-complete:" + taskID}, false)
+	complete, err := c.request(http.MethodPost, "/v1/task/"+taskID+"/complete", map[string]any{"workspace_id": workspace, "session_id": sessionID, "fence": fence, "status": "done", "result": "report artifact created", "idempotency_key": prefix + ":task-complete"}, false)
 	if err != nil {
 		return err
 	}
@@ -635,7 +759,7 @@ func (c *operatorCLI) referenceWorkflow(args []string) error {
 	}
 	stateHash := stringValue(run, "state_hash")
 	receiptRequest := map[string]any{
-		"workspace_id": workspace, "idempotency_key": "reference-receipt:" + taskID,
+		"workspace_id": workspace, "idempotency_key": prefix + ":receipt",
 		"work_kind": "task", "work_id": taskID,
 		"task":          map[string]any{"id": taskID, "kind": "task", "workspace_id": workspace},
 		"session":       map[string]any{"id": sessionID, "kind": "session", "workspace_id": workspace},
@@ -665,7 +789,12 @@ func (c *operatorCLI) referenceWorkflow(args []string) error {
 	if err != nil {
 		return err
 	}
-	return c.print(map[string]any{"workspace": workspace, "ingest": ingest, "task": taskResponse, "claim": claim, "run": runResponse, "artifact": artifact, "evidence": evidence, "completion": complete, "replay": replay, "replay_verified": replayVerified, "receipt": receipt})
+	result := map[string]any{"workspace": workspace, "ingest": ingest, "task": taskResponse, "claim": claim, "run": runResponse, "artifact": artifact, "evidence": evidence, "completion": complete, "replay": replay, "replay_verified": replayVerified, "receipt": receipt}
+	c.lastResponse = result
+	if c.suppressOutput {
+		return nil
+	}
+	return c.print(result)
 }
 
 func (c *operatorCLI) requestPrint(method, path string, body any, bootstrap bool) error {
@@ -733,6 +862,51 @@ func envOr(name, fallback string) string {
 		return value
 	}
 	return fallback
+}
+
+func printVersionCommand(args []string) error {
+	jsonOutput := false
+	for _, arg := range args {
+		switch arg {
+		case "--json":
+			jsonOutput = true
+		case "--help", "-h":
+			fmt.Fprintln(os.Stdout, "usage: fornix version [--json]")
+			return nil
+		default:
+			return fmt.Errorf("unknown version option %q", arg)
+		}
+	}
+	info := version.Current()
+	if jsonOutput {
+		return printLocalJSON(info)
+	}
+	fmt.Fprintln(os.Stdout, info.String())
+	return nil
+}
+
+func durationMS(args []string, name string, fallback time.Duration) int64 {
+	value := valueArg(args, name, "")
+	if value == "" {
+		return fallback.Milliseconds()
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil || duration <= 0 {
+		return fallback.Milliseconds()
+	}
+	return duration.Milliseconds()
+}
+
+func floatValue(args []string, name string, fallback float64) float64 {
+	value := valueArg(args, name, "")
+	if value == "" {
+		return fallback
+	}
+	parsed, err := strconv.ParseFloat(value, 64)
+	if err != nil || parsed < 0 || math.IsNaN(parsed) || math.IsInf(parsed, 0) {
+		return fallback
+	}
+	return parsed
 }
 func sha256String(value string) string {
 	sum := sha256.Sum256([]byte(value))

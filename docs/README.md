@@ -20,6 +20,7 @@ explains the distinction.
 | What Fornix is and why it exists | [`README.md`](../README.md) |
 | What problem Fornix will own and how the product should feel | [`01-product-vision.md`](01-product-vision.md) |
 | How to run, test, and smoke the service | [`DEVELOPMENT.md`](../DEVELOPMENT.md) |
+| How to install, start, run, and operate the local package | [`63-fornix-local-operations.md`](63-fornix-local-operations.md) |
 | How to contribute a change | [`CONTRIBUTING.md`](../CONTRIBUTING.md) |
 | How to report security concerns | [`SECURITY.md`](../SECURITY.md) |
 | How the project handles community conduct | [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) |
@@ -75,6 +76,15 @@ engineering record for each one.
 | 21 | Approval-gated repository change artifacts and application | [`56-repository-change-foundation.md`](56-repository-change-foundation.md) | [`57-loop-21-completion.md`](57-loop-21-completion.md) |
 | 22 | Deterministic post-change validation and re-index handoff | [`58-validation-foundation.md`](58-validation-foundation.md) | [`59-loop-22-completion.md`](59-loop-22-completion.md) |
 | 23 | Workspace validation policy packs and verified change admission | [`60-validation-policy-packs-foundation.md`](60-validation-policy-packs-foundation.md) | [`61-loop-23-completion.md`](61-loop-23-completion.md) |
+
+## Local package and managed runtime
+
+The current release-blocking workstream is [`62-packaging-distribution-foundation.md`](62-packaging-distribution-foundation.md), implemented by the single-package `fornix` CLI and managed local runtime. [`63-fornix-local-operations.md`](63-fornix-local-operations.md) is the operator-facing guide for the implemented alpha path.
+It is deliberately separate from the numbered implementation loops: users
+need a verified installation and first-run path before the remaining product
+work can be evaluated by the community. Public release hosting, signed
+provenance, native package managers, and production deployment qualification
+remain open release work.
 
 ## Cross-cutting decisions
 

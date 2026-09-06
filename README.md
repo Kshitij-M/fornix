@@ -152,7 +152,46 @@ The [HTTP API reference](docs/53-http-api-reference.md) maps the current
 routes. The [production qualification](docs/14-production-readiness-qualification.md)
 records what has been verified and what remains outside the current slice.
 
-## Quickstart: safe local path
+## Quickstart: Fornix Local
+
+The product path is install, start, run, and inspect. Docker Desktop on macOS
+or Docker Engine plus Compose v2 on Linux is the one host prerequisite; Fornix
+manages the database, migrations, workspace bootstrap, and runtime lifecycle
+after Docker is available.
+
+The public installer endpoint will be enabled with the first signed release.
+Until that release is published, build the same CLI from this checkout:
+
+```sh
+make build
+./bin/fornix doctor
+./bin/fornix start --repo .
+./bin/fornix run --repo . "Explain the architecture of this repository"
+```
+
+The default fake provider is deterministic and offline. To exercise the
+complete local reference workflow, including replay and Work Receipt checks:
+
+```sh
+./bin/fornix demo --repo .
+```
+
+Once the release channel is live, the intended clean-install path is:
+
+```sh
+curl -fsSL https://get.fornix.dev/install.sh | sh
+cd my-repository
+fornix start
+fornix run --repo . "Review this repository and identify the highest-risk issues"
+```
+
+Useful lifecycle commands are `fornix status`, `fornix logs`, `fornix doctor`,
+`fornix stop`, `fornix restart`, `fornix upgrade`, and `fornix uninstall`.
+Read the [Fornix Local operations guide](docs/63-fornix-local-operations.md)
+for profile layout, provider opt-in, budgets, recovery, security boundaries,
+and troubleshooting.
+
+## Quickstart: development services
 
 The default development path uses a fake provider and local Docker services;
 it does not require an OpenAI key or Ollama.

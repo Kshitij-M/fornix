@@ -113,6 +113,33 @@ func TestTaskClaimCompleteDuplicateAndLifecycleEvents(t *testing.T) {
 	}
 }
 
+func TestTaskClaimCanTargetCreatedTask(t *testing.T) {
+	store, pool, workspaceID := newTaskTestStore(t)
+	addTaskSession(t, pool, workspaceID, "target-worker")
+	first, _, err := store.Create(context.Background(), TaskCreateInput{WorkspaceID: workspaceID, Title: "first", Brief: "first", CreatedBy: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	target, _, err := store.Create(context.Background(), TaskCreateInput{WorkspaceID: workspaceID, Title: "target", Brief: "target", CreatedBy: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.ClaimNext(context.Background(), TaskClaimInput{WorkspaceID: workspaceID, SessionID: "target-worker", TaskID: target.ID, LeaseTTL: time.Second})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed.Task.ID != target.ID || claimed.Lease.TaskID != target.ID {
+		t.Fatalf("targeted claim returned task=%d lease_task=%d, want %d", claimed.Task.ID, claimed.Lease.TaskID, target.ID)
+	}
+	untouched, err := store.Get(context.Background(), workspaceID, first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if untouched.Status != contracts.TaskStatusPending {
+		t.Fatalf("non-target task status=%q, want pending", untouched.Status)
+	}
+}
+
 func TestTaskConcurrentClaimsHaveOneWinner(t *testing.T) {
 	store, pool, workspaceID := newTaskTestStore(t)
 	addTaskSession(t, pool, workspaceID, "worker-a")

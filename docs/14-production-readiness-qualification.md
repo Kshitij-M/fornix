@@ -110,6 +110,13 @@ still requires safe patch application and reviewer-facing change validation.
   propagation through changes, validation, handoffs, receipts, events, and
   accounting are covered by Postgres integration tests and authenticated
   policy HTTP/CLI/MCP surfaces.
+- The single-package local operator path is implemented as a native `fornix`
+  CLI with a private profile, owner-only local credential references,
+  deterministic fake-provider defaults, managed Docker/Compose lifecycle,
+  pinned PostgreSQL/pgvector digest, automatic workspace bootstrap, loopback
+  binding, readiness checks, repository mount validation, and redacted
+  diagnostics. A disposable Docker smoke verifies start, the reference
+  workflow, replay, duplicate-run idempotency, and service isolation.
 
 ## Production gaps
 
@@ -151,6 +158,12 @@ still requires safe patch application and reviewer-facing change validation.
   rather than raw prompts or rendered context. The reference workflow now
   consumes a durable bounded repository ingest job; automatic ingest scheduling
   and full parser-quality indexing remain future work.
+- Public release distribution is not yet fully qualified: the checked-in
+  installer needs a signed, hosted release channel, and Homebrew/deb/rpm
+  adapters do not yet exist. Docker remains an explicit macOS/Linux
+  prerequisite. The local profile uses owner-only files rather than an OS
+  keychain or external secret manager, and the managed runtime is single-node
+  without automatic backup/restore or high availability.
 - Policy packs are declarative and limited to the built-in validator catalog.
   They are not a general policy programming language, do not execute arbitrary
   code, and do not yet provide organization-wide policy distribution,

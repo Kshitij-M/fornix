@@ -1,7 +1,10 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -67,6 +70,7 @@ type Task struct {
 // create a task and its direct dependencies.
 type TaskCreateInput struct {
 	WorkspaceID          string
+	IdempotencyKey       string
 	Title                string
 	Brief                string
 	RequiredCapabilities []string
@@ -83,7 +87,12 @@ type TaskClaimInput struct {
 	WorkspaceID string
 	SessionID   string
 	ActorID     string
-	LeaseTTL    time.Duration
+	// TaskID scopes the claim to one previously-created task when non-zero.
+	// Zero retains the worker-queue behavior and claims the oldest eligible
+	// task. Targeted claims prevent a caller from accidentally pairing a
+	// newly-created task with another task's fencing lease.
+	TaskID   int64
+	LeaseTTL time.Duration
 }
 
 // TaskClaimResult returns the claimed task, its fencing lease, and the durable
@@ -174,6 +183,10 @@ func NewTaskStore(pool *pgxpool.Pool, events *EventStore) *TaskStore {
 // event. Dependencies are workspace-local and missing references fail closed.
 func (s *TaskStore) Create(ctx context.Context, input TaskCreateInput) (Task, contracts.EventEnvelope, error) {
 	workspaceID := normalizeWorkspace(input.WorkspaceID)
+	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
+	if len(input.IdempotencyKey) > contracts.MaxIdempotencyLength {
+		return Task{}, contracts.EventEnvelope{}, fmt.Errorf("idempotency_key exceeds %d characters", contracts.MaxIdempotencyLength)
+	}
 	input.Title = strings.TrimSpace(input.Title)
 	input.Brief = strings.TrimSpace(input.Brief)
 	input.CreatedBy = strings.TrimSpace(input.CreatedBy)
@@ -188,6 +201,10 @@ func (s *TaskStore) Create(ctx context.Context, input TaskCreateInput) (Task, co
 	if input.Payload == nil {
 		input.Payload = json.RawMessage(`{}`)
 	}
+	requestHash, err := taskCreateRequestHash(input, workspaceID, maxAttempts, dependencies)
+	if err != nil {
+		return Task{}, contracts.EventEnvelope{}, err
+	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return Task{}, contracts.EventEnvelope{}, fmt.Errorf("begin task create: %w", err)
@@ -195,13 +212,50 @@ func (s *TaskStore) Create(ctx context.Context, input TaskCreateInput) (Task, co
 	defer func() { _ = tx.Rollback(ctx) }()
 
 	var taskID int64
-	if err := tx.QueryRow(ctx, `
-		INSERT INTO fornix.tasks(
-			workspace_id, title, brief, required_capabilities, created_by,
-			origin_host, max_attempts, next_attempt_at
-		) VALUES($1,$2,$3,$4,$5,$6,$7,clock_timestamp())
-		RETURNING id`, workspaceID, input.Title, input.Brief, cleanStrings(input.RequiredCapabilities),
-		input.CreatedBy, strings.TrimSpace(input.OriginHost), maxAttempts).Scan(&taskID); err != nil {
+	capabilities := cleanStrings(input.RequiredCapabilities)
+	if input.IdempotencyKey != "" {
+		err = tx.QueryRow(ctx, `
+			INSERT INTO fornix.tasks(
+				workspace_id, title, brief, required_capabilities, created_by,
+				origin_host, max_attempts, next_attempt_at,
+				create_idempotency_key, create_request_hash
+			) VALUES($1,$2,$3,$4,$5,$6,$7,clock_timestamp(),$8,$9)
+			ON CONFLICT (workspace_id, create_idempotency_key)
+			WHERE create_idempotency_key IS NOT NULL DO NOTHING
+			RETURNING id`, workspaceID, input.Title, input.Brief, capabilities,
+			input.CreatedBy, strings.TrimSpace(input.OriginHost), maxAttempts,
+			input.IdempotencyKey, requestHash).Scan(&taskID)
+		if errors.Is(err, pgx.ErrNoRows) {
+			var existingHash string
+			if err := tx.QueryRow(ctx, `
+				SELECT id, create_request_hash
+				FROM fornix.tasks
+				WHERE workspace_id=$1 AND create_idempotency_key=$2
+				FOR UPDATE`, workspaceID, input.IdempotencyKey).Scan(&taskID, &existingHash); err != nil {
+				return Task{}, contracts.EventEnvelope{}, fmt.Errorf("read duplicate task create: %w", err)
+			}
+			if existingHash != requestHash {
+				return Task{}, contracts.EventEnvelope{}, fmt.Errorf("%w: %s", ErrIdempotencyConflict, input.IdempotencyKey)
+			}
+			task, event, err := readExistingTaskCreateTx(ctx, tx, workspaceID, taskID, input.IdempotencyKey)
+			if err != nil {
+				return Task{}, contracts.EventEnvelope{}, err
+			}
+			if err := s.commit(ctx, tx); err != nil {
+				return Task{}, contracts.EventEnvelope{}, fmt.Errorf("commit duplicate task create: %w", err)
+			}
+			return task, event, nil
+		}
+	} else {
+		err = tx.QueryRow(ctx, `
+			INSERT INTO fornix.tasks(
+				workspace_id, title, brief, required_capabilities, created_by,
+				origin_host, max_attempts, next_attempt_at
+			) VALUES($1,$2,$3,$4,$5,$6,$7,clock_timestamp())
+			RETURNING id`, workspaceID, input.Title, input.Brief, capabilities,
+			input.CreatedBy, strings.TrimSpace(input.OriginHost), maxAttempts).Scan(&taskID)
+	}
+	if err != nil {
 		return Task{}, contracts.EventEnvelope{}, fmt.Errorf("insert task: %w", err)
 	}
 	for _, dependencyID := range dependencies {
@@ -227,6 +281,7 @@ func (s *TaskStore) Create(ctx context.Context, input TaskCreateInput) (Task, co
 		return Task{}, contracts.EventEnvelope{}, err
 	}
 	event.Actor = contracts.ActorRef{ID: input.CreatedBy, Kind: "principal", WorkspaceID: workspaceID}
+	event.IdempotencyKey = input.IdempotencyKey
 	appended, err := s.events.AppendTx(ctx, tx, event)
 	if err != nil {
 		return Task{}, contracts.EventEnvelope{}, fmt.Errorf("append task.created: %w", err)
@@ -239,6 +294,64 @@ func (s *TaskStore) Create(ctx context.Context, input TaskCreateInput) (Task, co
 		return Task{}, contracts.EventEnvelope{}, fmt.Errorf("commit task create: %w", err)
 	}
 	return task, appended.Event, nil
+}
+
+// taskCreateRequestHash excludes server-assigned identity, origin-host, and
+// timestamps, but includes every client-controlled field that can change task
+// semantics. It is stored beside the task create key so retries can fail
+// closed when a caller accidentally reuses a key for a different request.
+func taskCreateRequestHash(input TaskCreateInput, workspaceID string, maxAttempts int, dependencies []int64) (string, error) {
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, input.Payload); err != nil {
+		return "", fmt.Errorf("canonicalize task payload: %w", err)
+	}
+	canonical := struct {
+		WorkspaceID          string          `json:"workspace_id"`
+		Title                string          `json:"title"`
+		Brief                string          `json:"brief"`
+		RequiredCapabilities []string        `json:"required_capabilities"`
+		CreatedBy            string          `json:"created_by"`
+		MaxAttempts          int             `json:"max_attempts"`
+		DependsOn            []int64         `json:"depends_on"`
+		Payload              json.RawMessage `json:"payload"`
+	}{
+		WorkspaceID: workspaceID, Title: input.Title, Brief: input.Brief,
+		RequiredCapabilities: cleanStrings(input.RequiredCapabilities), CreatedBy: input.CreatedBy,
+		MaxAttempts: maxAttempts,
+		DependsOn:   dependencies, Payload: compact.Bytes(),
+	}
+	raw, err := json.Marshal(canonical)
+	if err != nil {
+		return "", fmt.Errorf("marshal task request hash: %w", err)
+	}
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+func readExistingTaskCreateTx(ctx context.Context, tx pgx.Tx, workspaceID string, taskID int64, key string) (Task, contracts.EventEnvelope, error) {
+	task, err := readTaskTx(ctx, tx, workspaceID, taskID, false)
+	if err != nil {
+		return Task{}, contracts.EventEnvelope{}, fmt.Errorf("read duplicate task: %w", err)
+	}
+	var sequence *int64
+	if err := tx.QueryRow(ctx, `
+		SELECT event_sequence
+		FROM fornix.idempotency_records
+		WHERE workspace_id=$1 AND idempotency_key=$2
+		FOR UPDATE`, workspaceID, key).Scan(&sequence); err != nil {
+		return Task{}, contracts.EventEnvelope{}, fmt.Errorf("read duplicate task event: %w", err)
+	}
+	if sequence == nil || *sequence <= 0 {
+		return Task{}, contracts.EventEnvelope{}, ErrIncompleteIdempotency
+	}
+	event, err := readEventBySequenceTx(ctx, tx, workspaceID, *sequence)
+	if err != nil {
+		return Task{}, contracts.EventEnvelope{}, fmt.Errorf("read duplicate task event sequence %d: %w", *sequence, err)
+	}
+	if event.EventType != "task.created" || event.IdempotencyKey != key {
+		return Task{}, contracts.EventEnvelope{}, fmt.Errorf("%w: %s is not a task create", ErrIdempotencyConflict, key)
+	}
+	return task, event, nil
 }
 
 // ClaimNext selects the oldest due task whose direct dependencies are all
@@ -275,7 +388,7 @@ func (s *TaskStore) ClaimNext(ctx context.Context, input TaskClaimInput) (TaskCl
 	}
 
 	for examined := 0; examined < 100; examined++ {
-		task, err := selectClaimableTaskTx(ctx, tx, workspaceID, capabilities)
+		task, err := selectClaimableTaskTx(ctx, tx, workspaceID, capabilities, input.TaskID)
 		if err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				if err := s.commit(ctx, tx); err != nil {
@@ -753,7 +866,7 @@ const taskSelectSQL = `SELECT t.id, t.workspace_id, t.title, t.brief, t.required
 	t.execution_fence, t.created_at, t.claimed_at, t.completed_at, t.cancelled_at
 	FROM fornix.tasks t`
 
-func selectClaimableTaskTx(ctx context.Context, tx pgx.Tx, workspaceID string, capabilities []string) (Task, error) {
+func selectClaimableTaskTx(ctx context.Context, tx pgx.Tx, workspaceID string, capabilities []string, taskID int64) (Task, error) {
 	query := taskSelectSQL + `
 	WHERE t.workspace_id=$1
 	  AND (t.status='pending' AND t.next_attempt_at <= clock_timestamp()
@@ -766,9 +879,15 @@ func selectClaimableTaskTx(ctx context.Context, tx pgx.Tx, workspaceID string, c
 		SELECT 1 FROM fornix.task_dependencies d
 		JOIN fornix.tasks dep ON dep.workspace_id=d.workspace_id AND dep.id=d.depends_on_task_id
 		WHERE d.workspace_id=t.workspace_id AND d.task_id=t.id AND dep.status <> 'done')
-	ORDER BY t.created_at ASC, t.id ASC
+	`
+	args := []any{workspaceID, capabilities}
+	if taskID > 0 {
+		query += " AND t.id=$3\n"
+		args = append(args, taskID)
+	}
+	query += `	ORDER BY t.created_at ASC, t.id ASC
 	FOR UPDATE OF t SKIP LOCKED LIMIT 1`
-	rows, err := tx.Query(ctx, query, workspaceID, capabilities)
+	rows, err := tx.Query(ctx, query, args...)
 	if err != nil {
 		return Task{}, fmt.Errorf("select claimable task: %w", err)
 	}
