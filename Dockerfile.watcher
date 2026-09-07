@@ -10,7 +10,7 @@ RUN go mod download
 COPY . .
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X github.com/omaveda/fornix/internal/version.Version=${FORNIX_VERSION} -X github.com/omaveda/fornix/internal/version.Commit=${FORNIX_COMMIT} -X github.com/omaveda/fornix/internal/version.Date=${FORNIX_BUILD_DATE}" -o /out/fornix-watcher ./cmd/fornix-watcher
 
-FROM python:3.13-slim-bookworm
+FROM python:3.14-slim-bookworm
 
 WORKDIR /workspace
 COPY scripts/requirements.txt /tmp/requirements.txt
