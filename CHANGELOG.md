@@ -24,6 +24,8 @@ than promising a stable compatibility contract.
   installer smoke, unsafe-archive checks, release notices, archive SBOMs,
   checksum verification, a cross-platform GoReleaser matrix gate, and the
   native CLI's shell-completion, provider, and bounded run-inspection paths.
+- Published container builds now embed the release version, commit, and build
+  date in both the Fornix and watcher binaries, with a post-push identity check.
 
 ## 2026-08-21
 

@@ -28,6 +28,14 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      - name: Compute release build metadata
+        id: build-meta
+        shell: bash
+        run: |
+          printf 'version=%s\n' "${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+          printf 'commit=%s\n' "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          printf 'date=%s\n' "$(git show -s --format=%cI "$GITHUB_SHA")" >> "$GITHUB_OUTPUT"
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -52,8 +60,31 @@ jobs:
           file: ./Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          build-args: |
+            FORNIX_VERSION=${{ steps.build-meta.outputs.version }}
+            FORNIX_COMMIT=${{ steps.build-meta.outputs.commit }}
+            FORNIX_BUILD_DATE=${{ steps.build-meta.outputs.date }}
           tags: ${{ steps.fornix-meta.outputs.tags }}
           labels: ${{ steps.fornix-meta.outputs.labels }}
+
+      - name: Verify published Fornix image identity
+        env:
+          IMAGE: ghcr.io/${{ github.repository }}:${{ steps.build-meta.outputs.version }}
+          EXPECTED_VERSION: ${{ steps.build-meta.outputs.version }}
+          EXPECTED_COMMIT: ${{ steps.build-meta.outputs.commit }}
+        run: |
+          docker pull "$IMAGE"
+          docker run --rm --entrypoint /usr/local/bin/fornix "$IMAGE" version --json > /tmp/fornix-image-version.json
+          EXPECTED_VERSION="$EXPECTED_VERSION" EXPECTED_COMMIT="$EXPECTED_COMMIT" python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          actual = json.loads(Path('/tmp/fornix-image-version.json').read_text())
+          assert actual['version'] == os.environ['EXPECTED_VERSION'], actual
+          assert actual['commit'] == os.environ['EXPECTED_COMMIT'], actual
+          print(f"published image identity verified: {actual['version']} ({actual['commit']})")
+          PY
 
       - name: Extract watcher image metadata
         id: watcher-meta
@@ -72,5 +103,9 @@ jobs:
           file: ./Dockerfile.watcher
           platforms: linux/amd64,linux/arm64
           push: true
+          build-args: |
+            FORNIX_VERSION=${{ steps.build-meta.outputs.version }}
+            FORNIX_COMMIT=${{ steps.build-meta.outputs.commit }}
+            FORNIX_BUILD_DATE=${{ steps.build-meta.outputs.date }}
           tags: ${{ steps.watcher-meta.outputs.tags }}
           labels: ${{ steps.watcher-meta.outputs.labels }}
