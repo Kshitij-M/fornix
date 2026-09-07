@@ -1,6 +1,7 @@
 package credentials
 
 import (
+	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
@@ -280,8 +281,13 @@ func (s *Store) ensureDirectory() (string, error) {
 }
 
 func filename(ref Ref) string {
-	hash := sha256.Sum256([]byte(ref.value))
-	return hex.EncodeToString(hash[:]) + ".token"
+	// HMAC is used only as a deterministic namespace encoding for the file
+	// name, not as a password hash. The fixed domain key prevents accidental
+	// reuse with another digest namespace while keeping the logical reference
+	// out of the filesystem path.
+	digest := hmac.New(sha256.New, []byte("fornix-credential-file-v1"))
+	_, _ = digest.Write([]byte(ref.value))
+	return hex.EncodeToString(digest.Sum(nil)) + ".token"
 }
 
 func writeAtomic(directory, name string, value []byte) (resultErr error) {
