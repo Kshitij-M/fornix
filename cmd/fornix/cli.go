@@ -35,6 +35,9 @@ func runCLI(args []string) error {
 	if len(args) > 0 && args[0] == "serve" {
 		return errors.New("serve is handled by the main server entrypoint")
 	}
+	if len(args) > 0 && args[0] == "completion" {
+		return printCompletion(args[1:])
+	}
 	if isLocalCommand(args) {
 		return runLocalCLI(args)
 	}
@@ -77,12 +80,16 @@ func runCLI(args []string) error {
 		return cli.roleCommand(parts[1:])
 	case "api-key":
 		return cli.apiKeyCommand(parts[1:])
+	case "provider":
+		return cli.providerCommand(parts[1:])
 	case "ingest":
 		return cli.ingestCommand(parts[1:])
 	case "task":
 		return cli.taskCommand(parts[1:])
 	case "run":
 		return cli.runCommand(parts[1:])
+	case "runs":
+		return cli.runCommand(append([]string{"list"}, parts[1:]...))
 	case "retrieve":
 		return cli.retrieveCommand(parts[1:])
 	case "evaluation":
@@ -141,6 +148,7 @@ Usage:
   fornix start [--repo PATH] [--port PORT]
   fornix run --repo PATH "PROMPT"
   fornix demo
+  fornix completion bash|zsh|fish
 
 Local runtime:
   start       Start the managed local Fornix and PostgreSQL runtime
@@ -154,6 +162,7 @@ Local runtime:
 
 Work:
   run         Execute a bounded repository task or inspect an existing run
+  runs        List bounded agent-run summaries
   demo        Run the deterministic offline demonstration
   task        Create, claim, inspect, and complete tasks
   ingest      Submit and resume repository indexing
@@ -172,8 +181,10 @@ Identity and diagnostics:
   identity    Manage workspace identities
   role        Manage role bindings
   api-key     Manage workspace API keys
+  provider    Inspect or test explicitly configured model providers
   metrics     Read workspace metrics
   version     Print build and schema information
+  completion  Print a shell completion script
   help        Print this help
 
 Global options:
@@ -185,6 +196,42 @@ Global options:
 
 The local default uses the deterministic fake provider and does not require a
 model key. Provider credentials are never printed or stored in repositories.`)
+}
+
+// printCompletion emits a dependency-free completion script for the shell
+// named by the operator. Keeping this in the native binary means a release
+// archive has no generated shell files that can drift from the command set.
+func printCompletion(args []string) error {
+	if len(args) != 1 {
+		return errors.New("completion requires exactly one shell: bash, zsh, or fish")
+	}
+	script, err := completionScript(args[0])
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprint(os.Stdout, script)
+	return err
+}
+
+func completionScript(shell string) (string, error) {
+	const commands = "start stop restart status logs doctor setup demo run task ingest retrieve evaluation receipt artifact evidence change validation policy metrics workspace identity role api-key upgrade uninstall support version completion help"
+	switch strings.ToLower(strings.TrimSpace(shell)) {
+	case "bash":
+		return fmt.Sprintf(`_fornix_complete() {
+  local current="${COMP_WORDS[COMP_CWORD]}"
+  COMPREPLY=( $(compgen -W "%s" -- "$current") )
+}
+complete -F _fornix_complete fornix
+`, commands), nil
+	case "zsh":
+		return fmt.Sprintf(`#compdef fornix
+_arguments '1:command:(%s)' '*:options:->options'
+`, commands), nil
+	case "fish":
+		return fmt.Sprintf("complete -c fornix -f -n '__fish_use_subcommand' -a '%s'\n", commands), nil
+	default:
+		return "", fmt.Errorf("unsupported completion shell %q; choose bash, zsh, or fish", shell)
+	}
 }
 
 func (c *operatorCLI) workspaceCommand(args []string) error {
@@ -270,6 +317,44 @@ func (c *operatorCLI) apiKeyCommand(args []string) error {
 	}
 }
 
+func (c *operatorCLI) providerCommand(args []string) error {
+	if len(args) == 0 || args[0] == "list" {
+		return c.requestPrint(http.MethodGet, "/v1/health", nil, false)
+	}
+	switch args[0] {
+	case "configure":
+		if len(args) != 2 || strings.TrimSpace(args[1]) == "" {
+			return errors.New("provider configure requires a provider name")
+		}
+		provider := strings.ToLower(strings.TrimSpace(args[1]))
+		if provider != "openai" && provider != "ollama" && provider != "fake" {
+			return fmt.Errorf("unsupported provider %q; choose fake, openai, or ollama", provider)
+		}
+		configured := provider == "fake" || (provider == "openai" && strings.TrimSpace(os.Getenv("FORNIX_OPENAI_API_KEY")) != "") || (provider == "ollama" && strings.TrimSpace(os.Getenv("FORNIX_OLLAMA_URL")) != "")
+		return c.print(map[string]any{"provider": provider, "configured": configured, "credential_source": "process environment only", "changed": false, "message": "Fornix never stores provider credentials; set the provider environment in the runtime that serves this workspace."})
+	case "test":
+		if len(args) < 2 {
+			return errors.New("provider test requires a provider name")
+		}
+		provider := strings.ToLower(strings.TrimSpace(args[1]))
+		modelName := valueArg(args[2:], "model", localDefaultModel(provider))
+		prompt := valueArg(args[2:], "prompt", "Respond with exactly: Fornix provider check passed.")
+		maxCost, err := strconv.ParseFloat(valueArg(args[2:], "max-cost", "0.05"), 64)
+		if err != nil || maxCost < 0 || math.IsNaN(maxCost) || math.IsInf(maxCost, 0) {
+			return errors.New("provider test --max-cost must be a non-negative number")
+		}
+		maxTokens := intValue(args[2:], "max-output-tokens", 64)
+		return c.requestPrint(http.MethodPost, "/v1/model/complete", map[string]any{
+			"workspace_id": c.workspace, "request_id": "provider-test:" + c.workspace + ":" + provider + ":" + modelName,
+			"idempotency_key": "provider-test:" + c.workspace + ":" + provider + ":" + modelName,
+			"provider":        map[string]any{"provider": provider, "model": modelName}, "prompt": prompt,
+			"budget": map[string]any{"max_output_tokens": maxTokens, "max_cost_usd": maxCost, "timeout_ms": 30000},
+		}, false)
+	default:
+		return fmt.Errorf("unknown provider command %q", args[0])
+	}
+}
+
 func (c *operatorCLI) ingestCommand(args []string) error {
 	if len(args) == 0 || args[0] == "list" {
 		return c.requestPrint(http.MethodGet, "/v1/operator/ingest/jobs?limit=100&workspace_id="+url.QueryEscape(c.workspace), nil, false)
@@ -341,6 +426,8 @@ func (c *operatorCLI) runCommand(args []string) error {
 		return errors.New("run requires create, get, or replay")
 	}
 	switch args[0] {
+	case "list":
+		return c.requestPrint(http.MethodGet, "/v1/agent/runs?workspace_id="+url.QueryEscape(c.workspace)+"&limit="+strconv.Itoa(intValue(args[1:], "limit", 100)), nil, false)
 	case "get":
 		return c.requestPrint(http.MethodGet, "/v1/agent/run/"+valueArg(args[1:], "id", "")+"?workspace_id="+url.QueryEscape(c.workspace), nil, false)
 	case "replay":
@@ -377,7 +464,7 @@ func (c *operatorCLI) evidenceCommand(args []string) error {
 }
 
 func (c *operatorCLI) receiptCommand(args []string) error {
-	if len(args) == 0 || args[0] == "get" {
+	if len(args) == 0 || args[0] == "get" || args[0] == "show" {
 		return c.requestPrint(http.MethodGet, "/v1/work-receipts/"+url.PathEscape(valueArg(args[1:], "id", ""))+"?workspace_id="+url.QueryEscape(c.workspace), nil, false)
 	}
 	if args[0] == "disclose" {

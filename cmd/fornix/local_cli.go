@@ -33,33 +33,35 @@ const (
 )
 
 type localOptions struct {
-	command       string
-	home          string
-	serverURL     string
-	port          int
-	workspace     string
-	key           string
-	bootstrapKey  string
-	repository    string
-	provider      string
-	model         string
-	prompt        string
-	check         string
-	service       string
-	output        string
-	json          bool
-	follow        bool
-	yes           bool
-	purgeData     bool
-	detach        bool
-	pull          bool
-	keepData      bool
-	maxCost       float64
-	maxTime       time.Duration
-	maxTurns      int
-	maxOutput     int
-	maxContextB   int
-	maxContextTok int
+	command        string
+	home           string
+	serverURL      string
+	port           int
+	workspace      string
+	key            string
+	bootstrapKey   string
+	repository     string
+	provider       string
+	model          string
+	runtimeVersion string
+	prompt         string
+	check          string
+	service        string
+	output         string
+	json           bool
+	follow         bool
+	yes            bool
+	dryRun         bool
+	purgeData      bool
+	detach         bool
+	pull           bool
+	keepData       bool
+	maxCost        float64
+	maxTime        time.Duration
+	maxTurns       int
+	maxOutput      int
+	maxContextB    int
+	maxContextTok  int
 }
 
 type localSession struct {
@@ -146,6 +148,10 @@ func parseLocalOptions(args []string) (localOptions, error) {
 			opts.keepData = true
 			continue
 		}
+		if arg == "--dry-run" {
+			opts.dryRun = true
+			continue
+		}
 		name, value, hasValue := localFlag(arg)
 		if !hasValue {
 			if strings.HasPrefix(arg, "-") {
@@ -153,6 +159,9 @@ func parseLocalOptions(args []string) (localOptions, error) {
 			}
 			if opts.command == "run" || opts.command == "demo" {
 				prompt = append(prompt, arg)
+				continue
+			}
+			if opts.command == "support" && arg == "bundle" {
 				continue
 			}
 			return localOptions{}, fmt.Errorf("unexpected argument %q", arg)
@@ -184,6 +193,8 @@ func parseLocalOptions(args []string) (localOptions, error) {
 			opts.provider = strings.ToLower(strings.TrimSpace(value))
 		case "model":
 			opts.model = value
+		case "version":
+			opts.runtimeVersion = strings.TrimPrefix(strings.TrimSpace(value), "v")
 		case "check":
 			opts.check = strings.ToLower(strings.TrimSpace(value))
 		case "service":
@@ -488,6 +499,9 @@ func (s *localSession) manager(opts localOptions) (*localruntime.Manager, error)
 		return nil, errors.New("OpenAI is explicitly enabled but FORNIX_OPENAI_API_KEY is not set")
 	}
 	runtimeVersion := s.profile.RuntimeVersion
+	if opts.runtimeVersion != "" {
+		runtimeVersion = opts.runtimeVersion
+	}
 	if runtimeVersion == "" {
 		runtimeVersion = version.Current().Version
 	}
@@ -956,6 +970,13 @@ func runLocalUpgrade(ctx context.Context, opts localOptions) error {
 	if err != nil {
 		return err
 	}
+	if opts.dryRun {
+		targetVersion := opts.runtimeVersion
+		if targetVersion == "" {
+			targetVersion = session.profile.RuntimeVersion
+		}
+		return printLocalSummary("Fornix runtime upgrade planned", map[string]any{"runtime_version": targetVersion, "dry_run": true, "data_preserved": true}, opts.json)
+	}
 	pull, err := manager.Pull(ctx)
 	if err != nil {
 		return err
@@ -963,6 +984,12 @@ func runLocalUpgrade(ctx context.Context, opts localOptions) error {
 	up, err := manager.Restart(ctx)
 	if err != nil {
 		return err
+	}
+	if opts.runtimeVersion != "" {
+		session.profile.RuntimeVersion = opts.runtimeVersion
+		if err := session.store.Save(session.profile); err != nil {
+			return err
+		}
 	}
 	return printLocalSummary("Fornix runtime upgraded", map[string]any{"pull": pull.Stdout, "restart": up.Stdout}, opts.json)
 }

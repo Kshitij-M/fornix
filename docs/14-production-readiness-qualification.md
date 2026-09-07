@@ -117,6 +117,12 @@ still requires safe patch application and reviewer-facing change validation.
   binding, readiness checks, repository mount validation, and redacted
   diagnostics. A disposable Docker smoke verifies start, the reference
   workflow, replay, duplicate-run idempotency, and service isolation.
+- Release qualification now includes a reviewable macOS/Linux amd64/arm64
+  archive contract, checksum verification, archive SBOM configuration,
+  third-party notices, GitHub checksum attestation, an independent archive
+  verifier, and a clean-room local installer smoke. A public GitHub release
+  and a `get.fornix.dev` DNS alias are release-owner operations; until they
+  exist, the raw GitHub installer URL is the honest distribution fallback.
 
 ## Production gaps
 
@@ -158,8 +164,8 @@ still requires safe patch application and reviewer-facing change validation.
   rather than raw prompts or rendered context. The reference workflow now
   consumes a durable bounded repository ingest job; automatic ingest scheduling
   and full parser-quality indexing remain future work.
-- Public release distribution is not yet fully qualified: the checked-in
-  installer needs a signed, hosted release channel, and Homebrew/deb/rpm
+- Public release distribution is not yet fully qualified until a tagged
+  GitHub release is published and tested from its assets: Homebrew/deb/rpm
   adapters do not yet exist. Docker remains an explicit macOS/Linux
   prerequisite. The local profile uses owner-only files rather than an OS
   keychain or external secret manager, and the managed runtime is single-node
@@ -205,6 +211,13 @@ make smoke-reference-openai
 make smoke-ingestion
 make smoke-changes
 make smoke-policy
+make smoke-package
+```
+
+For release output produced by GoReleaser, run:
+
+```sh
+make release-check
 ```
 
 Postgres-backed results and measured latency/storage/replay throughput are

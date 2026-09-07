@@ -39,19 +39,30 @@ make build
 ./bin/fornix doctor
 ```
 
-The public release installer will use the same interface once a signed GitHub
-release channel and `get.fornix.dev` endpoint are published. Until then, do
-not present the curl installer as an available hosted service:
+The public release installer uses the same interface after a signed GitHub
+release is published. The short `get.fornix.dev` alias is a planned hosting
+convenience; until its DNS and hosting are configured, use the reviewable raw
+GitHub URL:
 
 ```sh
-# Planned public release path; not a claim that this endpoint is live today.
-curl -fsSL https://get.fornix.dev/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Kshitij-M/fornix/main/scripts/install.sh | sh
 ```
 
 The installer itself is already checked into `scripts/install.sh`. It selects
 the macOS/Linux and amd64/arm64 archive, verifies its SHA-256 checksum, rejects
-unsafe archive paths, and installs only the `fornix` executable. Release
-signatures and hosted provenance are still open qualification work.
+unsafe archive paths and special files, and installs only the `fornix`
+executable. The release workflow also publishes an SBOM, third-party notices,
+and a GitHub artifact attestation for `checksums.txt`.
+
+For a release-owner verification before installation:
+
+```sh
+gh attestation verify checksums.txt --repo Kshitij-M/fornix
+```
+
+The installer does not require GitHub CLI or Sigstore tooling. Its local
+checksum check verifies the downloaded bytes; the attestation is the separate
+publisher-provenance check.
 
 ## First run
 
@@ -87,16 +98,21 @@ The local commands are deliberately small and deterministic:
 | --- | --- |
 | `fornix start` | Create or load the local profile, start the runtime, migrate, and wait for readiness. |
 | `fornix run --repo PATH PROMPT` | Submit one bounded repository task and print its durable result summary. |
+| `fornix runs` | List bounded agent-run summaries without disclosing prompts or transcripts. |
 | `fornix demo --repo PATH` | Run the offline reference workflow and verify replay. |
 | `fornix status` | Report profile, endpoint, workspace, provider, and container health. |
 | `fornix logs` | Read bounded service logs; use `--follow` for a live view. |
 | `fornix doctor` | Check Docker, profile safety, runtime configuration, and readiness. |
+| `fornix provider list` | Read the server's registered model providers. |
+| `fornix provider test NAME` | Send one explicitly bounded provider test through the authenticated gateway. |
+| `fornix completion bash\|zsh\|fish` | Print shell completion without installing files. |
 | `fornix stop` | Stop services while preserving the profile and database volume. |
 | `fornix restart` | Restart the managed runtime and re-check readiness. |
 | `fornix upgrade` | Pull the configured image and restart with the existing profile. |
+| `fornix upgrade --version VERSION --dry-run` | Validate and display a version change without pulling, restarting, or changing the profile. |
 | `fornix uninstall` | Stop and remove the managed project while preserving data by default. |
 | `fornix uninstall --purge-data --yes` | Explicitly remove the local profile and managed database volume. |
-| `fornix support --output PATH` | Write a redacted diagnostic bundle for a support issue. |
+| `fornix support bundle --output PATH` | Write a redacted diagnostic bundle for a support issue. |
 | `fornix version` | Print build, platform, and schema compatibility information. |
 
 Every command accepts the common local options shown by `fornix help`,
@@ -175,6 +191,8 @@ Useful environment overrides are:
 | `FORNIX_OPENAI_API_KEY` | Opt-in process environment credential; never persisted by the CLI. |
 | `FORNIX_OPENAI_MODEL` | Default OpenAI model when `--model` is omitted. |
 | `FORNIX_OLLAMA_MODEL` | Explicit Ollama model for an Ollama-enabled path. |
+| `FORNIX_RELEASE_BASE_URL` | Test-only release directory override; use the default GitHub channel for normal installs. |
+| `FORNIX_RELEASE_LATEST_URL` | Test-only latest-release metadata override. |
 
 Runtime names, ports, image references, and paths are validated before a
 manifest is written. A runtime project cannot escape the profile, and a

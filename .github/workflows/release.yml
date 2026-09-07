@@ -30,6 +30,9 @@ jobs:
           go-version: '1.25.13'
           cache: true
 
+      - name: Run the full release qualification gate
+        run: make verify
+
       - name: Run GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
@@ -38,6 +41,9 @@ jobs:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify release archives, checksums, notices, and paths
+        run: sh scripts/release/verify-artifacts.sh --require-matrix dist
 
       - name: Attest release checksums
         uses: actions/attest@v4

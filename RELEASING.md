@@ -7,7 +7,8 @@ and `fornix-watcher` images to GitHub Container Registry.
 
 ## Before tagging
 
-1. Confirm `main` is green, including the Postgres/HTTP smoke job.
+1. Confirm `main` is green, including the Postgres/HTTP, managed-runtime, and
+   package/installer jobs.
 2. Update [`CHANGELOG.md`](CHANGELOG.md) and move verified items from
    `Unreleased` into a dated release section.
 3. Confirm the version follows semantic versioning. Use a prerelease suffix
@@ -32,7 +33,10 @@ continue to use the default in `internal/version/version.go`.
 
 ## After the release
 
-- Check the GitHub Release assets, checksum attestation, and generated notes.
+- Check the GitHub Release assets, checksum manifest, archive SBOMs, notices,
+  artifact attestation, and generated notes. Run
+  `sh scripts/release/verify-artifacts.sh --require-matrix dist` against the
+  generated release output before announcing it.
 - Check both GHCR packages and their visibility.
 - Smoke-test the published binary and image using a fake provider and a local
   Postgres instance before recommending the release to users.

@@ -159,8 +159,8 @@ or Docker Engine plus Compose v2 on Linux is the one host prerequisite; Fornix
 manages the database, migrations, workspace bootstrap, and runtime lifecycle
 after Docker is available.
 
-The public installer endpoint will be enabled with the first signed release.
-Until that release is published, build the same CLI from this checkout:
+The signed release installer is the intended distribution path. Until the
+first release is published, build the same CLI from this checkout:
 
 ```sh
 make build
@@ -176,14 +176,21 @@ complete local reference workflow, including replay and Work Receipt checks:
 ./bin/fornix demo --repo .
 ```
 
-Once the release channel is live, the intended clean-install path is:
+After a release is published, the reviewable clean-install path is:
 
 ```sh
-curl -fsSL https://get.fornix.dev/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Kshitij-M/fornix/main/scripts/install.sh | sh
 cd my-repository
 fornix start
 fornix run --repo . "Review this repository and identify the highest-risk issues"
 ```
+
+`https://get.fornix.dev/install.sh` is a planned short alias for the same
+versioned installer and should only be advertised after its DNS and hosting
+are verified. Release archives include checksums, an SBOM, and third-party
+notices; the release workflow attests the checksum manifest. Docker Desktop
+on macOS or Docker Engine plus Compose v2 on Linux remains the one host
+prerequisite.
 
 Useful lifecycle commands are `fornix status`, `fornix logs`, `fornix doctor`,
 `fornix stop`, `fornix restart`, `fornix upgrade`, and `fornix uninstall`.
