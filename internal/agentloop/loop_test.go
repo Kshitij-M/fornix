@@ -40,7 +40,7 @@ func (s *memoryRuns) Reserve(_ context.Context, request contracts.AgentRunReques
 		return existing, true, nil
 	}
 	now := time.Unix(100, 0).UTC()
-	run := contracts.AgentRun{ID: request.RunID, WorkspaceID: request.WorkspaceID, RequestID: request.RequestID, IdempotencyKey: request.IdempotencyKey, RequestHash: hash, SchemaVersion: request.SchemaVersion, Actor: request.Actor, Goal: request.Goal, Provider: request.Provider, Tools: request.Tools, Retrieval: request.Retrieval, Budget: request.Budget, State: contracts.AgentRunPending, Phase: contracts.AgentPhaseModel, History: []contracts.ModelMessage{{Role: "user", Content: request.Goal}}, StateVersion: 1, CreatedAt: now, UpdatedAt: now}
+	run := contracts.AgentRun{ID: request.RunID, WorkspaceID: request.WorkspaceID, RequestID: request.RequestID, IdempotencyKey: request.IdempotencyKey, RequestHash: hash, SchemaVersion: request.SchemaVersion, Actor: request.Actor, Goal: request.Goal, Provider: request.Provider, Tools: request.Tools, Retrieval: request.Retrieval, Metadata: cloneStringMap(request.Metadata), Budget: request.Budget, State: contracts.AgentRunPending, Phase: contracts.AgentPhaseModel, History: []contracts.ModelMessage{{Role: "user", Content: request.Goal}}, StateVersion: 1, CreatedAt: now, UpdatedAt: now}
 	run.StateHash = run.ComputeStateHash()
 	s.seq++
 	s.runs[run.IdempotencyKey] = run
@@ -183,6 +183,29 @@ func (r *fakeRetriever) Retrieve(_ context.Context, request contracts.RetrievalR
 
 func agentRequest(workspace, key string) contracts.AgentRunRequest {
 	return contracts.AgentRunRequest{RunID: "run-" + key, RequestID: "request-" + key, IdempotencyKey: key, WorkspaceID: workspace, Goal: "deterministic goal", Provider: contracts.ProviderRef{Provider: "fake", Model: "fake-model"}, Budget: contracts.AgentBudget{MaxTurns: 4, MaxModelSteps: 4, MaxToolCalls: 4, MaxContextBytes: 4096, MaxOutputTokens: 128, MaxWallTimeMS: 60_000, MaxCostUSD: 1, MaxToolAttempts: 2}}
+}
+
+func TestRunPropagatesDurableExecutionMetadataToProviders(t *testing.T) {
+	runs := newMemoryRuns()
+	model := &scriptedModel{responses: []contracts.ModelResponse{{Content: "stable output", FinishReason: "stop", Usage: contracts.ModelUsage{InputTokens: 1, OutputTokens: 1, TotalTokens: 2}}}}
+	loop := New(runs, model, &fakeTools{})
+	loop.Now = func() time.Time { return time.Unix(101, 0).UTC() }
+	request := agentRequest("workspace-metadata", "metadata-key")
+	request.Metadata = map[string]string{
+		"fornix.reference_workflow": "true",
+		"fornix.reference_workdir":  "/workspace/reference-repository",
+	}
+	run, _, err := loop.Create(context.Background(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	decision, err := loop.Run(context.Background(), run.WorkspaceID, run.ID)
+	if err != nil || decision.Run.State != contracts.AgentRunSucceeded {
+		t.Fatalf("run did not succeed: decision=%+v err=%v", decision, err)
+	}
+	if len(model.requests) != 1 || model.requests[0].Metadata["fornix.reference_workdir"] != "/workspace/reference-repository" {
+		t.Fatalf("provider did not receive durable execution metadata: %+v", model.requests)
+	}
 }
 
 func TestRunCompilesContextOnceAndReplaysDeterministically(t *testing.T) {

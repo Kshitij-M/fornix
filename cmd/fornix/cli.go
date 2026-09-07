@@ -710,6 +710,7 @@ func (c *operatorCLI) referenceWorkflow(args []string) error {
 		"provider": map[string]any{"provider": provider, "model": model},
 		"task":     map[string]any{"id": taskID, "kind": "task", "workspace_id": workspace},
 		"session":  map[string]any{"id": sessionID, "kind": "session", "workspace_id": workspace}, "task_owner_id": sessionID, "task_fence": fence,
+		"metadata":  map[string]string{"fornix.reference_workflow": "true", "fornix.reference_workdir": workdir},
 		"tools":     []any{map[string]any{"name": "fornix.repository.read", "description": "read repository files", "parameters": map[string]any{"type": "object"}}},
 		"retrieval": map[string]any{"workspace_id": workspace, "query": valueArg(args, "query", "README repository overview"), "repo": repository, "max_items": 8, "max_bytes": intValue(args, "max-context-bytes", 8192), "max_tokens": intValue(args, "max-context-tokens", 2048)},
 		"budget":    map[string]any{"max_turns": intValue(args, "max-turns", 3), "max_model_steps": 4, "max_tool_calls": 2, "max_context_bytes": intValue(args, "max-context-bytes", 32768), "max_output_tokens": intValue(args, "max-output-tokens", 512), "max_wall_time_ms": durationMS(args, "max-time", 30*time.Second), "max_cost_usd": floatValue(args, "max-cost", 1), "max_tool_attempts": 1},

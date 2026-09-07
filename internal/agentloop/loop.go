@@ -333,6 +333,7 @@ func (o *Orchestrator) advanceModel(ctx context.Context, run contracts.AgentRun)
 		CausationID:    run.CausationID, CorrelationID: run.CorrelationID, WorkspaceID: run.WorkspaceID,
 		Actor: run.Actor, Task: run.Task, Session: run.Session, Provider: run.Provider,
 		Messages: cloneMessages(run.History), Tools: append([]contracts.ModelToolDefinition(nil), run.Tools...),
+		Metadata:    cloneStringMap(run.Metadata),
 		Budget:      contracts.ModelBudget{MaxInputBytes: run.Budget.MaxContextBytes, MaxOutputTokens: minInt(contracts.MaxModelOutputTokens, run.Budget.MaxOutputTokens-run.OutputTokens), MaxTotalTokens: contracts.MaxModelInputTokens + minInt(contracts.MaxModelOutputTokens, run.Budget.MaxOutputTokens-run.OutputTokens), MaxCostUSD: maxFloat(0, run.Budget.MaxCostUSD-run.Cost.TotalCostUSD), TimeoutMS: int(minInt64(int64(contracts.MaxModelTimeout/time.Millisecond), run.Budget.MaxWallTimeMS))},
 		RetryPolicy: contracts.DefaultRetryPolicy(),
 	}
@@ -411,7 +412,7 @@ func (o *Orchestrator) advanceTool(ctx context.Context, run contracts.AgentRun) 
 		return o.fail(ctx, run, &contracts.LoopFailure{Code: contracts.AgentFailureTool, Message: err.Error(), Phase: contracts.AgentPhaseTool}, contracts.AgentTerminationToolFailure)
 	}
 	attempt := call.Attempt + 1
-	request := contracts.ToolRequest{SchemaVersion: contracts.ToolSchemaVersion, RequestID: stableID("agent-tool-request", run.ID, call.ID, fmt.Sprint(attempt)), IdempotencyKey: stableID("agent-tool", run.ID, call.ID, fmt.Sprint(attempt)), CausationID: run.CausationID, CorrelationID: run.CorrelationID, WorkspaceID: run.WorkspaceID, Actor: run.Actor, Task: run.Task, Session: run.Session, TaskOwnerID: run.TaskOwnerID, TaskFence: run.TaskFence, ToolID: definition.ID, Capability: definition.Capability, Argv: append([]string{definition.Executable}, args.Argv...), Environment: args.Environment, Workdir: args.Workdir, Mode: contracts.ToolModeAutomatic, Budget: contracts.SandboxProfile{TimeoutMS: minInt(definition.Sandbox.TimeoutMS, int(run.Budget.MaxWallTimeMS))}}
+	request := contracts.ToolRequest{SchemaVersion: contracts.ToolSchemaVersion, RequestID: stableID("agent-tool-request", run.ID, call.ID, fmt.Sprint(attempt)), IdempotencyKey: stableID("agent-tool", run.ID, call.ID, fmt.Sprint(attempt)), CausationID: run.CausationID, CorrelationID: run.CorrelationID, WorkspaceID: run.WorkspaceID, Actor: run.Actor, Task: run.Task, Session: run.Session, TaskOwnerID: run.TaskOwnerID, TaskFence: run.TaskFence, ToolID: definition.ID, Capability: definition.Capability, Argv: append([]string{definition.Executable}, args.Argv...), Environment: args.Environment, Workdir: args.Workdir, Mode: contracts.ToolModeAutomatic, Metadata: cloneStringMap(run.Metadata), Budget: contracts.SandboxProfile{TimeoutMS: minInt(definition.Sandbox.TimeoutMS, int(run.Budget.MaxWallTimeMS))}}
 	if run.State == contracts.AgentRunAwaitingApproval {
 		request.Mode = contracts.ToolModeInteractive
 		request.ApprovalID = call.ApprovalID
@@ -559,6 +560,17 @@ func (o *Orchestrator) commit(ctx context.Context, current, next contracts.Agent
 		return contracts.AgentRun{}, ErrLoopLease
 	}
 	return store.CommitOwned(ctx, current, next, eventType, payload, lease)
+}
+
+func cloneStringMap(input map[string]string) map[string]string {
+	if input == nil {
+		return nil
+	}
+	output := make(map[string]string, len(input))
+	for key, value := range input {
+		output[key] = value
+	}
+	return output
 }
 
 type toolArguments struct {

@@ -399,6 +399,7 @@ type AgentRun struct {
 	Provider           ProviderRef           `json:"provider"`
 	Tools              []ModelToolDefinition `json:"tools,omitempty"`
 	Retrieval          *RetrievalRequest     `json:"retrieval,omitempty"`
+	Metadata           map[string]string     `json:"metadata,omitempty"`
 	Budget             AgentBudget           `json:"budget"`
 	ContextHash        string                `json:"context_hash,omitempty"`
 	State              string                `json:"state"`

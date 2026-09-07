@@ -104,6 +104,10 @@ func (s *AgentRunStore) Reserve(ctx context.Context, request contracts.AgentRunR
 	if err != nil {
 		return contracts.AgentRun{}, false, err
 	}
+	metadataJSON, err := json.Marshal(request.Metadata)
+	if err != nil {
+		return contracts.AgentRun{}, false, err
+	}
 	historyJSON, err := json.Marshal([]contracts.ModelMessage{{Role: "user", Content: request.Goal}})
 	if err != nil {
 		return contracts.AgentRun{}, false, err
@@ -115,7 +119,7 @@ func (s *AgentRunStore) Reserve(ctx context.Context, request contracts.AgentRunR
 		CausationID: request.CausationID, CorrelationID: request.CorrelationID, Actor: request.Actor,
 		Task: cloneEntityRefForRun(request.Task), Session: cloneEntityRefForRun(request.Session),
 		TaskOwnerID: request.TaskOwnerID, TaskFence: request.TaskFence, Goal: request.Goal,
-		Provider: request.Provider, Tools: append([]contracts.ModelToolDefinition(nil), request.Tools...), Retrieval: cloneRetrievalRequest(request.Retrieval), Budget: request.Budget,
+		Provider: request.Provider, Tools: append([]contracts.ModelToolDefinition(nil), request.Tools...), Retrieval: cloneRetrievalRequest(request.Retrieval), Metadata: cloneStringMap(request.Metadata), Budget: request.Budget,
 		State: contracts.AgentRunPending, Phase: contracts.AgentPhaseModel, History: []contracts.ModelMessage{{Role: "user", Content: request.Goal}},
 		StateVersion: 1, CreatedAt: now, UpdatedAt: now,
 	}
@@ -130,12 +134,12 @@ func (s *AgentRunStore) Reserve(ctx context.Context, request contracts.AgentRunR
 		INSERT INTO fornix.agent_runs(
 			id, workspace_id, request_id, idempotency_key, request_hash, schema_version,
 			causation_id, correlation_id, actor, task_ref, session_ref, task_owner_id,
-			task_fence, goal, provider, tools, budget, retrieval_request, state, phase, history, state_hash
-		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11::jsonb,$12,$13,$14,$15::jsonb,$16::jsonb,$17::jsonb,$18::jsonb,$19,$20,$21::jsonb,$22)
+			task_fence, goal, provider, tools, budget, retrieval_request, metadata, state, phase, history, state_hash
+		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11::jsonb,$12,$13,$14,$15::jsonb,$16::jsonb,$17::jsonb,$18::jsonb,$19::jsonb,$20,$21,$22::jsonb,$23)
 		ON CONFLICT (workspace_id, idempotency_key) DO NOTHING`,
 		run.ID, run.WorkspaceID, run.RequestID, run.IdempotencyKey, run.RequestHash, run.SchemaVersion,
 		run.CausationID, run.CorrelationID, actorJSON, taskJSON, sessionJSON, run.TaskOwnerID, int64(run.TaskFence), run.Goal,
-		providerJSON, toolsJSON, budgetJSON, retrievalJSON, run.State, run.Phase, historyJSON, run.StateHash)
+		providerJSON, toolsJSON, budgetJSON, retrievalJSON, metadataJSON, run.State, run.Phase, historyJSON, run.StateHash)
 	if err != nil {
 		return contracts.AgentRun{}, false, fmt.Errorf("reserve agent run: %w", err)
 	}
@@ -280,6 +284,10 @@ func (s *AgentRunStore) commit(ctx context.Context, current, next contracts.Agen
 	if err != nil {
 		return contracts.AgentRun{}, err
 	}
+	metadataJSON, err := json.Marshal(next.Metadata)
+	if err != nil {
+		return contracts.AgentRun{}, err
+	}
 	costJSON, err := json.Marshal(next.Cost)
 	if err != nil {
 		return contracts.AgentRun{}, err
@@ -366,14 +374,14 @@ func (s *AgentRunStore) commit(ctx context.Context, current, next contracts.Agen
 	commandTag, err := tx.Exec(ctx, `
 		UPDATE fornix.agent_runs SET
 			actor=$3::jsonb, task_ref=$4::jsonb, session_ref=$5::jsonb, task_owner_id=$6, task_fence=$7,
-			provider=$8::jsonb, tools=$9::jsonb, budget=$10::jsonb, retrieval_request=$11::jsonb, context_hash=$12, state=$13, phase=$14, turn=$15, step=$16,
-			model_attempts=$17, model_calls=$18, tool_calls=$19, input_tokens=$20, output_tokens=$21, total_tokens=$22,
-			context_bytes=$23, cost=$24::jsonb, history=$25::jsonb, pending_tools=$26::jsonb, last_output=$27,
-			last_output_artifact_id=$28, history_artifact_id=$29, last_failure=$30::jsonb, termination=$31, next_retry_at=$32, state_version=$33, event_sequence=$34,
-			state_hash=$35, updated_at=$36, started_at=$37, finished_at=$38
-		WHERE workspace_id=$1 AND id=$2 AND state_version=$39`,
+			provider=$8::jsonb, tools=$9::jsonb, budget=$10::jsonb, retrieval_request=$11::jsonb, metadata=$12::jsonb, context_hash=$13, state=$14, phase=$15, turn=$16, step=$17,
+			model_attempts=$18, model_calls=$19, tool_calls=$20, input_tokens=$21, output_tokens=$22, total_tokens=$23,
+			context_bytes=$24, cost=$25::jsonb, history=$26::jsonb, pending_tools=$27::jsonb, last_output=$28,
+			last_output_artifact_id=$29, history_artifact_id=$30, last_failure=$31::jsonb, termination=$32, next_retry_at=$33, state_version=$34, event_sequence=$35,
+			state_hash=$36, updated_at=$37, started_at=$38, finished_at=$39
+		WHERE workspace_id=$1 AND id=$2 AND state_version=$40`,
 		next.WorkspaceID, next.ID, actorJSON, taskJSON, sessionJSON, next.TaskOwnerID, int64(next.TaskFence), providerJSON,
-		toolsJSON, budgetJSON, retrievalJSON, next.ContextHash, next.State, next.Phase, next.Turn, next.Step, next.ModelAttempts, next.ModelCalls, next.ToolCalls,
+		toolsJSON, budgetJSON, retrievalJSON, metadataJSON, next.ContextHash, next.State, next.Phase, next.Turn, next.Step, next.ModelAttempts, next.ModelCalls, next.ToolCalls,
 		next.InputTokens, next.OutputTokens, next.TotalTokens, next.ContextBytes, costJSON, inlineHistory, pendingJSON, inlineLastOutput,
 		artifactIDs.lastOutput, artifactIDs.history, nullJSON(failureJSON), next.Termination, next.NextRetryAt, next.StateVersion, int64(next.EventSequence), next.StateHash,
 		next.UpdatedAt, next.StartedAt, next.FinishedAt, current.StateVersion)
@@ -704,7 +712,7 @@ func readAgentRunByIdempotencyTx(ctx context.Context, tx pgx.Tx, workspaceID, id
 }
 
 const agentRunSelectSQL = `SELECT id, workspace_id, request_id, idempotency_key, request_hash, schema_version,
- causation_id, correlation_id, actor, task_ref, session_ref, task_owner_id, task_fence, goal, provider, tools, budget, retrieval_request, context_hash,
+ causation_id, correlation_id, actor, task_ref, session_ref, task_owner_id, task_fence, goal, provider, tools, budget, retrieval_request, context_hash, metadata,
  state, phase, turn, step, model_attempts, model_calls, tool_calls, input_tokens, output_tokens, total_tokens, context_bytes,
  cost, history, pending_tools, last_output, last_output_artifact_id, history_artifact_id, last_failure, termination, next_retry_at, state_version, event_sequence,
  state_hash, created_at, updated_at, started_at, finished_at FROM fornix.agent_runs`
@@ -712,10 +720,10 @@ const agentRunSelectSQL = `SELECT id, workspace_id, request_id, idempotency_key,
 func scanAgentRun(row interface{ Scan(...any) error }) (contracts.AgentRun, error) {
 	var run contracts.AgentRun
 	var err error
-	var actorJSON, taskJSON, sessionJSON, providerJSON, toolsJSON, budgetJSON, retrievalJSON, costJSON, historyJSON, pendingJSON, failureJSON []byte
+	var actorJSON, taskJSON, sessionJSON, providerJSON, toolsJSON, budgetJSON, retrievalJSON, metadataJSON, costJSON, historyJSON, pendingJSON, failureJSON []byte
 	var lastOutputArtifactID, historyArtifactID *int64
 	var fence, sequence int64
-	if err = row.Scan(&run.ID, &run.WorkspaceID, &run.RequestID, &run.IdempotencyKey, &run.RequestHash, &run.SchemaVersion, &run.CausationID, &run.CorrelationID, &actorJSON, &taskJSON, &sessionJSON, &run.TaskOwnerID, &fence, &run.Goal, &providerJSON, &toolsJSON, &budgetJSON, &retrievalJSON, &run.ContextHash, &run.State, &run.Phase, &run.Turn, &run.Step, &run.ModelAttempts, &run.ModelCalls, &run.ToolCalls, &run.InputTokens, &run.OutputTokens, &run.TotalTokens, &run.ContextBytes, &costJSON, &historyJSON, &pendingJSON, &run.LastOutput, &lastOutputArtifactID, &historyArtifactID, &failureJSON, &run.Termination, &run.NextRetryAt, &run.StateVersion, &sequence, &run.StateHash, &run.CreatedAt, &run.UpdatedAt, &run.StartedAt, &run.FinishedAt); err != nil {
+	if err = row.Scan(&run.ID, &run.WorkspaceID, &run.RequestID, &run.IdempotencyKey, &run.RequestHash, &run.SchemaVersion, &run.CausationID, &run.CorrelationID, &actorJSON, &taskJSON, &sessionJSON, &run.TaskOwnerID, &fence, &run.Goal, &providerJSON, &toolsJSON, &budgetJSON, &retrievalJSON, &run.ContextHash, &metadataJSON, &run.State, &run.Phase, &run.Turn, &run.Step, &run.ModelAttempts, &run.ModelCalls, &run.ToolCalls, &run.InputTokens, &run.OutputTokens, &run.TotalTokens, &run.ContextBytes, &costJSON, &historyJSON, &pendingJSON, &run.LastOutput, &lastOutputArtifactID, &historyArtifactID, &failureJSON, &run.Termination, &run.NextRetryAt, &run.StateVersion, &sequence, &run.StateHash, &run.CreatedAt, &run.UpdatedAt, &run.StartedAt, &run.FinishedAt); err != nil {
 		return contracts.AgentRun{}, err
 	}
 	if fence < 0 || sequence < 0 {
@@ -743,6 +751,11 @@ func scanAgentRun(row interface{ Scan(...any) error }) (contracts.AgentRun, erro
 	if len(retrievalJSON) > 0 && string(retrievalJSON) != "null" && string(retrievalJSON) != "{}" {
 		run.Retrieval = &contracts.RetrievalRequest{}
 		if err := json.Unmarshal(retrievalJSON, run.Retrieval); err != nil {
+			return contracts.AgentRun{}, err
+		}
+	}
+	if len(metadataJSON) > 0 && string(metadataJSON) != "null" && string(metadataJSON) != "{}" {
+		if err := json.Unmarshal(metadataJSON, &run.Metadata); err != nil {
 			return contracts.AgentRun{}, err
 		}
 	}
@@ -776,6 +789,17 @@ func scanAgentRun(row interface{ Scan(...any) error }) (contracts.AgentRun, erro
 type agentArtifactQueryer interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 	Query(context.Context, string, ...any) (pgx.Rows, error)
+}
+
+func cloneStringMap(input map[string]string) map[string]string {
+	if input == nil {
+		return nil
+	}
+	output := make(map[string]string, len(input))
+	for key, value := range input {
+		output[key] = value
+	}
+	return output
 }
 
 func hydrateAgentRunArtifacts(ctx context.Context, queryer agentArtifactQueryer, run *contracts.AgentRun) (contracts.AgentRun, error) {
