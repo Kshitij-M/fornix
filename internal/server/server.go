@@ -473,6 +473,7 @@ type sessionRow struct {
 
 type taskCreateReq struct {
 	WorkspaceID          string   `json:"workspace_id,omitempty"`
+	IdempotencyKey       string   `json:"idempotency_key,omitempty"`
 	Title                string   `json:"title"`
 	Brief                string   `json:"brief"`
 	RequiredCapabilities []string `json:"required_capabilities"`
@@ -484,6 +485,7 @@ type taskCreateReq struct {
 type taskClaimReq struct {
 	WorkspaceID string `json:"workspace_id,omitempty"`
 	SessionID   string `json:"session_id"`
+	TaskID      int64  `json:"task_id,omitempty"`
 	LeaseTTLMS  int64  `json:"lease_ttl_ms,omitempty"`
 }
 
@@ -1811,7 +1813,7 @@ func (s *server) handleTaskCreate(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	host, _ := os.Hostname()
 	task, event, err := s.tasks.Create(ctx, store.TaskCreateInput{
-		WorkspaceID: workspaceID, Title: req.Title, Brief: req.Brief,
+		WorkspaceID: workspaceID, IdempotencyKey: req.IdempotencyKey, Title: req.Title, Brief: req.Brief,
 		RequiredCapabilities: req.RequiredCapabilities, CreatedBy: req.CreatedBy,
 		OriginHost: host, MaxAttempts: req.MaxAttempts, DependsOn: req.DependsOn,
 	})
@@ -1839,7 +1841,7 @@ func (s *server) handleTaskClaim(w http.ResponseWriter, r *http.Request) {
 	workspaceID := requestWorkspace(r, req.WorkspaceID)
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	result, err := s.tasks.ClaimNext(ctx, store.TaskClaimInput{WorkspaceID: workspaceID, SessionID: req.SessionID, ActorID: requestActor(r).ID, LeaseTTL: time.Duration(req.LeaseTTLMS) * time.Millisecond})
+	result, err := s.tasks.ClaimNext(ctx, store.TaskClaimInput{WorkspaceID: workspaceID, SessionID: req.SessionID, TaskID: req.TaskID, ActorID: requestActor(r).ID, LeaseTTL: time.Duration(req.LeaseTTLMS) * time.Millisecond})
 	if err != nil {
 		if errors.Is(err, store.ErrTaskNoReady) {
 			w.WriteHeader(http.StatusNoContent)

@@ -8,10 +8,12 @@ builds:
     binary: fornix
     env:
       - CGO_ENABLED=0
-    goos: [linux, darwin, windows]
+    goos: [linux, darwin]
     goarch: [amd64, arm64]
+    flags: [-trimpath]
     ldflags:
-      - -s -w -X github.com/omaveda/fornix/internal/version.Version={{.Version}}
+      - -s -w -X github.com/omaveda/fornix/internal/version.Version={{.Version}} -X github.com/omaveda/fornix/internal/version.Commit={{.Commit}} -X github.com/omaveda/fornix/internal/version.Date={{.Date}}
+    mod_timestamp: '{{ .CommitTimestamp }}'
 
   - id: watcher
     main: ./cmd/fornix-watcher
@@ -20,8 +22,10 @@ builds:
       - CGO_ENABLED=0
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
+    flags: [-trimpath]
     ldflags:
-      - -s -w -X github.com/omaveda/fornix/internal/version.Version={{.Version}}
+      - -s -w -X github.com/omaveda/fornix/internal/version.Version={{.Version}} -X github.com/omaveda/fornix/internal/version.Commit={{.Commit}} -X github.com/omaveda/fornix/internal/version.Date={{.Date}}
+    mod_timestamp: '{{ .CommitTimestamp }}'
 
   - id: eval
     main: ./cmd/fornix-eval
@@ -30,17 +34,27 @@ builds:
       - CGO_ENABLED=0
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
+    flags: [-trimpath]
     ldflags:
-      - -s -w -X github.com/omaveda/fornix/internal/version.Version={{.Version}}
+      - -s -w -X github.com/omaveda/fornix/internal/version.Version={{.Version}} -X github.com/omaveda/fornix/internal/version.Commit={{.Commit}} -X github.com/omaveda/fornix/internal/version.Date={{.Date}}
+    mod_timestamp: '{{ .CommitTimestamp }}'
 
 archives:
   - id: default
-    ids: [fornix, watcher, eval]
+    ids: [fornix]
     formats: [tar.gz]
     format_overrides:
       - goos: windows
         formats: [zip]
     name_template: '{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
+
+  - id: tools
+    ids: [watcher, eval]
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: '{{ .ProjectName }}_tools_{{ .Version }}_{{ .Os }}_{{ .Arch }}'
 
 checksum:
   name_template: checksums.txt

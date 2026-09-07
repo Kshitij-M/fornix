@@ -26,6 +26,36 @@ to understand why each local command exists and the
 [qualification note](docs/14-production-readiness-qualification.md) before
 interpreting a passing smoke as production readiness.
 
+## Fornix Local product path
+
+For the user-facing managed runtime, start with the [Fornix Local operations
+guide](docs/63-fornix-local-operations.md). It documents the single `fornix`
+CLI, secure profile/bootstrap behavior, Docker prerequisite, deterministic
+offline demo, optional bounded OpenAI path, lifecycle commands, recovery, and
+the boundaries that are not yet production-qualified. The source-checkout
+equivalent is:
+
+```sh
+make build
+bin/fornix doctor
+bin/fornix start --repo .
+bin/fornix demo --repo .
+bin/fornix status
+bin/fornix stop
+```
+
+The disposable managed-runtime qualification is intentionally separate from
+the aggregate service smokes because it creates and purges its own Compose
+project, profile, and database volume:
+
+```sh
+make smoke-local-cli
+make smoke-local-runtime
+```
+
+Do not run the disposable smoke with a project name or profile that contains
+data you need to preserve. It uses an isolated temporary profile by default.
+
 ## First run
 
 ```sh
@@ -49,6 +79,7 @@ make test
 make test-race
 make vet
 make build
+make package-check
 make python-install
 make python-check
 make docs-check
@@ -78,6 +109,8 @@ make smoke-reference-openai
 make smoke-ingestion
 make smoke-validation
 make smoke-policy
+make smoke-local-cli
+make smoke-local-runtime
 make operator-reference
 make dev-up
 make dev-run

@@ -56,6 +56,26 @@ func durableAgentRequest(workspace, key string) contracts.AgentRunRequest {
 	}
 }
 
+func TestAgentRunStorePersistsExecutionMetadata(t *testing.T) {
+	runs, _, workspace := newAgentRunTestStore(t)
+	request := durableAgentRequest(workspace, "execution-metadata")
+	request.Metadata = map[string]string{
+		"fornix.reference_workflow": "true",
+		"fornix.reference_workdir":  "/workspace/reference-repository",
+	}
+	run, deduplicated, err := runs.Reserve(context.Background(), request)
+	if err != nil || deduplicated {
+		t.Fatalf("reserve=%+v deduplicated=%t err=%v", run, deduplicated, err)
+	}
+	loaded, err := runs.Get(context.Background(), workspace, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Metadata["fornix.reference_workflow"] != "true" || loaded.Metadata["fornix.reference_workdir"] != "/workspace/reference-repository" {
+		t.Fatalf("execution metadata was not persisted: %+v", loaded.Metadata)
+	}
+}
+
 func TestAgentRunStoreCrashBeforeCommitLeavesCheckpointUnchanged(t *testing.T) {
 	runs, _, workspace := newAgentRunTestStore(t)
 	ctx := context.Background()
