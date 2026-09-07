@@ -159,8 +159,8 @@ or Docker Engine plus Compose v2 on Linux is the one host prerequisite; Fornix
 manages the database, migrations, workspace bootstrap, and runtime lifecycle
 after Docker is available.
 
-The signed release installer is the intended distribution path. Until the
-first release is published, build the same CLI from this checkout:
+The signed release installer is the intended distribution path. For a source
+checkout, or when evaluating unreleased changes, build the same CLI locally:
 
 ```sh
 make build
@@ -176,7 +176,7 @@ complete local reference workflow, including replay and Work Receipt checks:
 ./bin/fornix demo --repo .
 ```
 
-After a release is published, the reviewable clean-install path is:
+The verified public alpha clean-install path is:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Kshitij-M/fornix/main/scripts/install.sh | sh
@@ -184,6 +184,10 @@ cd my-repository
 fornix start
 fornix run --repo . "Review this repository and identify the highest-risk issues"
 ```
+
+The current public alpha is [v0.11.0-alpha.3](https://github.com/Kshitij-M/fornix/releases/tag/v0.11.0-alpha.3).
+The raw GitHub installer URL is the explicit fallback until the planned
+`get.fornix.dev` alias has verified DNS and hosting.
 
 `https://get.fornix.dev/install.sh` is a planned short alias for the same
 versioned installer and should only be advertised after its DNS and hosting
