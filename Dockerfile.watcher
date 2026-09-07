@@ -1,4 +1,4 @@
-FROM golang:1.25.13 AS build
+FROM golang:1.27.1 AS build
 
 ARG FORNIX_VERSION=dev
 ARG FORNIX_COMMIT=unknown
