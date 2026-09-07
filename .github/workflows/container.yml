@@ -69,10 +69,12 @@ jobs:
 
       - name: Verify published Fornix image identity
         env:
-          IMAGE: ghcr.io/${{ github.repository }}:${{ steps.build-meta.outputs.version }}
           EXPECTED_VERSION: ${{ steps.build-meta.outputs.version }}
           EXPECTED_COMMIT: ${{ steps.build-meta.outputs.commit }}
         run: |
+          # GitHub repository names may contain uppercase characters while
+          # OCI image references must be lowercase.
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}:${EXPECTED_VERSION}"
           docker pull "$IMAGE"
           docker run --rm --entrypoint /usr/local/bin/fornix "$IMAGE" version --json > /tmp/fornix-image-version.json
           EXPECTED_VERSION="$EXPECTED_VERSION" EXPECTED_COMMIT="$EXPECTED_COMMIT" python3 - <<'PY'
