@@ -164,12 +164,13 @@ still requires safe patch application and reviewer-facing change validation.
   rather than raw prompts or rendered context. The reference workflow now
   consumes a durable bounded repository ingest job; automatic ingest scheduling
   and full parser-quality indexing remain future work.
-- Public release distribution is not yet fully qualified until a tagged
-  GitHub release is published and tested from its assets: Homebrew/deb/rpm
-  adapters do not yet exist. Docker remains an explicit macOS/Linux
-  prerequisite. The local profile uses owner-only files rather than an OS
-  keychain or external secret manager, and the managed runtime is single-node
-  without automatic backup/restore or high availability.
+- Public release distribution is qualified for the first alpha through
+  `v0.11.0-alpha.3`: all four canonical archives, checksums, SBOMs, notices,
+  installer behavior, and multi-architecture GHCR images were verified from
+  public assets. Homebrew/deb/rpm adapters do not yet exist. Docker remains
+  an explicit macOS/Linux prerequisite. The local profile uses owner-only
+  files rather than an OS keychain or external secret manager, and the managed
+  runtime is single-node without automatic backup/restore or high availability.
 - Policy packs are declarative and limited to the built-in validator catalog.
   They are not a general policy programming language, do not execute arbitrary
   code, and do not yet provide organization-wide policy distribution,

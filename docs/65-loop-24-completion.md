@@ -1,8 +1,8 @@
 # Loop 24 completion — Fornix Local release qualification
 
-Status: implementation complete on the release-qualification branch; hosted
-release publication and the optional `get.fornix.dev` alias remain release-owner
-operations after merge.
+Status: implementation and first public alpha qualification complete. The
+verified release is [v0.11.0-alpha.3](https://github.com/Kshitij-M/fornix/releases/tag/v0.11.0-alpha.3).
+The optional `get.fornix.dev` alias remains a release-owner hosting operation.
 
 Issue #32 closes a product-facing gap rather than adding another control-plane
 subsystem. Before this work, the managed local CLI existed in the source tree,
@@ -77,6 +77,28 @@ two-service status. It used the fake provider and no OpenAI key. Remote
 provider behavior remains opt-in and at-least-once; it is not required for
 package qualification.
 
+## Published qualification evidence
+
+The first public alpha was published from merged `main` as
+`v0.11.0-alpha.3`. The release workflow completed its full qualification gate,
+generated checksummed archives and SBOMs, and attested the checksum manifest.
+The independent verifier was then run against the downloaded public assets
+with `--require-matrix`; all four canonical CLI archives passed.
+
+The published installer was fetched from the repository's raw GitHub URL and
+installed into a temporary private prefix. It reported version
+`0.11.0-alpha.3`, commit `1a5740385628414cc53068971804a5477bdb815a`, and passed
+help and shell-completion checks. The published `fornix` and
+`fornix-watcher` GHCR tags are multi-architecture images. Pulling the public
+images verified the Fornix image identity and the watcher's executable entry
+point.
+
+The release and container workflow runs are linked from the
+[release](https://github.com/Kshitij-M/fornix/releases/tag/v0.11.0-alpha.3):
+the release run was `34144718225` and the container run was `34144718230`.
+The installer alias is intentionally still the explicit raw GitHub fallback
+until `get.fornix.dev` DNS and hosting are configured and independently tested.
+
 ## Security and licensing decisions
 
 The canonical package contains the native CLI and reviewed notices. It does
@@ -94,10 +116,10 @@ source was not reused.
 
 ## Remaining qualification boundaries
 
-- No tagged public GitHub release existed at implementation time. The release
-  workflow and verifier are ready; the release owner must merge, tag, inspect
-  the generated assets, verify the attestation, and run the published-asset
-  smoke before advertising the curl command.
+- The first public release is an alpha qualification artifact, not a
+  production stability promise. The release owner still needs to repeat the
+  published-asset smoke for each future release and verify the attestation
+  before promoting a version.
 - `get.fornix.dev` still needs DNS/hosting configuration. The raw GitHub
   installer URL is the reviewable fallback until that alias is verified.
 - The native package does not include Homebrew, Debian, or RPM adapters.
