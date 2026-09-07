@@ -159,7 +159,7 @@ or Docker Engine plus Compose v2 on Linux is the one host prerequisite; Fornix
 manages the database, migrations, workspace bootstrap, and runtime lifecycle
 after Docker is available.
 
-The signed release installer is the intended distribution path. For a source
+The checksum-verified release installer is the intended distribution path. For a source
 checkout, or when evaluating unreleased changes, build the same CLI locally:
 
 ```sh
