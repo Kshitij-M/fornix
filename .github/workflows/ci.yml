@@ -48,7 +48,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
       - run: python -m pip install --requirement scripts/requirements.txt
@@ -83,7 +83,7 @@ jobs:
         with:
           go-version: '1.25.13'
           cache: true
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
       - run: python -m pip install --requirement scripts/requirements.txt
@@ -324,7 +324,7 @@ jobs:
         with:
           go-version: '1.25.13'
           cache: true
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
       - name: Build the CLI used by the runtime smoke
@@ -352,7 +352,7 @@ jobs:
         with:
           go-version: '1.25.13'
           cache: true
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: '3.13'
       - name: Install pinned Syft for archive SBOMs
