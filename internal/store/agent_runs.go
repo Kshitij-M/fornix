@@ -186,6 +186,44 @@ func (s *AgentRunStore) Get(ctx context.Context, workspaceID, runID string) (con
 	return run, err
 }
 
+// List returns a bounded, deterministic summary view within one workspace.
+// It deliberately does not hydrate goals, history, tool arguments, or output.
+func (s *AgentRunStore) List(ctx context.Context, workspaceID string, limit int) ([]contracts.AgentRunSummary, error) {
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("agent run store is not configured")
+	}
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" {
+		return nil, fmt.Errorf("agent run workspace is required")
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT id, workspace_id, state, phase, turn, step, context_hash,
+		       termination, state_hash, created_at, updated_at, finished_at
+		FROM fornix.agent_runs
+		WHERE workspace_id=$1
+		ORDER BY created_at DESC, id DESC
+		LIMIT $2`, workspaceID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list agent runs: %w", err)
+	}
+	defer rows.Close()
+	result := make([]contracts.AgentRunSummary, 0)
+	for rows.Next() {
+		var summary contracts.AgentRunSummary
+		if err := rows.Scan(&summary.ID, &summary.WorkspaceID, &summary.State, &summary.Phase, &summary.Turn, &summary.Step, &summary.ContextHash, &summary.Termination, &summary.StateHash, &summary.CreatedAt, &summary.UpdatedAt, &summary.FinishedAt); err != nil {
+			return nil, fmt.Errorf("scan agent run summary: %w", err)
+		}
+		result = append(result, summary)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate agent run summaries: %w", err)
+	}
+	return result, nil
+}
+
 // Commit atomically appends a typed transition event and advances the run with
 // a state-version compare-and-swap.
 func (s *AgentRunStore) Commit(ctx context.Context, current, next contracts.AgentRun, eventType string, payload any) (contracts.AgentRun, error) {

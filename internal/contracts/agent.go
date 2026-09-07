@@ -431,6 +431,24 @@ type AgentRun struct {
 	FinishedAt         *time.Time            `json:"finished_at,omitempty"`
 }
 
+// AgentRunSummary is the bounded operator list view. It intentionally omits
+// goals, history, pending tool arguments, and output so listing runs cannot
+// become an accidental transcript disclosure.
+type AgentRunSummary struct {
+	ID          string     `json:"id"`
+	WorkspaceID string     `json:"workspace_id"`
+	State       string     `json:"state"`
+	Phase       string     `json:"phase"`
+	Turn        int        `json:"turn"`
+	Step        int        `json:"step"`
+	ContextHash string     `json:"context_hash,omitempty"`
+	Termination string     `json:"termination,omitempty"`
+	StateHash   string     `json:"state_hash"`
+	CreatedAt   time.Time  `json:"created_at"`
+	UpdatedAt   time.Time  `json:"updated_at"`
+	FinishedAt  *time.Time `json:"finished_at,omitempty"`
+}
+
 // LoopDecision describes the next deterministic action selected from an
 // AgentRun and its current checkpoint.
 type LoopDecision struct {

@@ -111,6 +111,8 @@ make smoke-validation
 make smoke-policy
 make smoke-local-cli
 make smoke-local-runtime
+make smoke-package
+make release-check
 make operator-reference
 make dev-up
 make dev-run
@@ -148,6 +150,14 @@ CI runs the same Make targets and keeps the Postgres/HTTP qualification job
 separate. Its integration job has a bounded timeout, cancels superseded runs,
 and supplies the runner-to-container database address explicitly to the
 database-backed smoke scripts.
+
+The package target is a clean-room check for the public installation contract:
+it creates a temporary native archive, serves it locally, verifies checksums
+and archive member safety, installs into a private prefix, tests version/help/
+doctor/completion, and proves failed verification does not replace a working
+binary. `make release-check` verifies a generated `dist/` directory. CI also
+runs GoReleaser snapshot output and requires canonical Linux/macOS amd64/arm64
+archives, archive SBOMs, license notices, and checksum coverage.
 
 The projection runtime is an internal Postgres-backed pull API. It does not
 start a background worker; callers explicitly run bounded batches or a

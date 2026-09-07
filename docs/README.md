@@ -79,7 +79,7 @@ engineering record for each one.
 
 ## Local package and managed runtime
 
-The current release-blocking workstream is [`62-packaging-distribution-foundation.md`](62-packaging-distribution-foundation.md), implemented by the single-package `fornix` CLI and managed local runtime. [`63-fornix-local-operations.md`](63-fornix-local-operations.md) is the operator-facing guide for the implemented alpha path.
+The current release-blocking workstream is [`62-packaging-distribution-foundation.md`](62-packaging-distribution-foundation.md), implemented by the single-package `fornix` CLI and managed local runtime. [`63-fornix-local-operations.md`](63-fornix-local-operations.md) is the operator-facing guide for the implemented alpha path. [`64-fornix-local-release-qualification-foundation.md`](64-fornix-local-release-qualification-foundation.md) records the release artifact, installer, and clean-room qualification contract; [`65-loop-24-completion.md`](65-loop-24-completion.md) records the delivered checks and remaining release-owner work.
 It is deliberately separate from the numbered implementation loops: users
 need a verified installation and first-run path before the remaining product
 work can be evaluated by the community. Public release hosting, signed

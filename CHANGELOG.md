@@ -20,6 +20,10 @@ than promising a stable compatibility contract.
   request review guidance, code ownership, Dependabot, CodeQL, dependency
   review, Scorecard, tag-driven releases, checksum attestations, and GHCR
   container publication workflows.
+- Issue #32 release qualification now includes a single-package clean-room
+  installer smoke, unsafe-archive checks, release notices, archive SBOMs,
+  checksum verification, a cross-platform GoReleaser matrix gate, and the
+  native CLI's shell-completion, provider, and bounded run-inspection paths.
 
 ## 2026-08-21
 

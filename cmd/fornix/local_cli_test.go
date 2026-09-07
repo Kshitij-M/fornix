@@ -78,6 +78,14 @@ func TestParseLocalOptionsAcceptsLifecycleCompatibilityFlags(t *testing.T) {
 	if !stop.keepData {
 		t.Fatalf("stop options = %+v", stop)
 	}
+	support, err := parseLocalOptions([]string{"support", "bundle", "--output", "/tmp/fornix-support.json"})
+	if err != nil || support.output != "/tmp/fornix-support.json" {
+		t.Fatalf("support bundle options = %+v, err=%v", support, err)
+	}
+	upgrade, err := parseLocalOptions([]string{"upgrade", "--version", "v1.2.3", "--dry-run"})
+	if err != nil || upgrade.runtimeVersion != "1.2.3" || !upgrade.dryRun {
+		t.Fatalf("upgrade options = %+v, err=%v", upgrade, err)
+	}
 }
 
 func TestResolvedLocalPortUsesExplicitEnvironmentProfileAndDefaultPrecedence(t *testing.T) {
@@ -169,5 +177,24 @@ func TestPrintVersionJSONIsMachineReadableWithoutSecrets(t *testing.T) {
 	}
 	if strings.Contains(string(data), "secret") || strings.Contains(string(data), "password") {
 		t.Fatal("version output contains credential-like data")
+	}
+}
+
+func TestCompletionScriptsAreDeterministicAndSecretFree(t *testing.T) {
+	for _, shell := range []string{"bash", "zsh", "fish"} {
+		first, err := completionScript(shell)
+		if err != nil {
+			t.Fatal(err)
+		}
+		second, err := completionScript(shell)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if first != second || !strings.Contains(first, "fornix") || strings.Contains(first, "OPENAI_API_KEY") {
+			t.Fatalf("completion output for %s is unstable or contains a secret-like value", shell)
+		}
+	}
+	if _, err := completionScript("powershell"); err == nil {
+		t.Fatal("unsupported completion shell was accepted")
 	}
 }

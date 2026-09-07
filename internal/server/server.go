@@ -805,6 +805,26 @@ func (s *server) handleAgentRunGet(w http.ResponseWriter, r *http.Request, runID
 	writeJSON(w, http.StatusOK, run)
 }
 
+func (s *server) handleAgentRunList(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuth(r) {
+		writeErr(w, http.StatusUnauthorized, "unauthorised")
+		return
+	}
+	limit := 200
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil {
+			limit = parsed
+		}
+	}
+	workspaceID := requestWorkspace(r, r.URL.Query().Get("workspace_id"))
+	runs, err := s.agentRuns.List(r.Context(), workspaceID, limit)
+	if err != nil {
+		writeAgentRunError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"runs": runs, "count": len(runs), "workspace_id": workspaceID})
+}
+
 func (s *server) handleAgentRunCancel(w http.ResponseWriter, r *http.Request, runID string) {
 	if !s.requireAuth(r) {
 		writeErr(w, http.StatusUnauthorized, "unauthorised")
@@ -2722,6 +2742,7 @@ func (s *server) routes() http.Handler {
 		}
 		s.handleAgentRunCreate(w, r)
 	})
+	mux.HandleFunc("/v1/agent/runs", s.handleAgentRunList)
 	mux.HandleFunc("/v1/agent/run/", func(w http.ResponseWriter, r *http.Request) {
 		rest := strings.TrimPrefix(r.URL.Path, "/v1/agent/run/")
 		parts := strings.SplitN(rest, "/", 2)

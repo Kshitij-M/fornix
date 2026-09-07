@@ -137,6 +137,7 @@ raw bytes are not overwritten.
 | `POST` | `/v1/tools/execute` | Execute a registered structured-argv tool under policy |
 | `POST` | `/v1/tools/approvals/{id}/decide` | Record an approval decision |
 | `POST` | `/v1/agent/run` | Create or resume a bounded agent run |
+| `GET` | `/v1/agent/runs` | List bounded workspace-scoped run summaries |
 | `GET` | `/v1/agent/run/{id}` | Read a run checkpoint and status |
 | `POST` | `/v1/agent/run/{id}/advance` | Advance one deterministic run step |
 | `POST` | `/v1/agent/run/{id}/cancel` | Cancel a run durably |
