@@ -1,17 +1,18 @@
 # Fornix
 
-Fornix is **verifiable AI work infrastructure for long-running repository
-operations**.
+Fornix is **verifiable AI work infrastructure for long-running
+production-system operations**.
 
-Teams can already ask AI to suggest code. The harder problem is allowing AI to
-perform important work—dependency upgrades, security remediation, migrations,
-large refactors, CI repair, and repository maintenance—without losing control
-of scope, cost, evidence, approval, or recovery.
+Teams can already ask AI to suggest changes. The harder problem is allowing AI
+to perform important work against production systems—repositories, APIs,
+databases, cloud resources, ticketing systems, and internal operations—without
+losing control of scope, cost, evidence, approval, or recovery. Repository
+maintenance is Fornix's first concrete adapter, not its ceiling.
 
 Fornix is being built to close that gap:
 
-> **Delegate serious repository work to AI without losing the ability to bound,
-> understand, recover, and replay it.**
+> **Delegate serious production-system work to AI without losing the ability to
+> bound, understand, recover, and replay it.**
 
 The technical form is an efficiency-first AI harness. The product outcome is
 safe autonomous work. Fornix uses exact state, deterministic routing, and
@@ -19,8 +20,8 @@ bounded retrieval first, spending model tokens only when remaining ambiguity
 justifies them.
 
 Fornix is open source and currently alpha. The durable control and retrieval
-substrate is usable and tested, but the complete unattended repository
-maintenance product is still being built.
+substrate is usable and tested, but the complete autonomous production-system
+operations product is still being built.
 
 Read the [product vision](docs/01-product-vision.md) for the problem, target
 user, flagship workflow, and the distinction between the current alpha and the
@@ -68,12 +69,15 @@ Fornix is:
 - a deterministic-first retrieval and context compiler;
 - a bounded model, tool, and agent-run execution substrate;
 - a workspace-scoped operator API, CLI, and MCP compatibility surface;
+- a domain-neutral operation vocabulary for typed systems, resources,
+  connectors, capabilities, effects, evidence, plans, and results;
 - a repository ingestion path for explicitly mounted local repositories.
 
 In the product direction, these capabilities combine into a safe,
-workspace-scoped runtime for repository maintenance. Fornix should integrate
-with existing agent clients and runtimes where possible rather than requiring
-every team to replace its preferred model or chat interface.
+workspace-scoped runtime for production-system operations. Repository
+maintenance is the first adapter and qualification path. Fornix should
+integrate with existing agent clients and runtimes where possible rather than
+requiring every team to replace its preferred model or chat interface.
 
 Fornix is not currently:
 
@@ -330,7 +334,8 @@ fixtures/                   small deterministic development fixtures
 ## Status and roadmap boundary
 
 Fornix is intentionally being developed as a sequence of small, testable
-control-plane slices that lead toward safe autonomous repository work. The
+control-plane slices that lead toward safe autonomous production-system work.
+Repository maintenance is the first adapter and qualification path. The
 current alpha still lacks a fully automated agent-to-change workflow, OAuth/SSO,
 external KMS or secret-manager integration, PostgreSQL row-level security,
 general background evaluation and ingestion scheduling, multi-agent execution

@@ -11,7 +11,7 @@ intended for users, operators, maintainers, reviewers, and future contributors.
 | Question | Start here | What it covers |
 | --- | --- | --- |
 | What is Fornix and why does it exist? | [`README.md`](../README.md) | Product purpose, current capabilities, quickstart, and honest alpha status |
-| What problem should Fornix own? | [`01-product-vision.md`](01-product-vision.md) | Verifiable AI work, repository-maintenance wedge, Work Receipts, and product boundaries |
+| What problem should Fornix own? | [`01-product-vision.md`](01-product-vision.md) | Verifiable AI work over production systems, the repository-maintenance wedge, Work Receipts, and product boundaries |
 | How do I run or test it locally? | [`DEVELOPMENT.md`](../DEVELOPMENT.md) | Docker environment, commands, smoke suites, CLI workflow, and quality gates |
 | What rules govern implementation? | [`AGENTS.md`](../AGENTS.md) | Research gate, architecture invariants, documentation contract, and required checks |
 | How is the system designed? | [`00-fornix-foundation.md`](00-fornix-foundation.md) | Authority boundaries, deterministic-first design, development order, and success metrics |
@@ -32,9 +32,9 @@ summary.
 ## The public explanation of Fornix
 
 Every subsystem should be explainable in this order. The repository as a whole
-should follow the same order: start with the repository-work problem, then
-show the user-visible result, then explain the machinery that makes it
-trustworthy.
+should follow the same order: start with the production-system problem, explain
+the repository-maintenance wedge when it is the concrete example, then show
+the user-visible result and the machinery that makes it trustworthy.
 
 1. **User problem.** What expensive, unsafe, or ambiguous workflow does this
    solve?
