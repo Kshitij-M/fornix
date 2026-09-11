@@ -1,7 +1,8 @@
 # Domain-neutral harness foundation
 
-Status: implemented on `feat/issue-41-domain-neutral-contracts`; this note is
-the design and qualification record for issue #41.
+Status: implemented in the initial Issue #41 change and re-audited on
+`feat/issue-45-connector-capability-registry`; this note is the design and
+qualification record for issue #41.
 
 ## Why this boundary exists
 
@@ -196,10 +197,53 @@ The contract tests must prove:
 ## Remaining limitations
 
 The repository adapter is not yet migrated to emit generic operations
-automatically. No connector registry or schema validator exists at this
-stage, and no generic operation rows are durable. Generic execution,
-approval admission, external-effect verification, connector credentials, and
-adapter-specific recovery are intentionally deferred to later issues. The
-next implementation should add a registry/admission boundary only after
-these contracts are reviewed against the repository workflow and the planned
-non-repository pilot.
+automatically, and no generic operation rows are durable. The contract-only
+stage did not include a connector registry; the current branch adds that
+process-local admission boundary in `docs/67-connector-capability-foundation.md`.
+Generic execution, approval admission, external-effect verification, connector
+credentials, and adapter-specific recovery are intentionally deferred to later
+issues.
+
+## Issue #41 audit and requalification
+
+The contract boundary was reviewed again after the connector/capability work
+was added. The audit found no missing top-level contract family, but it found
+several fail-closed and hash-integrity gaps that are now corrected on the
+current branch:
+
+- task and session entity references now use the same bounded identifier and
+  normalized-kind rules as operation identities;
+- actor identity is required and normalized on Work Receipt finalization;
+- metadata keys and values are canonicalized before hashing, and normalized
+  key collisions are rejected rather than silently choosing one value;
+- set-like string references reject empty or malformed entries instead of
+  dropping them;
+- input/output schema versions have an explicit upper bound;
+- operation result steps are sorted by step identity before hashing;
+- supplied Work Receipt canonical, request, and verification hashes are
+  recomputed and must match rather than being accepted as arbitrary valid
+  SHA-256 strings.
+
+These are contract-tightening changes only. No migration or new dependency is
+introduced, and valid previously persisted receipts remain compatible. Invalid
+or ambiguous values that were previously accepted now fail closed before they
+can become an operation or receipt authority. The implementation remains an
+independent MIT-licensed reimplementation of the patterns documented in the
+reference matrix; no source code was copied and no Kronaxis BSL-1.1 code was
+used.
+
+Local requalification on 2026-09-11 used Go 1.25.13 on an Apple M4 Pro:
+
+- `go test ./...`, `go vet ./...`, and `go test -race ./...` passed;
+- contract canonical hashing measured approximately 4.5 microseconds/op for
+  both request and plan hashes in the local benchmark;
+- the complete non-OpenAI Fornix smoke suite and Docker reference workflow
+  passed;
+- the contract slice performs no database, network, model, connector, or
+  storage work. The remaining cost is bounded in-process normalization and
+  SHA-256 hashing.
+
+Issue #41 remains intentionally limited to typed contracts and adapter
+boundaries. Durable generic operation identity, duplicate suppression,
+authorization records, fencing, crash recovery, and external-effect
+verification belong to the operation authority and policy issues that follow.

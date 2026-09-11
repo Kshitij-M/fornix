@@ -196,7 +196,7 @@ func (d *CapabilityDefinition) Normalize() error {
 	if len(d.Description) > 1024 || strings.ContainsAny(d.Description, "\r\n") {
 		return fmt.Errorf("capability description is invalid or too large")
 	}
-	if d.InputSchemaVersion < 1 || d.OutputSchemaVersion < 1 {
+	if d.InputSchemaVersion < 1 || d.InputSchemaVersion > MaxDomainSchemaVersion || d.OutputSchemaVersion < 1 || d.OutputSchemaVersion > MaxDomainSchemaVersion {
 		return fmt.Errorf("input and output schema versions are required")
 	}
 	inputHash, err := normalizeDomainHash(d.InputSchemaHash, "input_schema_hash", true)
@@ -343,7 +343,7 @@ func (d *CapabilityDefinition) normalizeForHash() error {
 	if len(d.Description) > 1024 || strings.ContainsAny(d.Description, "\r\n") {
 		return fmt.Errorf("capability description is invalid or too large")
 	}
-	if d.InputSchemaVersion < 1 || d.OutputSchemaVersion < 1 {
+	if d.InputSchemaVersion < 1 || d.InputSchemaVersion > MaxDomainSchemaVersion || d.OutputSchemaVersion < 1 || d.OutputSchemaVersion > MaxDomainSchemaVersion {
 		return fmt.Errorf("input and output schema versions are required")
 	}
 	inputHash, err := normalizeDomainHash(d.InputSchemaHash, "input_schema_hash", true)
