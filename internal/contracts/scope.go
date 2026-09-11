@@ -17,6 +17,7 @@ const (
 	MaxDomainIDLength          = 128
 	MaxDomainNameLength        = 128
 	MaxDomainVersionLength     = 64
+	MaxDomainSchemaVersion     = 1024
 	MaxDomainHashLength        = 64
 	MaxDomainMetadataEntries   = 32
 	MaxDomainMetadataKeyLength = 64
@@ -92,13 +93,13 @@ func normalizeDomainActor(actor *ActorRef, workspaceID string) error {
 	actor.Kind = strings.ToLower(strings.TrimSpace(actor.Kind))
 	actor.Name = strings.TrimSpace(actor.Name)
 	actor.WorkspaceID = strings.TrimSpace(actor.WorkspaceID)
-	if actor.ID == "" || len(actor.ID) > MaxDomainIDLength {
-		return fmt.Errorf("actor id is required and bounded")
+	if _, err := normalizeDomainIdentifier(actor.ID, "actor id", MaxDomainIDLength, true); err != nil {
+		return err
 	}
-	if actor.Kind == "" || len(actor.Kind) > MaxDomainNameLength {
-		return fmt.Errorf("actor kind is required and bounded")
+	if _, err := normalizeDomainName(actor.Kind, "actor kind", MaxDomainNameLength, true); err != nil {
+		return err
 	}
-	if len(actor.Name) > 256 || strings.ContainsAny(actor.Name, "\r\n") {
+	if len(actor.Name) > 256 || strings.ContainsAny(actor.Name, "\x00\r\n\t") {
 		return fmt.Errorf("actor name is invalid or too large")
 	}
 	if actor.WorkspaceID != workspaceID {
@@ -112,12 +113,19 @@ func normalizeDomainEntity(ref *EntityRef, expectedKind, workspaceID string) err
 		return nil
 	}
 	value := ref
-	value.ID = strings.TrimSpace(value.ID)
-	value.Kind = strings.ToLower(strings.TrimSpace(value.Kind))
+	id, err := normalizeDomainIdentifier(value.ID, expectedKind+" id", MaxDomainIDLength, true)
+	if err != nil {
+		return err
+	}
+	kind, err := normalizeDomainName(value.Kind, expectedKind+" kind", MaxDomainNameLength, true)
+	if err != nil {
+		return err
+	}
 	value.WorkspaceID = strings.TrimSpace(value.WorkspaceID)
-	if value.ID == "" || len(value.ID) > MaxDomainIDLength || value.Kind != expectedKind || value.WorkspaceID != workspaceID {
+	if kind != expectedKind || value.WorkspaceID != workspaceID {
 		return fmt.Errorf("%s reference must be bounded and workspace-scoped", expectedKind)
 	}
+	value.ID, value.Kind = id, kind
 	return nil
 }
 
@@ -125,13 +133,14 @@ func normalizeDomainMetadata(metadata map[string]string) error {
 	if len(metadata) > MaxDomainMetadataEntries {
 		return fmt.Errorf("metadata exceeds %d entries", MaxDomainMetadataEntries)
 	}
+	normalized := make(map[string]string, len(metadata))
 	for key, value := range metadata {
-		if len(key) > MaxDomainMetadataKeyLength || !domainMetadataKeyPattern.MatchString(strings.ToLower(strings.TrimSpace(key))) {
+		key = strings.ToLower(strings.TrimSpace(key))
+		if len(key) > MaxDomainMetadataKeyLength || !domainMetadataKeyPattern.MatchString(key) {
 			return fmt.Errorf("metadata key is invalid")
 		}
-		lowerKey := strings.ToLower(strings.TrimSpace(key))
 		for _, forbidden := range []string{"prompt", "secret", "credential", "token", "password", "authorization", "body", "content", "output", "input", "environment"} {
-			if strings.Contains(lowerKey, forbidden) {
+			if strings.Contains(key, forbidden) {
 				return fmt.Errorf("metadata key %q is not permitted", key)
 			}
 		}
@@ -139,6 +148,16 @@ func normalizeDomainMetadata(metadata map[string]string) error {
 		if value == "" || len(value) > MaxDomainMetadataValueLen || !domainMetadataValuePattern.MatchString(value) || looksLikeSecret(value) {
 			return fmt.Errorf("metadata value for %q is invalid or unsafe", key)
 		}
+		if _, exists := normalized[key]; exists {
+			return fmt.Errorf("metadata contains duplicate normalized key %q", key)
+		}
+		normalized[key] = value
+	}
+	for key := range metadata {
+		delete(metadata, key)
+	}
+	for key, value := range normalized {
+		metadata[key] = value
 	}
 	return nil
 }
@@ -152,16 +171,17 @@ func normalizeDomainStrings(values []string, field string, max int) ([]string, e
 	for _, value := range values {
 		value = strings.TrimSpace(value)
 		if value == "" {
+			return nil, fmt.Errorf("%s contains an empty value", field)
+		}
+		normalized, err := normalizeDomainIdentifier(value, field, MaxDomainIDLength, true)
+		if err != nil {
+			return nil, err
+		}
+		if _, exists := seen[normalized]; exists {
 			continue
 		}
-		if len(value) > MaxDomainIDLength {
-			return nil, fmt.Errorf("%s contains an oversized value", field)
-		}
-		if _, exists := seen[value]; exists {
-			continue
-		}
-		seen[value] = struct{}{}
-		result = append(result, value)
+		seen[normalized] = struct{}{}
+		result = append(result, normalized)
 	}
 	// Stable sort gives deterministic hashes without changing semantic order in
 	// contracts where this helper is used for set-like fields.

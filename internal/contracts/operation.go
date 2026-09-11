@@ -169,7 +169,7 @@ func (r *OperationRequest) Normalize() error {
 	if err != nil {
 		return err
 	}
-	if r.InputSchemaVersion < 1 {
+	if r.InputSchemaVersion < 1 || r.InputSchemaVersion > MaxDomainSchemaVersion {
 		return fmt.Errorf("operation input_schema_version is required")
 	}
 	inputSchemaHash, err := normalizeDomainHash(r.InputSchemaHash, "operation input_schema_hash", true)
@@ -596,7 +596,7 @@ func (r *OperationResult) Normalize() error {
 	if err != nil {
 		return err
 	}
-	if r.OutputSchemaVersion < 0 || (r.OutputSchemaVersion == 0) != (outSchemaHash == "") {
+	if r.OutputSchemaVersion < 0 || r.OutputSchemaVersion > MaxDomainSchemaVersion || (r.OutputSchemaVersion == 0) != (outSchemaHash == "") {
 		return fmt.Errorf("operation result output schema identity is incomplete")
 	}
 	reportHash, err := normalizeDomainHash(r.ReportHash, "operation result report_hash", false)
@@ -629,7 +629,7 @@ func (r *OperationResult) Normalize() error {
 		if err != nil {
 			return fmt.Errorf("steps[%d]: %w", i, err)
 		}
-		if step.OutputSchemaVersion < 0 || (step.OutputSchemaVersion == 0) != (stepOutputSchemaHash == "") {
+		if step.OutputSchemaVersion < 0 || step.OutputSchemaVersion > MaxDomainSchemaVersion || (step.OutputSchemaVersion == 0) != (stepOutputSchemaHash == "") {
 			return fmt.Errorf("steps[%d] output schema identity is incomplete", i)
 		}
 		if len(step.Evidence) > MaxDomainReferences {
@@ -653,6 +653,7 @@ func (r *OperationResult) Normalize() error {
 		}
 		step.StepID, step.Status, step.OutputSchemaHash, step.OutputHash = id, stepStatus, stepOutputSchemaHash, output
 	}
+	sort.Slice(r.Steps, func(i, j int) bool { return r.Steps[i].StepID < r.Steps[j].StepID })
 	for i := range r.Evidence {
 		if err := r.Evidence[i].Normalize(); err != nil {
 			return fmt.Errorf("evidence[%d]: %w", i, err)

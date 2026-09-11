@@ -282,17 +282,39 @@ func (r *WorkReceiptFinalizeRequest) Normalize() error {
 	if r.ReceiptID == "" {
 		r.ReceiptID = NewID("receipt")
 	}
-	if r.WorkspaceID == "" || r.IdempotencyKey == "" || r.WorkKind == "" || r.WorkID == "" {
-		return fmt.Errorf("workspace_id, idempotency_key, work_kind, and work_id are required")
+	workspace, err := normalizeDomainWorkspace(r.WorkspaceID)
+	if err != nil {
+		return err
 	}
-	if len(r.ReceiptID) > MaxWorkReceiptIDLength || len(r.RequestID) > MaxWorkReceiptIDLength || len(r.IdempotencyKey) > MaxIdempotencyLength || len(r.WorkKind) > MaxWorkReceiptNameLength || len(r.WorkID) > MaxWorkReceiptIDLength {
-		return fmt.Errorf("work receipt identity is too large")
+	r.WorkspaceID = workspace
+	if r.ReceiptID, err = normalizeDomainIdentifier(r.ReceiptID, "receipt_id", MaxWorkReceiptIDLength, true); err != nil {
+		return err
 	}
-	if r.Task != nil && (r.Task.Kind != "task" || strings.TrimSpace(r.Task.ID) == "" || r.Task.WorkspaceID != r.WorkspaceID) {
-		return fmt.Errorf("task reference must be workspace-scoped")
+	if r.RequestID, err = normalizeDomainIdentifier(r.RequestID, "request_id", MaxWorkReceiptIDLength, true); err != nil {
+		return err
 	}
-	if r.Session != nil && (r.Session.Kind != "session" || strings.TrimSpace(r.Session.ID) == "" || r.Session.WorkspaceID != r.WorkspaceID) {
-		return fmt.Errorf("session reference must be workspace-scoped")
+	if r.IdempotencyKey, err = normalizeDomainIdentifier(r.IdempotencyKey, "idempotency_key", MaxIdempotencyLength, true); err != nil {
+		return err
+	}
+	if r.WorkKind, err = normalizeDomainName(r.WorkKind, "work_kind", MaxWorkReceiptNameLength, true); err != nil {
+		return err
+	}
+	if r.WorkID, err = normalizeDomainIdentifier(r.WorkID, "work_id", MaxWorkReceiptIDLength, true); err != nil {
+		return err
+	}
+	if err := normalizeDomainActor(&r.Actor, r.WorkspaceID); err != nil {
+		return err
+	}
+	if r.TaskOwnerID != "" {
+		if r.TaskOwnerID, err = normalizeDomainIdentifier(r.TaskOwnerID, "task_owner_id", MaxWorkReceiptIDLength, true); err != nil {
+			return err
+		}
+	}
+	if err := normalizeDomainEntity(r.Task, "task", r.WorkspaceID); err != nil {
+		return err
+	}
+	if err := normalizeDomainEntity(r.Session, "session", r.WorkspaceID); err != nil {
+		return err
 	}
 	if r.Operation != nil {
 		if err := r.Operation.Normalize(); err != nil {
@@ -509,24 +531,25 @@ func (r *WorkReceipt) Normalize() error {
 	if r.Status != WorkReceiptStatusVerified && r.Status != WorkReceiptStatusRejected {
 		return fmt.Errorf("invalid work receipt status %q", r.Status)
 	}
-	if r.CanonicalHash == "" {
-		r.CanonicalHash = r.StableHash()
-	}
-	if !canonicalSHA256(r.CanonicalHash) {
-		return fmt.Errorf("canonical_hash must be a lowercase sha256")
-	}
-	if r.RequestHash == "" {
-		r.RequestHash = hashReceiptJSON(r.requestPayload())
-	}
-	if !canonicalSHA256(r.RequestHash) {
-		return fmt.Errorf("request_hash must be a lowercase sha256")
-	}
 	if r.Verification.Status == "" {
 		r.Verification.Status = r.Status
+	} else if r.Verification.Status != r.Status {
+		return fmt.Errorf("verification status must match receipt status")
 	}
-	if r.Verification.ReceiptHash == "" {
-		r.Verification.ReceiptHash = r.CanonicalHash
+	expectedCanonicalHash := r.StableHash()
+	if r.CanonicalHash != "" && r.CanonicalHash != expectedCanonicalHash {
+		return fmt.Errorf("canonical_hash does not match normalized receipt")
 	}
+	r.CanonicalHash = expectedCanonicalHash
+	expectedRequestHash := r.RequestContentHash()
+	if r.RequestHash != "" && r.RequestHash != expectedRequestHash {
+		return fmt.Errorf("request_hash does not match normalized receipt")
+	}
+	r.RequestHash = expectedRequestHash
+	if r.Verification.ReceiptHash != "" && r.Verification.ReceiptHash != r.CanonicalHash {
+		return fmt.Errorf("verification receipt_hash does not match canonical_hash")
+	}
+	r.Verification.ReceiptHash = r.CanonicalHash
 	return nil
 }
 
@@ -639,16 +662,27 @@ func normalizeWorkReceiptStep(s *WorkReceiptStep, _ int) error {
 }
 
 func normalizeWorkReceiptReference(r *WorkReceiptReference, workspaceID string) error {
-	r.WorkspaceID, r.Kind, r.SourceID, r.Role, r.Hash = strings.TrimSpace(r.WorkspaceID), strings.TrimSpace(r.Kind), strings.TrimSpace(r.SourceID), strings.TrimSpace(r.Role), normalizeReceiptHash(r.Hash)
-	if r.WorkspaceID != workspaceID || r.Kind == "" || r.SourceID == "" {
-		return fmt.Errorf("workspace, kind, and source_id must be present")
+	r.WorkspaceID = strings.TrimSpace(r.WorkspaceID)
+	if r.WorkspaceID != workspaceID {
+		return fmt.Errorf("reference workspace is invalid")
 	}
-	if !validWorkReceiptReferenceKind(r.Kind) || len(r.Kind) > MaxWorkReceiptNameLength || len(r.SourceID) > MaxWorkReceiptIDLength || len(r.Role) > MaxWorkReceiptRoleLength {
-		return fmt.Errorf("reference identity is invalid")
+	kind, err := normalizeDomainName(r.Kind, "reference kind", MaxWorkReceiptNameLength, true)
+	if err != nil || !validWorkReceiptReferenceKind(kind) {
+		return fmt.Errorf("reference kind is invalid")
 	}
-	if r.Hash != "" && !canonicalSHA256(r.Hash) {
-		return fmt.Errorf("reference hash must be lowercase sha256")
+	sourceID, err := normalizeDomainIdentifier(r.SourceID, "reference source_id", MaxWorkReceiptIDLength, true)
+	if err != nil {
+		return err
 	}
+	role, err := normalizeDomainName(r.Role, "reference role", MaxWorkReceiptRoleLength, false)
+	if err != nil {
+		return err
+	}
+	hash, err := normalizeDomainHash(r.Hash, "reference hash", false)
+	if err != nil {
+		return err
+	}
+	r.Kind, r.SourceID, r.Role, r.Hash = kind, sourceID, role, hash
 	return nil
 }
 

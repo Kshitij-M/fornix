@@ -179,6 +179,39 @@ func TestDomainNeutralMetadataAndSchemaFailClosed(t *testing.T) {
 	if err := request.Normalize(); err == nil {
 		t.Fatal("unsupported operation schema was accepted")
 	}
+	request = domainTestOperation(t, "workspace-a", "request-a", "idempotency-a")
+	request.InputSchemaVersion = MaxDomainSchemaVersion + 1
+	if err := request.Normalize(); err == nil {
+		t.Fatal("unbounded input schema version was accepted")
+	}
+}
+
+func TestDomainNeutralNormalizationCanonicalizesSafeMetadataAndReferences(t *testing.T) {
+	request := domainTestOperation(t, "workspace-a", "request-a", "idempotency-a")
+	request.Metadata = map[string]string{" Region ": " us-east-1 "}
+	if err := request.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	if request.Metadata["region"] != "us-east-1" || len(request.Metadata) != 1 {
+		t.Fatalf("metadata was not canonicalized: %#v", request.Metadata)
+	}
+	canonical := domainTestOperation(t, "workspace-a", "request-a", "idempotency-a")
+	canonical.Metadata = map[string]string{"region": "us-east-1"}
+	if request.StableHash() != canonical.StableHash() {
+		t.Fatal("equivalent normalized metadata changed the operation hash")
+	}
+
+	request = domainTestOperation(t, "workspace-a", "request-a", "idempotency-a")
+	request.Metadata = map[string]string{"region": "us-east-1", " Region ": "us-west-2"}
+	if err := request.Normalize(); err == nil {
+		t.Fatal("metadata key collision after normalization was accepted")
+	}
+
+	request = domainTestOperation(t, "workspace-a", "request-a", "idempotency-a")
+	request.Task = &EntityRef{ID: "task\n1", Kind: "task", WorkspaceID: request.WorkspaceID}
+	if err := request.Normalize(); err == nil {
+		t.Fatal("malformed task identity was accepted")
+	}
 }
 
 func TestDomainNeutralRepositoryAndNonRepositoryRoundTrip(t *testing.T) {
@@ -252,6 +285,23 @@ func TestDomainNeutralResultRequiresFailureForFailedStatus(t *testing.T) {
 	}
 	if result.StableHash() == "" {
 		t.Fatal("normalized result has no stable hash")
+	}
+}
+
+func TestDomainNeutralResultHashCanonicalizesStepOrder(t *testing.T) {
+	request := domainTestOperation(t, "workspace-a", "request-a", "idempotency-a")
+	if err := request.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	first := OperationResult{
+		ID: "result-1", OperationID: request.ID, OperationHash: request.StableHash(),
+		WorkspaceID: request.WorkspaceID, Actor: request.Actor, Status: OperationStatusSucceeded,
+		Steps: []OperationStepResult{{StepID: "step-b", Status: OperationStatusSucceeded}, {StepID: "step-a", Status: OperationStatusSucceeded}},
+	}
+	second := first
+	second.Steps = []OperationStepResult{{StepID: "step-a", Status: OperationStatusSucceeded}, {StepID: "step-b", Status: OperationStatusSucceeded}}
+	if first.StableHash() == "" || first.StableHash() != second.StableHash() {
+		t.Fatal("result step order changed the canonical hash")
 	}
 }
 
