@@ -72,9 +72,11 @@ qualification note records the remaining gaps.
 The domain-neutral foundation now represents a typed operation against a
 system resource through a versioned connector and capability. It supports
 read-only and write classifications, bounded execution profiles, evidence
-requirements, and explicit at-least-once external effects. It is a contract
-boundary only: future database, API, cloud, ticketing, and other adapters must
-still earn admission, execution, verification, and recovery semantics.
+requirements, and explicit at-least-once external effects. The alpha now also
+has a process-local, fail-closed connector/capability registry and a
+read-only repository adapter conformance seam. Durable operation authority,
+universal policy, verification, and recovery for future database, API, cloud,
+ticketing, and other adapters remain future work.
 
 ## The Work Receipt
 

@@ -32,6 +32,9 @@ func ValidateOperationRequest(request OperationRequest, definition CapabilityDef
 	if len(definition.ResourceKinds) == 0 {
 		return fmt.Errorf("capability has no registered resource kinds")
 	}
+	if request.InputSchemaVersion != definition.InputSchemaVersion || request.InputSchemaHash != definition.InputSchemaHash {
+		return fmt.Errorf("operation input schema does not match capability definition")
+	}
 	allowedKind := false
 	for _, kind := range definition.ResourceKinds {
 		if request.Target.Kind == kind {

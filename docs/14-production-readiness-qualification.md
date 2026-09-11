@@ -178,9 +178,11 @@ still requires safe patch application and reviewer-facing change validation.
   delegated policy administration, or policy-as-code review workflows.
 - Domain-neutral operation contracts are now available for typed system,
   resource, connector, capability, effect, execution, evidence, plan, result,
-  and external-effect references. They are contract-qualified only; no generic
-  connector registry, executor, or non-repository adapter is included in this
-  alpha qualification.
+  and external-effect references. A process-local connector/capability
+  registry, fail-closed admission seam, bounded executor, and read-only
+  repository adapter conformance slice are also qualified. Durable generic
+  operation authority, universal policy, external connectors, and non-repository
+  production execution remain outside this alpha qualification.
 - The projection runtime is an internal pull API; no background subscriber or
   public replay API is provided yet.
 - Lease transitions are current coordination state rather than an append-only

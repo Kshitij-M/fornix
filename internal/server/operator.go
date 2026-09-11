@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -31,6 +32,11 @@ func (s *server) handleOperatorBootstrap(w http.ResponseWriter, r *http.Request)
 	}
 	if result.Workspace.ToolRoot != "" {
 		_ = s.toolExecutor.Policy.RegisterWorkspaceTool(result.Workspace.ID, "fornix.repository.read", "repository.read", result.Workspace.ToolRoot)
+	}
+	if err := registerRepositoryConnector(s.connectorRegistry, result.Workspace.ID); err != nil {
+		// Bootstrap is already durable; report the registration failure for
+		// operator diagnosis without pretending it rolled back the workspace.
+		log.Printf("register workspace connector %s: %v", result.Workspace.ID, err)
 	}
 	writeJSON(w, http.StatusOK, result)
 }
