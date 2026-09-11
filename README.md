@@ -310,6 +310,8 @@ The most useful entry points are:
   — verified capabilities and explicit production gaps.
 - [Reference reuse matrix](docs/13-reference-reuse-matrix.md) — research
   sources, independent reimplementation decisions, and license boundaries.
+- [Connector and capability foundation](docs/67-connector-capability-foundation.md)
+  — explicit adapter registration, fail-closed admission, and conformance.
 - [Contributing](CONTRIBUTING.md) and [Security](SECURITY.md) — how to help
   safely and how to report security concerns.
 
@@ -320,6 +322,8 @@ cmd/fornix/                 service and operator CLI entrypoint
 cmd/fornix-watcher/         filesystem watcher and indexing loop
 cmd/fornix-eval/            offline retrieval-evaluation CLI
 internal/contracts/         typed control-plane contracts
+internal/connector/         connector registry, admission, execution, conformance
+internal/adapters/          domain-specific connector implementations
 internal/model/             provider registry, gateway, and adapters
 internal/tool/              tool registry, policy, approvals, and executor
 internal/scheduler/         durable agent-run scheduling and recovery

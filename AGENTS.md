@@ -11,7 +11,8 @@ behind that outcome. Do not describe the alpha as a complete autonomous
 operations product. Read `docs/01-product-vision.md` for the product
 narrative, `docs/00-fornix-foundation.md` for the engineering contract, and
 `docs/66-domain-neutral-harness-foundation.md` before changing the generic
-operation boundary.
+operation boundary. Read `docs/67-connector-capability-foundation.md` before
+changing connector registration, capability admission, or adapter execution.
 
 ## Research gate
 

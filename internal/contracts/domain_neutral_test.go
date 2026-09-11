@@ -54,7 +54,7 @@ func domainTestOperation(t *testing.T, workspace, requestID, idempotency string)
 		ID: idempotency + "-operation", RequestID: requestID, IdempotencyKey: idempotency,
 		WorkspaceID: workspace, Actor: ActorRef{ID: "actor-1", Kind: "operator", WorkspaceID: workspace},
 		Capability: definition.Ref, Target: domainTestResource(workspace, "repository", "repo-1", "repository", "repo-1"),
-		InputType: "repository.inspect", InputSchemaVersion: 1, InputHash: domainTestHash("input"),
+		InputType: "repository.inspect", InputSchemaVersion: 1, InputSchemaHash: definition.InputSchemaHash, InputHash: domainTestHash("input"),
 		Profile: DefaultExecutionProfile(), Metadata: map[string]string{"region": "us-east-1"},
 	}
 }
@@ -337,7 +337,7 @@ func domainTestOperationForBenchmark() OperationRequest {
 		ID: "operation-1", RequestID: "request-1", IdempotencyKey: "idempotency-1",
 		WorkspaceID: "workspace-a", Actor: ActorRef{ID: "actor-1", Kind: "operator", WorkspaceID: "workspace-a"},
 		Capability: definition.Ref, Target: domainTestResource("workspace-a", "repository", "repo-1", "repository", "repo-1"),
-		InputType: "repository.inspect", InputSchemaVersion: 1, InputHash: domainTestHash("input"),
+		InputType: "repository.inspect", InputSchemaVersion: 1, InputSchemaHash: definition.InputSchemaHash, InputHash: domainTestHash("input"),
 		Profile: DefaultExecutionProfile(),
 	}
 }

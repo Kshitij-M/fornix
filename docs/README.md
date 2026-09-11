@@ -27,6 +27,7 @@ explains the distinction.
 | How the project handles community conduct | [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) |
 | Which design rules are non-negotiable | [`00-fornix-foundation.md`](00-fornix-foundation.md) |
 | How generic production-system operations are represented | [`66-domain-neutral-harness-foundation.md`](66-domain-neutral-harness-foundation.md) |
+| How connectors and capabilities are explicitly registered and admitted | [`67-connector-capability-foundation.md`](67-connector-capability-foundation.md) |
 | Which routes and request rules exist | [`53-http-api-reference.md`](53-http-api-reference.md) |
 | What is actually qualified today | [`14-production-readiness-qualification.md`](14-production-readiness-qualification.md) |
 | How documentation should be written | [`52-documentation-guide.md`](52-documentation-guide.md) |

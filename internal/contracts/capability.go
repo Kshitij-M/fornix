@@ -9,6 +9,67 @@ import (
 	"strings"
 )
 
+const (
+	DefaultCapabilityMaxAttempts   = 1
+	MaxCapabilityMaxAttempts       = 32
+	DefaultCapabilityBackoffMS     = 100
+	MaxCapabilityBackoffMS         = 10 * 60 * 1000
+	DefaultCapabilityMaxRows       = 10000
+	MaxCapabilityMaxRows           = 1_000_000
+	DefaultCapabilityRatePerMinute = 60
+	MaxCapabilityRatePerMinute     = 100_000
+)
+
+// CapabilityRetryPolicy declares bounded, deterministic retry behavior for a
+// registered capability. It contains failure classes, not provider-specific
+// error text; the operation authority remains responsible for durable retry
+// state and backoff scheduling.
+type CapabilityRetryPolicy struct {
+	MaxAttempts    int      `json:"max_attempts"`
+	BackoffMS      int64    `json:"backoff_ms"`
+	MaxBackoffMS   int64    `json:"max_backoff_ms"`
+	Jitter         string   `json:"jitter"`
+	RetryableCodes []string `json:"retryable_codes,omitempty"`
+}
+
+// Normalize applies bounded defaults and rejects nondeterministic retry
+// configuration. Jitter is intentionally limited to none until replay-aware
+// scheduling is part of the durable operation runtime.
+func (p *CapabilityRetryPolicy) Normalize() error {
+	if p == nil {
+		return fmt.Errorf("capability retry policy is nil")
+	}
+	if p.MaxAttempts == 0 {
+		p.MaxAttempts = DefaultCapabilityMaxAttempts
+	}
+	if p.BackoffMS == 0 {
+		p.BackoffMS = DefaultCapabilityBackoffMS
+	}
+	if p.MaxBackoffMS == 0 {
+		p.MaxBackoffMS = MaxCapabilityBackoffMS
+	}
+	p.Jitter = strings.ToLower(strings.TrimSpace(p.Jitter))
+	if p.Jitter == "" {
+		p.Jitter = "none"
+	}
+	if p.MaxAttempts < 1 || p.MaxAttempts > MaxCapabilityMaxAttempts ||
+		p.BackoffMS < 0 || p.BackoffMS > MaxCapabilityBackoffMS ||
+		p.MaxBackoffMS < p.BackoffMS || p.MaxBackoffMS > MaxCapabilityBackoffMS ||
+		p.Jitter != "none" {
+		return fmt.Errorf("capability retry policy is outside supported deterministic bounds")
+	}
+	codes, err := normalizeDomainStrings(p.RetryableCodes, "capability retryable_codes", MaxDomainReferences)
+	if err != nil {
+		return err
+	}
+	for i := range codes {
+		codes[i] = strings.ToLower(codes[i])
+	}
+	sort.Strings(codes)
+	p.RetryableCodes = codes
+	return nil
+}
+
 // CapabilityRef points to a registered operation definition. DefinitionHash
 // is required on an executable reference so a name alone can never select an
 // unknown or silently changed capability.
@@ -24,6 +85,13 @@ type CapabilityRef struct {
 // Normalize validates a capability reference intended for execution.
 func (r *CapabilityRef) Normalize() error {
 	return r.normalize(true)
+}
+
+// NormalizeIdentity validates a capability identity before its definition
+// hash is known. It is intended for deterministic discovery lookups; an
+// executable request must still use Normalize and carry DefinitionHash.
+func (r *CapabilityRef) NormalizeIdentity() error {
+	return r.normalize(false)
 }
 
 func (r *CapabilityRef) normalize(requireDefinitionHash bool) error {
@@ -76,21 +144,27 @@ func (r CapabilityRef) StableHash() string {
 // is computed from the definition with Ref.DefinitionHash omitted, preventing
 // a self-referential hash.
 type CapabilityDefinition struct {
-	SchemaVersion        int                   `json:"schema_version"`
-	WorkspaceID          string                `json:"workspace_id"`
-	Ref                  CapabilityRef         `json:"ref"`
-	Description          string                `json:"description,omitempty"`
-	InputSchemaVersion   int                   `json:"input_schema_version"`
-	InputSchemaHash      string                `json:"input_schema_hash"`
-	OutputSchemaVersion  int                   `json:"output_schema_version"`
-	OutputSchemaHash     string                `json:"output_schema_hash"`
-	Effect               EffectClass           `json:"effect"`
-	Profile              ExecutionProfile      `json:"profile"`
-	Evidence             []EvidenceRequirement `json:"evidence,omitempty"`
-	ResourceKinds        []string              `json:"resource_kinds,omitempty"`
-	SupportsIdempotency  bool                  `json:"supports_idempotency"`
-	SupportsVerification bool                  `json:"supports_verification"`
-	Enabled              bool                  `json:"enabled"`
+	SchemaVersion          int                   `json:"schema_version"`
+	WorkspaceID            string                `json:"workspace_id"`
+	Ref                    CapabilityRef         `json:"ref"`
+	Description            string                `json:"description,omitempty"`
+	InputSchemaVersion     int                   `json:"input_schema_version"`
+	InputSchemaHash        string                `json:"input_schema_hash"`
+	OutputSchemaVersion    int                   `json:"output_schema_version"`
+	OutputSchemaHash       string                `json:"output_schema_hash"`
+	Effect                 EffectClass           `json:"effect"`
+	Profile                ExecutionProfile      `json:"profile"`
+	Evidence               []EvidenceRequirement `json:"evidence,omitempty"`
+	ResourceKinds          []string              `json:"resource_kinds,omitempty"`
+	RetryPolicy            CapabilityRetryPolicy `json:"retry_policy"`
+	MaxRows                int                   `json:"max_rows"`
+	RateLimitPerMinute     int                   `json:"rate_limit_per_minute"`
+	RequiredCredentialRefs []string              `json:"required_credential_refs,omitempty"`
+	RequiresApproval       bool                  `json:"requires_approval"`
+	SupportsCancellation   bool                  `json:"supports_cancellation"`
+	SupportsIdempotency    bool                  `json:"supports_idempotency"`
+	SupportsVerification   bool                  `json:"supports_verification"`
+	Enabled                bool                  `json:"enabled"`
 }
 
 // Normalize validates a definition and assigns Ref.DefinitionHash from its
@@ -140,6 +214,23 @@ func (d *CapabilityDefinition) Normalize() error {
 	if err := d.Profile.Normalize(); err != nil {
 		return fmt.Errorf("capability profile: %w", err)
 	}
+	if err := d.RetryPolicy.Normalize(); err != nil {
+		return fmt.Errorf("capability retry policy: %w", err)
+	}
+	if d.MaxRows == 0 {
+		d.MaxRows = DefaultCapabilityMaxRows
+	}
+	if d.RateLimitPerMinute == 0 {
+		d.RateLimitPerMinute = DefaultCapabilityRatePerMinute
+	}
+	if d.MaxRows < 1 || d.MaxRows > MaxCapabilityMaxRows || d.RateLimitPerMinute < 1 || d.RateLimitPerMinute > MaxCapabilityRatePerMinute {
+		return fmt.Errorf("capability row or rate budget is outside supported bounds")
+	}
+	credentialRefs, err := normalizeDomainStrings(d.RequiredCredentialRefs, "capability required_credential_refs", MaxDomainReferences)
+	if err != nil {
+		return err
+	}
+	d.RequiredCredentialRefs = credentialRefs
 	if len(d.Evidence) > MaxDomainReferences {
 		return fmt.Errorf("capability evidence exceeds %d entries", MaxDomainReferences)
 	}
@@ -179,21 +270,27 @@ func (d CapabilityDefinition) StableHash() string {
 		return ""
 	}
 	type logicalDefinition struct {
-		SchemaVersion        int                   `json:"schema_version"`
-		WorkspaceID          string                `json:"workspace_id"`
-		Ref                  CapabilityRef         `json:"ref"`
-		Description          string                `json:"description,omitempty"`
-		InputSchemaVersion   int                   `json:"input_schema_version"`
-		InputSchemaHash      string                `json:"input_schema_hash"`
-		OutputSchemaVersion  int                   `json:"output_schema_version"`
-		OutputSchemaHash     string                `json:"output_schema_hash"`
-		Effect               EffectClass           `json:"effect"`
-		Profile              ExecutionProfile      `json:"profile"`
-		Evidence             []EvidenceRequirement `json:"evidence,omitempty"`
-		ResourceKinds        []string              `json:"resource_kinds,omitempty"`
-		SupportsIdempotency  bool                  `json:"supports_idempotency"`
-		SupportsVerification bool                  `json:"supports_verification"`
-		Enabled              bool                  `json:"enabled"`
+		SchemaVersion          int                   `json:"schema_version"`
+		WorkspaceID            string                `json:"workspace_id"`
+		Ref                    CapabilityRef         `json:"ref"`
+		Description            string                `json:"description,omitempty"`
+		InputSchemaVersion     int                   `json:"input_schema_version"`
+		InputSchemaHash        string                `json:"input_schema_hash"`
+		OutputSchemaVersion    int                   `json:"output_schema_version"`
+		OutputSchemaHash       string                `json:"output_schema_hash"`
+		Effect                 EffectClass           `json:"effect"`
+		Profile                ExecutionProfile      `json:"profile"`
+		Evidence               []EvidenceRequirement `json:"evidence,omitempty"`
+		ResourceKinds          []string              `json:"resource_kinds,omitempty"`
+		RetryPolicy            CapabilityRetryPolicy `json:"retry_policy"`
+		MaxRows                int                   `json:"max_rows"`
+		RateLimitPerMinute     int                   `json:"rate_limit_per_minute"`
+		RequiredCredentialRefs []string              `json:"required_credential_refs,omitempty"`
+		RequiresApproval       bool                  `json:"requires_approval"`
+		SupportsCancellation   bool                  `json:"supports_cancellation"`
+		SupportsIdempotency    bool                  `json:"supports_idempotency"`
+		SupportsVerification   bool                  `json:"supports_verification"`
+		Enabled                bool                  `json:"enabled"`
 	}
 	d.Ref.DefinitionHash = ""
 	raw, _ := json.Marshal(logicalDefinition{
@@ -202,6 +299,9 @@ func (d CapabilityDefinition) StableHash() string {
 		InputSchemaHash: d.InputSchemaHash, OutputSchemaVersion: d.OutputSchemaVersion,
 		OutputSchemaHash: d.OutputSchemaHash, Effect: d.Effect, Profile: d.Profile,
 		Evidence: d.Evidence, ResourceKinds: d.ResourceKinds,
+		RetryPolicy: d.RetryPolicy, MaxRows: d.MaxRows, RateLimitPerMinute: d.RateLimitPerMinute,
+		RequiredCredentialRefs: d.RequiredCredentialRefs,
+		RequiresApproval:       d.RequiresApproval, SupportsCancellation: d.SupportsCancellation,
 		SupportsIdempotency: d.SupportsIdempotency, SupportsVerification: d.SupportsVerification,
 		Enabled: d.Enabled,
 	})
@@ -215,6 +315,8 @@ func cloneCapabilityDefinition(d CapabilityDefinition) CapabilityDefinition {
 		d.Evidence[i].RequiredFields = append([]string(nil), d.Evidence[i].RequiredFields...)
 	}
 	d.ResourceKinds = append([]string(nil), d.ResourceKinds...)
+	d.RequiredCredentialRefs = append([]string(nil), d.RequiredCredentialRefs...)
+	d.RetryPolicy.RetryableCodes = append([]string(nil), d.RetryPolicy.RetryableCodes...)
 	return d
 }
 
@@ -259,6 +361,23 @@ func (d *CapabilityDefinition) normalizeForHash() error {
 	if err := d.Profile.Normalize(); err != nil {
 		return err
 	}
+	if err := d.RetryPolicy.Normalize(); err != nil {
+		return err
+	}
+	if d.MaxRows == 0 {
+		d.MaxRows = DefaultCapabilityMaxRows
+	}
+	if d.RateLimitPerMinute == 0 {
+		d.RateLimitPerMinute = DefaultCapabilityRatePerMinute
+	}
+	if d.MaxRows < 1 || d.MaxRows > MaxCapabilityMaxRows || d.RateLimitPerMinute < 1 || d.RateLimitPerMinute > MaxCapabilityRatePerMinute {
+		return fmt.Errorf("capability row or rate budget is outside supported bounds")
+	}
+	credentialRefs, err := normalizeDomainStrings(d.RequiredCredentialRefs, "capability required_credential_refs", MaxDomainReferences)
+	if err != nil {
+		return err
+	}
+	d.RequiredCredentialRefs = credentialRefs
 	if len(d.Evidence) > MaxDomainReferences {
 		return fmt.Errorf("capability evidence exceeds %d entries", MaxDomainReferences)
 	}

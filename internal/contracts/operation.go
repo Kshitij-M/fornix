@@ -99,6 +99,7 @@ type OperationRequest struct {
 	Target             ResourceRef       `json:"target"`
 	InputType          string            `json:"input_type"`
 	InputSchemaVersion int               `json:"input_schema_version"`
+	InputSchemaHash    string            `json:"input_schema_hash"`
 	InputHash          string            `json:"input_hash"`
 	Profile            ExecutionProfile  `json:"profile"`
 	Metadata           map[string]string `json:"metadata,omitempty"`
@@ -171,6 +172,10 @@ func (r *OperationRequest) Normalize() error {
 	if r.InputSchemaVersion < 1 {
 		return fmt.Errorf("operation input_schema_version is required")
 	}
+	inputSchemaHash, err := normalizeDomainHash(r.InputSchemaHash, "operation input_schema_hash", true)
+	if err != nil {
+		return err
+	}
 	if err := r.Profile.Normalize(); err != nil {
 		return fmt.Errorf("operation profile: %w", err)
 	}
@@ -184,7 +189,7 @@ func (r *OperationRequest) Normalize() error {
 		requestID = NewID("op-request")
 	}
 	r.WorkspaceID, r.ID, r.RequestID, r.IdempotencyKey = workspace, id, requestID, key
-	r.CausationID, r.CorrelationID, r.InputType, r.InputHash = causation, correlation, typ, inputHash
+	r.CausationID, r.CorrelationID, r.InputType, r.InputSchemaHash, r.InputHash = causation, correlation, typ, inputSchemaHash, inputHash
 	return nil
 }
 
@@ -457,11 +462,13 @@ func (r *OperationEvidenceRef) Normalize() error {
 
 // OperationStepResult is a bounded outcome for one plan node.
 type OperationStepResult struct {
-	StepID         string                 `json:"step_id"`
-	Status         string                 `json:"status"`
-	OutputHash     string                 `json:"output_hash,omitempty"`
-	Evidence       []OperationEvidenceRef `json:"evidence,omitempty"`
-	ExternalEffect *ExternalEffect        `json:"external_effect,omitempty"`
+	StepID              string                 `json:"step_id"`
+	Status              string                 `json:"status"`
+	OutputSchemaVersion int                    `json:"output_schema_version,omitempty"`
+	OutputSchemaHash    string                 `json:"output_schema_hash,omitempty"`
+	OutputHash          string                 `json:"output_hash,omitempty"`
+	Evidence            []OperationEvidenceRef `json:"evidence,omitempty"`
+	ExternalEffect      *ExternalEffect        `json:"external_effect,omitempty"`
 }
 
 // OperationFailure is a stable failure category. Details are represented by a
@@ -523,22 +530,24 @@ func validOperationFailureCode(code string) bool {
 
 // OperationResult is the durable, hash-only result boundary for one operation.
 type OperationResult struct {
-	SchemaVersion   int                    `json:"schema_version"`
-	ID              string                 `json:"id"`
-	OperationID     string                 `json:"operation_id"`
-	OperationHash   string                 `json:"operation_hash"`
-	RequestID       string                 `json:"request_id,omitempty"`
-	WorkspaceID     string                 `json:"workspace_id"`
-	Actor           ActorRef               `json:"actor"`
-	Status          string                 `json:"status"`
-	OutputHash      string                 `json:"output_hash,omitempty"`
-	ReportHash      string                 `json:"report_hash,omitempty"`
-	Steps           []OperationStepResult  `json:"steps,omitempty"`
-	Evidence        []OperationEvidenceRef `json:"evidence,omitempty"`
-	ExternalEffects []ExternalEffect       `json:"external_effects,omitempty"`
-	Failure         *OperationFailure      `json:"failure,omitempty"`
-	StartedAt       time.Time              `json:"started_at,omitempty"`
-	CompletedAt     time.Time              `json:"completed_at,omitempty"`
+	SchemaVersion       int                    `json:"schema_version"`
+	ID                  string                 `json:"id"`
+	OperationID         string                 `json:"operation_id"`
+	OperationHash       string                 `json:"operation_hash"`
+	RequestID           string                 `json:"request_id,omitempty"`
+	WorkspaceID         string                 `json:"workspace_id"`
+	Actor               ActorRef               `json:"actor"`
+	Status              string                 `json:"status"`
+	OutputSchemaVersion int                    `json:"output_schema_version,omitempty"`
+	OutputSchemaHash    string                 `json:"output_schema_hash,omitempty"`
+	OutputHash          string                 `json:"output_hash,omitempty"`
+	ReportHash          string                 `json:"report_hash,omitempty"`
+	Steps               []OperationStepResult  `json:"steps,omitempty"`
+	Evidence            []OperationEvidenceRef `json:"evidence,omitempty"`
+	ExternalEffects     []ExternalEffect       `json:"external_effects,omitempty"`
+	Failure             *OperationFailure      `json:"failure,omitempty"`
+	StartedAt           time.Time              `json:"started_at,omitempty"`
+	CompletedAt         time.Time              `json:"completed_at,omitempty"`
 }
 
 // Normalize validates a result and all nested workspace-scoped evidence.
@@ -583,6 +592,13 @@ func (r *OperationResult) Normalize() error {
 	if err != nil {
 		return err
 	}
+	outSchemaHash, err := normalizeDomainHash(r.OutputSchemaHash, "operation result output_schema_hash", false)
+	if err != nil {
+		return err
+	}
+	if r.OutputSchemaVersion < 0 || (r.OutputSchemaVersion == 0) != (outSchemaHash == "") {
+		return fmt.Errorf("operation result output schema identity is incomplete")
+	}
 	reportHash, err := normalizeDomainHash(r.ReportHash, "operation result report_hash", false)
 	if err != nil {
 		return err
@@ -609,6 +625,13 @@ func (r *OperationResult) Normalize() error {
 		if err != nil {
 			return fmt.Errorf("steps[%d]: %w", i, err)
 		}
+		stepOutputSchemaHash, err := normalizeDomainHash(step.OutputSchemaHash, "operation result step output_schema_hash", false)
+		if err != nil {
+			return fmt.Errorf("steps[%d]: %w", i, err)
+		}
+		if step.OutputSchemaVersion < 0 || (step.OutputSchemaVersion == 0) != (stepOutputSchemaHash == "") {
+			return fmt.Errorf("steps[%d] output schema identity is incomplete", i)
+		}
 		if len(step.Evidence) > MaxDomainReferences {
 			return fmt.Errorf("steps[%d] evidence exceeds bounds", i)
 		}
@@ -628,7 +651,7 @@ func (r *OperationResult) Normalize() error {
 				return fmt.Errorf("steps[%d] external effect crosses workspace boundary", i)
 			}
 		}
-		step.StepID, step.Status, step.OutputHash = id, stepStatus, output
+		step.StepID, step.Status, step.OutputSchemaHash, step.OutputHash = id, stepStatus, stepOutputSchemaHash, output
 	}
 	for i := range r.Evidence {
 		if err := r.Evidence[i].Normalize(); err != nil {
@@ -660,7 +683,7 @@ func (r *OperationResult) Normalize() error {
 	if status != OperationStatusFailed && r.Failure != nil {
 		return fmt.Errorf("operation failure is only valid for failed results")
 	}
-	r.WorkspaceID, r.ID, r.OperationID, r.OperationHash, r.RequestID, r.Status, r.OutputHash, r.ReportHash = workspace, id, operationID, opHash, requestID, status, outHash, reportHash
+	r.WorkspaceID, r.ID, r.OperationID, r.OperationHash, r.RequestID, r.Status, r.OutputSchemaHash, r.OutputHash, r.ReportHash = workspace, id, operationID, opHash, requestID, status, outSchemaHash, outHash, reportHash
 	return nil
 }
 
