@@ -241,7 +241,7 @@ func (s *ValidationStore) Start(ctx context.Context, input StartValidationInput)
 			agent_run_ref,task_owner_id,task_fence,plan,budget,status,dry_run,policy_id,policy_version,policy_hash)
 		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13::jsonb,$14::jsonb,
 			$15::jsonb,$16::jsonb,$17,$18,$19::jsonb,$20::jsonb,'pending',$21,$22,$23,$24)
-		ON CONFLICT (workspace_id,idempotency_key) DO NOTHING
+		ON CONFLICT DO NOTHING
 		RETURNING id`, request.ID, request.WorkspaceID, request.RequestID, request.IdempotencyKey,
 		requestHash, request.ChangeApplicationID, request.ProposalID, request.PacketHash,
 		request.ExpectedTreeHash, request.SourceManifestHash, request.Repository,
@@ -249,6 +249,17 @@ func (s *ValidationStore) Start(ctx context.Context, input StartValidationInput)
 		request.TaskOwnerID, int64(request.TaskFence), planJSON, budgetJSON, request.DryRun, policyID(request.Policy), policyVersion(request.Policy), policyHash(request.Policy)).Scan(&insertedID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		existing, readErr := readValidationRunByKeyTx(ctx, tx, request.WorkspaceID, request.IdempotencyKey, true)
+		if errors.Is(readErr, ErrValidationNotFound) {
+			// The request identity is also unique. A caller that reuses an ID
+			// with a different idempotency key must receive a conflict rather
+			// than an unrelated not-found result after the broad conflict
+			// clause above suppressed the insert.
+			if _, idErr := readValidationRunTx(ctx, tx, request.WorkspaceID, request.ID, true); idErr == nil {
+				return contracts.ValidationRun{}, false, fmt.Errorf("%w: validation run id", ErrValidationConflict)
+			} else if !errors.Is(idErr, ErrValidationNotFound) {
+				return contracts.ValidationRun{}, false, idErr
+			}
+		}
 		if readErr != nil {
 			return contracts.ValidationRun{}, false, readErr
 		}

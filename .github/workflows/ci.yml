@@ -385,4 +385,7 @@ jobs:
         with:
           go-version: '1.25.13'
           cache: true
-      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      # Pin the scanner to the project's supported Go line. Using @latest
+      # makes a green repository fail when the scanner raises its own Go
+      # requirement before it can inspect Fornix.
+      - run: go run golang.org/x/vuln/cmd/govulncheck@v1.7.0 ./...
