@@ -234,11 +234,13 @@ authoritative structured state
   artifact references, raw prompt capture policy, and a general memory
   compiler. Task 14 provides bounded producer-specific backfill for oversized
   tool/evidence/agent outputs, but does not automatically rewrite all history.
-- The agent loop is a single-run bounded orchestrator plus a single-node pull
-  worker, not a multi-agent graph executor or general workflow engine. It has
-  no provider-independent streamed tool-call assembler yet. The current tool
-  executor is a bounded local-process seam and does not claim kernel-level
-  network/filesystem isolation.
+- The original agent loop remains a single-run bounded orchestrator plus a
+  single-node pull worker, and does not provide a multi-agent graph executor.
+  Loop 27 adds the first domain-neutral durable workflow runtime with typed
+  model/tool/connector/approval/wait/validation/compensation steps, but its
+  distributed scheduler, operator API, and adapter-specific qualification are
+  still follow-on work. The current tool executor is a bounded local-process
+  seam and does not claim kernel-level network/filesystem isolation.
 - External object storage, resumable uploads, background garbage collection,
   physical partitioning, tiered/cold artifact compaction, and scheduled
   retention execution. The current Postgres-only artifact plane establishes

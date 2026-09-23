@@ -34,7 +34,7 @@ The next dependency-ordered work is tracked by [Issue #38](https://github.com/Ks
 1. [#39 — Durable generic operation authority](https://github.com/Kshitij-M/fornix/issues/39) (foundation implemented; final qualification and adapter integration remain).
 2. [#46 — Universal policy, approvals, and external effects](https://github.com/Kshitij-M/fornix/issues/46) (alpha admission/effect foundation implemented; connector qualification remains).
 3. [#43 — Bounded HTTP/API and read-only SQL connectors](https://github.com/Kshitij-M/fornix/issues/43) (bounded reference adapters implemented; production qualification remains).
-4. [#44 — Durable multi-step workflow runtime](https://github.com/Kshitij-M/fornix/issues/44).
+4. [#44 — Durable multi-step workflow runtime](https://github.com/Kshitij-M/fornix/issues/44) (alpha foundation implemented; operator surface and qualification remain).
 5. [#42 — Multi-domain reference workflow](https://github.com/Kshitij-M/fornix/issues/42).
 6. [#40 — Universal production qualification](https://github.com/Kshitij-M/fornix/issues/40).
 

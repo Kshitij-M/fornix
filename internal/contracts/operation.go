@@ -736,7 +736,7 @@ func CanTransitionOperation(from, to string) bool {
 	case OperationStatusAwaitingApproval:
 		return to == OperationStatusRunning || to == OperationStatusCancelled || to == OperationStatusFailed
 	case OperationStatusRunning:
-		return to == OperationStatusAwaitingRetry || to == OperationStatusAwaitingExternal || to == OperationStatusVerifying ||
+		return to == OperationStatusAwaitingApproval || to == OperationStatusAwaitingRetry || to == OperationStatusAwaitingExternal || to == OperationStatusVerifying ||
 			to == OperationStatusSucceeded || to == OperationStatusFailed || to == OperationStatusCancelled ||
 			to == OperationStatusRecoveryRequired || to == OperationStatusDeadLetter || to == OperationStatusAbstained
 	case OperationStatusAwaitingRetry:

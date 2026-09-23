@@ -299,6 +299,28 @@ func (s *OperationStore) Create(ctx context.Context, input OperationCreateInput)
 	if s == nil || s.pool == nil || s.events == nil {
 		return OperationCreateResult{}, errors.New("operation store is not configured")
 	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return OperationCreateResult{}, fmt.Errorf("begin operation create: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := s.CreateTx(ctx, tx, input)
+	if err != nil {
+		return OperationCreateResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return OperationCreateResult{}, fmt.Errorf("commit operation create: %w", err)
+	}
+	return result, nil
+}
+
+// CreateTx persists an operation and its initial event in the caller's
+// transaction. Workflow creation uses this seam to make operation identity,
+// workflow state, and the initial checkpoint one atomic Postgres commit.
+func (s *OperationStore) CreateTx(ctx context.Context, tx pgx.Tx, input OperationCreateInput) (OperationCreateResult, error) {
+	if s == nil || s.events == nil || tx == nil {
+		return OperationCreateResult{}, errors.New("operation create transaction is not configured")
+	}
 	request := input.Request
 	if err := request.Normalize(); err != nil {
 		return OperationCreateResult{}, fmt.Errorf("normalize operation request: %w", err)
@@ -344,11 +366,6 @@ func (s *OperationStore) Create(ctx context.Context, input OperationCreateInput)
 	if err != nil {
 		return OperationCreateResult{}, err
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return OperationCreateResult{}, fmt.Errorf("begin operation create: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
 	inserted, err := tx.Exec(ctx, `
 		INSERT INTO fornix.operations(workspace_id,id,schema_version,request_id,idempotency_key,request_hash,operation_hash,status,actor,task_ref,session_ref,request,plan,plan_hash,state_hash,task_owner_id,task_fence)
 		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb,$10::jsonb,$11::jsonb,$12::jsonb,$13::jsonb,$14,$15,$16,$17)
@@ -363,9 +380,6 @@ func (s *OperationStore) Create(ctx context.Context, input OperationCreateInput)
 		}
 		if stored.OperationHash != operationHash {
 			return OperationCreateResult{}, fmt.Errorf("%w: %s", ErrOperationIdempotency, request.IdempotencyKey)
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return OperationCreateResult{}, fmt.Errorf("commit duplicate operation: %w", err)
 		}
 		return OperationCreateResult{Operation: stored, Duplicate: true}, nil
 	}
@@ -394,9 +408,6 @@ func (s *OperationStore) Create(ctx context.Context, input OperationCreateInput)
 	stored, err := readOperationByID(ctx, tx, request.WorkspaceID, request.ID)
 	if err != nil {
 		return OperationCreateResult{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return OperationCreateResult{}, fmt.Errorf("commit operation create: %w", err)
 	}
 	return OperationCreateResult{Operation: stored, Event: appended.Event}, nil
 }

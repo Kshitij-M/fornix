@@ -7,8 +7,9 @@ on the host.
 ## What this repository demonstrates
 
 Fornix is being built as **verifiable AI work infrastructure for long-running
-repository operations**. The development workflow is therefore organized
-around the product path:
+production-system operations**. Repository maintenance is the first adapter,
+not the product boundary. The development workflow is therefore organized
+around the universal product path:
 
 ```text
 admit a scoped task
@@ -19,7 +20,7 @@ admit a scoped task
 
 The current alpha demonstrates this path with a deterministic, read-only
 reference workflow. It is a control-plane showcase, not yet a finished
-unattended repository-change product. The Docker development composition keeps
+unattended production-system operations product. The Docker development composition keeps
 the workspace read-only and mounts only `fixtures/reference-repo` writable for
 the explicit change/validation smokes. Use the [product vision](docs/01-product-vision.md)
 to understand why each local command exists and the
@@ -105,6 +106,7 @@ make smoke-observability
 make smoke-retrieval-quality
 make smoke-retrieval-evaluation
 make smoke-reference-workflow
+make smoke-workflow
 make smoke-reference-openai
 make smoke-ingestion
 make smoke-validation
@@ -533,6 +535,22 @@ Run the policy lifecycle smoke after rebuilding:
 
 ```sh
 make smoke-policy
+```
+
+Loop 27 adds the first generic durable workflow runtime. It is intentionally
+domain-neutral: a plan can contain model, tool, connector, approval,
+human-input, callback, validation, compensation, retry, or wait steps. The
+linked generic operation remains the authority for workspace ownership,
+leases, fencing, and task fences. `make smoke-workflow` runs contract, store,
+crash/replay, duplicate-delivery, wait/resume, stale-owner, and fake-executor
+tests against `FORNIX_TEST_PG_DSN` (or the Makefile database default). The
+workflow runtime does not invoke an LLM or connector during replay, and the
+current branch does not yet expose a distributed workflow scheduler or generic
+operator route.
+
+```sh
+PROJECTION_PG_DSN='postgres://fornix:fornix-dev-only@127.0.0.1:55433/fornix?sslmode=disable' \
+  make smoke-workflow
 ```
 
 ## Repository rules

@@ -202,6 +202,9 @@ The current implementation includes the following tested slices:
   admission;
 - operator workspace/bootstrap, inspection, evaluation, disclosure, and
   durable repository-ingestion commands.
+- a domain-neutral durable workflow runtime with typed model/tool/connector,
+  approval/human/callback, validation, compensation, wait, retry, checkpoint,
+  fencing, and inert replay seams; repository maintenance is only one adapter.
 
 The [HTTP API reference](docs/53-http-api-reference.md) maps the current
 routes. The [production qualification](docs/14-production-readiness-qualification.md)
@@ -221,7 +224,7 @@ connectors, effects, policy, and workflows first-class:
 | [#39](https://github.com/Kshitij-M/fornix/issues/39) | Durable generic operation authority | Alpha foundation implemented; final qualification and adapter integration remain |
 | [#46](https://github.com/Kshitij-M/fornix/issues/46) | Universal policy, approvals, and external effects | Alpha Postgres admission/effect foundation; connector qualification remains |
 | [#43](https://github.com/Kshitij-M/fornix/issues/43) | HTTP/API and read-only SQL connectors | Alpha bounded reference adapters implemented; production qualification remains |
-| [#44](https://github.com/Kshitij-M/fornix/issues/44) | Durable multi-step workflow runtime | Planned |
+| [#44](https://github.com/Kshitij-M/fornix/issues/44) | Durable multi-step workflow runtime | Alpha foundation implemented; qualification remains |
 | [#42](https://github.com/Kshitij-M/fornix/issues/42) | Multi-domain reference workflow | Planned |
 | [#40](https://github.com/Kshitij-M/fornix/issues/40) | Universal production qualification | Planned |
 
