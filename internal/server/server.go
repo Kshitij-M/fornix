@@ -46,6 +46,8 @@ const embeddingModel = "nomic-embed-text"
 type server struct {
 	pool              *pgxpool.Pool
 	events            *store.EventStore
+	operations        *store.OperationStore
+	workflows         *store.WorkflowStore
 	evidence          *store.EvidenceStore
 	artifacts         *store.ArtifactStore
 	ingests           *store.IngestStore
@@ -105,6 +107,8 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 		return nil, fmt.Errorf("apply migrations: %w", err)
 	}
 	events := store.NewEventStore(pool)
+	operations := store.NewOperationStore(pool, events)
+	workflows := store.NewWorkflowStore(pool, events, operations)
 	modelCalls := store.NewModelCallStore(pool)
 	observability := store.NewObservabilityStore(pool)
 	evaluations := store.NewEvaluationStore(pool)
@@ -206,6 +210,8 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 	srv := &server{
 		pool:              pool,
 		events:            events,
+		operations:        operations,
+		workflows:         workflows,
 		evidence:          evidenceStore,
 		artifacts:         artifactStore,
 		tasks:             store.NewTaskStore(pool, events),

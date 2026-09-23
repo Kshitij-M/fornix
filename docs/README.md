@@ -54,11 +54,12 @@ engineering history:
   summaries. A completion note is the more reliable source when a historical
   foundation intention differs from the current implementation.
 
-The project currently has 23 completed implementation loops. Those loops build
-the control-plane substrate; they are not a claim that the complete
+The project has 23 numbered repository/control-plane implementation loops plus
+the packaging and universal transformation delivery records below. Those loops
+build the control-plane substrate; they are not a claim that the complete
 production-system operations product is finished. Repository maintenance is
 the first adapter and the pairs below are the detailed engineering record for
-each historical loop.
+each implementation loop.
 
 ## Universal transformation roadmap
 
@@ -74,7 +75,7 @@ the implementation sequence is tracked by [Issue #38](https://github.com/Kshitij
 | [#39](https://github.com/Kshitij-M/fornix/issues/39) | Durable generic operation authority | Postgres-backed foundation for common operation identity, lifecycle, attempts, effects, leases, replay, and links; final qualification remains |
 | [#46](https://github.com/Kshitij-M/fornix/issues/46) | Universal policy and external-effect admission | Alpha Postgres foundation for deterministic policy, approval, quota, and at-least-once effect recovery |
 | [#43](https://github.com/Kshitij-M/fornix/issues/43) | HTTP/API and read-only SQL connectors | Alpha bounded reference adapters: HTTP read/list/idempotent-submit and SQL describe/query/explain; production qualification remains |
-| [#44](https://github.com/Kshitij-M/fornix/issues/44) | Durable multi-step workflow runtime | Planned generic model/tool/connector/approval/validation workflow steps |
+| [#44](https://github.com/Kshitij-M/fornix/issues/44) | Durable multi-step workflow runtime | Alpha foundation implemented; generic durable steps, waits, fences, replay, and bounded read-only fan-out |
 | [#42](https://github.com/Kshitij-M/fornix/issues/42) | Multi-domain reference workflow | Planned fake-first workflow spanning multiple system adapters |
 | [#40](https://github.com/Kshitij-M/fornix/issues/40) | Universal production qualification | Planned security, scale, recovery, backup/restore, and operational evidence |
 
@@ -113,7 +114,10 @@ and [`71-loop-25-completion.md`](71-loop-25-completion.md).
 | 21 | Approval-gated repository change artifacts and application | [`56-repository-change-foundation.md`](56-repository-change-foundation.md) | [`57-loop-21-completion.md`](57-loop-21-completion.md) |
 | 22 | Deterministic post-change validation and re-index handoff | [`58-validation-foundation.md`](58-validation-foundation.md) | [`59-loop-22-completion.md`](59-loop-22-completion.md) |
 | 23 | Workspace validation policy packs and verified change admission | [`60-validation-policy-packs-foundation.md`](60-validation-policy-packs-foundation.md) | [`61-loop-23-completion.md`](61-loop-23-completion.md) |
-| 26 | Bounded HTTP/API and read-only SQL reference connectors | [`72-reference-connectors-foundation.md`](72-reference-connectors-foundation.md) | [`73-loop-26-completion.md`](73-loop-26-completion.md) |
+| 24 | Single-package local runtime and release qualification | [`64-fornix-local-release-qualification-foundation.md`](64-fornix-local-release-qualification-foundation.md) | [`65-loop-24-completion.md`](65-loop-24-completion.md) |
+| 25 | Universal operation admission and external effects | [`70-operation-admission-effects-foundation.md`](70-operation-admission-effects-foundation.md) | [`71-loop-25-completion.md`](71-loop-25-completion.md) |
+| 26 | Bounded universal reference connectors | [`72-reference-connectors-foundation.md`](72-reference-connectors-foundation.md) | [`73-loop-26-completion.md`](73-loop-26-completion.md) |
+| 27 | Durable multi-step workflow runtime | [`74-workflow-runtime-foundation.md`](74-workflow-runtime-foundation.md) | [`75-loop-27-completion.md`](75-loop-27-completion.md) |
 
 ## Local package and managed runtime
 
