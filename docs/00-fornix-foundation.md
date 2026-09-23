@@ -4,8 +4,9 @@ Status: active architecture and development contract.
 
 ## Purpose
 
-Fornix is an efficiency-first AI harness for long-running, multi-agent work.
-The harness owns state, evidence, scheduling, policy, and cost controls. AI
+Fornix is an efficiency-first AI work control plane for long-running,
+multi-agent production-system operations. The control plane owns state,
+evidence, scheduling, policy, and cost controls across typed adapters. AI
 models are used for interpretation, synthesis, and ambiguity—not for work that
 SQL, exact lookup, or deterministic routing can perform.
 
@@ -47,6 +48,27 @@ Admit  →  Execute  →  Prove  →  Improve
 
 The public [product vision](01-product-vision.md) is the narrative contract;
 this document is the engineering contract that makes it possible.
+
+The canonical public explanation of the universal product boundary is the
+[Universal AI work control plane](68-universal-work-control-plane.md). This
+foundation note defines the invariants that every future adapter must
+preserve. Repository maintenance is the first concrete adapter, not the
+authority model or the product ceiling.
+
+Every adapter follows the same high-level path:
+
+```text
+intent
+  → workspace and actor scope
+  → typed capability and policy admission
+  → durable execution, fencing, and checkpoints
+  → evidence, artifacts, cost, and external-effect recording
+  → verification, Work Receipt, and replay
+```
+
+An adapter owns domain validation and side effects for its resource type. It
+must not create a second operation authority, bypass workspace policy, or turn
+an untyped payload into an implicitly authorized effect.
 
 The default retrieval path is:
 
@@ -177,6 +199,10 @@ authoritative structured state
   adapter are process-local admission/execution seams; Issue #39 must make
   operation state authoritative before external adapters are called
   production-ready.
+- Universal policy revisions, approval records, effect classification, and
+  external-effect verification are not yet implemented. [Issue #46](https://github.com/Kshitij-M/fornix/issues/46) owns that fail-closed admission boundary.
+- Non-repository HTTP/API, SQL, cloud, ticketing, and business-system adapters
+  are not yet implemented. [Issue #43](https://github.com/Kshitij-M/fornix/issues/43) is the first planned connector qualification slice.
 - A background evaluation scheduler, general dataset import pipeline, and
   multi-tenant administrative UX. The current operator API/CLI is intentionally
   bounded and requires pre-registered redacted surfaces and authoritative
@@ -211,7 +237,9 @@ authoritative structured state
 4. Add the bounded tool registry, policy, approval, and execution seam.
 5. Add the bounded agent loop and durable model/tool orchestration.
 6. Add provenance graphs, selective unfolding, lifecycle consolidation, and
-  optional learned routing behind measured evaluation.
+   optional learned routing behind measured evaluation.
+7. Generalize the operation authority, policy/effect boundary, connectors, and
+   workflow runtime through the [universal transformation roadmap](68-universal-work-control-plane.md).
 
 Do not begin with a full autonomous swarm or a universal vector-search path.
 The deterministic substrate must be observable and benchmarked first.

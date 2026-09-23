@@ -1,6 +1,6 @@
 # Connector and capability registry foundation
 
-Status: implemented on `feat/issue-45-connector-capability-registry`; this
+Status: implemented as the Issue #45 process-local registry foundation; this
 note is the design and qualification record for Issue #45.
 
 ## Why this slice exists
@@ -205,7 +205,7 @@ and #46 before third-party connectors are described as production-ready.
 
 ## Qualification results
 
-The Issue #45 branch was qualified locally on 2026-09-11 with Go 1.25.13 on an
+The Issue #45 implementation was qualified locally on 2026-09-11 with Go 1.25.13 on an
 Apple M4 Pro:
 
 - `make check` passed, including the full unit suite, vet, Python helpers,

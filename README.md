@@ -1,7 +1,10 @@
 # Fornix
 
-Fornix is **verifiable AI work infrastructure for long-running
-production-system operations**.
+Fornix is a **control plane for AI work against systems that matter**.
+
+It is verifiable AI work infrastructure for long-running production-system
+operations: bounded, durable, evidence-backed work with explicit scope,
+policy, approval, recovery, cost controls, and replay.
 
 Teams can already ask AI to suggest changes. The harder problem is allowing AI
 to perform important work against production systems—repositories, APIs,
@@ -26,6 +29,11 @@ operations product is still being built.
 Read the [product vision](docs/01-product-vision.md) for the problem, target
 user, flagship workflow, and the distinction between the current alpha and the
 longer-term product.
+
+The canonical top-down explanation of the universal direction is the
+[Universal AI work control plane](docs/68-universal-work-control-plane.md).
+It describes the domain-neutral lifecycle first and the repository adapter
+second.
 
 ## The problem Fornix solves
 
@@ -61,6 +69,49 @@ current alpha already stores most of the underlying control-plane facts; the
 reference workflow assembles them into one immutable, hash-stable receipt
 without claiming that remote work was exactly-once.
 
+## The universal control-plane model
+
+Fornix is designed to govern work against repositories, APIs, databases, cloud
+resources, ticketing systems, and internal business systems through explicit
+typed adapters. The universal lifecycle is:
+
+```text
+intent
+  → scope and identity
+  → capability admission and policy
+  → approval and budgets
+  → durable fenced execution
+  → evidence, artifacts, and external-effect records
+  → validation and verification
+  → Work Receipt
+  → replay and evaluation
+```
+
+The repository adapter is the first concrete adapter and qualification path.
+The current alpha does not claim that HTTP, SQL, cloud, ticketing, or generic
+workflow adapters are already implemented. See the [universal work control
+plane overview](docs/68-universal-work-control-plane.md) for the current/planned
+domain matrix and the [production qualification](docs/14-production-readiness-qualification.md)
+for verified boundaries.
+
+### What Fornix is relative to adjacent tools
+
+Fornix is not trying to replace every model SDK, agent framework, workflow
+engine, task queue, or connector. It provides the durable control plane around
+those layers:
+
+| Layer | Primary responsibility | Fornix’s relationship |
+| --- | --- | --- |
+| Model SDK | Call a model provider | Govern the bounded model step, usage, cost, evidence, and failure boundary |
+| Agent framework | Compose prompts, turns, and tools | Add durable scope, admission, recovery, provenance, and replay |
+| Workflow engine | Coordinate process execution | Add AI-specific context, approval, cost, and external-effect semantics |
+| Task queue | Dispatch work | Add authoritative operation identity, fencing, verification, and receipts |
+| Connector system | Access one external system | Standardize capability admission, policy, evidence, and lifecycle |
+
+Fornix can integrate with existing agent clients and runtimes. A team should
+not need to replace its preferred model or chat interface to gain bounded,
+inspectable work.
+
 ## What Fornix is—and is not
 
 Fornix is:
@@ -93,16 +144,16 @@ maintained in [`docs/14-production-readiness-qualification.md`](docs/14-producti
 
 ## How the architecture works
 
-At a high level, a request follows this shape:
+At a high level, a domain-neutral request follows this shape:
 
 ```text
-workspace + authenticated actor
-  → task and ownership/fencing
-  → deterministic retrieval and bounded context
-  → optional model step
-  → policy-controlled structured tool step
-  → durable checkpoint, evidence, and artifact
-  → projection, metrics, inspection, and replay
+intent + authenticated actor + workspace
+  → resource and capability admission
+  → policy, approval, and budgets
+  → durable ownership/fencing and checkpointed steps
+  → connector/model/tool execution
+  → evidence, artifacts, validation, and cost
+  → Work Receipt, inspection, and replay
 ```
 
 Postgres is the initial authority for control state, event history,
@@ -155,6 +206,28 @@ The current implementation includes the following tested slices:
 The [HTTP API reference](docs/53-http-api-reference.md) maps the current
 routes. The [production qualification](docs/14-production-readiness-qualification.md)
 records what has been verified and what remains outside the current slice.
+
+## Universal transformation roadmap
+
+The historical implementation loops built the deterministic control and
+retrieval substrate. The next transformation makes generic operations,
+connectors, effects, policy, and workflows first-class:
+
+| Issue | Scope | Status |
+| --- | --- | --- |
+| [#38](https://github.com/Kshitij-M/fornix/issues/38) | Universal transformation umbrella | Active roadmap |
+| [#41](https://github.com/Kshitij-M/fornix/issues/41) | Domain-neutral contracts and adapter boundary | Implemented alpha slice |
+| [#45](https://github.com/Kshitij-M/fornix/issues/45) | Connector and capability registry | Implemented alpha slice; process-local |
+| [#39](https://github.com/Kshitij-M/fornix/issues/39) | Durable generic operation authority | Next control-plane milestone |
+| [#46](https://github.com/Kshitij-M/fornix/issues/46) | Universal policy, approvals, and external effects | Planned after operation authority |
+| [#43](https://github.com/Kshitij-M/fornix/issues/43) | HTTP/API and read-only SQL connectors | Planned |
+| [#44](https://github.com/Kshitij-M/fornix/issues/44) | Durable multi-step workflow runtime | Planned |
+| [#42](https://github.com/Kshitij-M/fornix/issues/42) | Multi-domain reference workflow | Planned |
+| [#40](https://github.com/Kshitij-M/fornix/issues/40) | Universal production qualification | Planned |
+
+This roadmap is not a claim that the complete universal production platform
+already exists. It is the sequence for extending the implemented control-plane
+substrate beyond the repository adapter.
 
 ## Quickstart: Fornix Local
 

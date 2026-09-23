@@ -1,8 +1,8 @@
 # Domain-neutral harness foundation
 
-Status: implemented in the initial Issue #41 change and re-audited on
-`feat/issue-45-connector-capability-registry`; this note is the design and
-qualification record for issue #41.
+Status: implemented as the Issue #41 contract foundation and re-audited with
+the connector/capability boundary; this note is the design and qualification
+record for Issue #41.
 
 ## Why this boundary exists
 
@@ -198,8 +198,8 @@ The contract tests must prove:
 
 The repository adapter is not yet migrated to emit generic operations
 automatically, and no generic operation rows are durable. The contract-only
-stage did not include a connector registry; the current branch adds that
-process-local admission boundary in `docs/67-connector-capability-foundation.md`.
+stage did not include a connector registry; the current implementation adds the
+process-local admission boundary recorded in `docs/67-connector-capability-foundation.md`.
 Generic execution, approval admission, external-effect verification, connector
 credentials, and adapter-specific recovery are intentionally deferred to later
 issues.
@@ -208,8 +208,8 @@ issues.
 
 The contract boundary was reviewed again after the connector/capability work
 was added. The audit found no missing top-level contract family, but it found
-several fail-closed and hash-integrity gaps that are now corrected on the
-current branch:
+several fail-closed and hash-integrity gaps that are now corrected in the
+Issue #41 implementation:
 
 - task and session entity references now use the same bounded identifier and
   normalized-kind rules as operation identities;

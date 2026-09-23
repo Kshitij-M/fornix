@@ -21,6 +21,29 @@ foundation now makes the result of that bounded operation an immutable,
 workspace-scoped verification contract; a complete Verified Change Packet
 still requires safe patch application and reviewer-facing change validation.
 
+## Universal transformation status
+
+The repository-first alpha is the first qualified adapter for a broader
+product: a control plane for verifiable AI work against production systems.
+The universal contracts and process-local connector registry establish the
+adapter boundary, but the alpha is not yet a universal execution platform.
+
+The next dependency-ordered work is tracked by [Issue #38](https://github.com/Kshitij-M/fornix/issues/38):
+
+1. [#39 — Durable generic operation authority](https://github.com/Kshitij-M/fornix/issues/39).
+2. [#46 — Universal policy, approvals, and external effects](https://github.com/Kshitij-M/fornix/issues/46).
+3. [#43 — Bounded HTTP/API and read-only SQL connectors](https://github.com/Kshitij-M/fornix/issues/43).
+4. [#44 — Durable multi-step workflow runtime](https://github.com/Kshitij-M/fornix/issues/44).
+5. [#42 — Multi-domain reference workflow](https://github.com/Kshitij-M/fornix/issues/42).
+6. [#40 — Universal production qualification](https://github.com/Kshitij-M/fornix/issues/40).
+
+Issues [#41](https://github.com/Kshitij-M/fornix/issues/41) and
+[#45](https://github.com/Kshitij-M/fornix/issues/45) define the current
+domain-neutral contract and registry foundation. Their presence in the
+architecture does not make HTTP, SQL, cloud, ticketing, or general workflow
+operations available today. The [universal work-control-plane overview](68-universal-work-control-plane.md)
+contains the current/planned domain matrix and the precise category boundary.
+
 ## Verified capabilities
 
 - Numbered, embedded, checksum-validated migrations.

@@ -11,6 +11,7 @@ intended for users, operators, maintainers, reviewers, and future contributors.
 | Question | Start here | What it covers |
 | --- | --- | --- |
 | What is Fornix and why does it exist? | [`README.md`](../README.md) | Product purpose, current capabilities, quickstart, and honest alpha status |
+| How does the universal product extend beyond repositories? | [`68-universal-work-control-plane.md`](68-universal-work-control-plane.md) | Category definition, generic lifecycle, adapter boundary, status matrix, and roadmap |
 | What problem should Fornix own? | [`01-product-vision.md`](01-product-vision.md) | Verifiable AI work over production systems, the repository-maintenance wedge, Work Receipts, and product boundaries |
 | How do I run or test it locally? | [`DEVELOPMENT.md`](../DEVELOPMENT.md) | Docker environment, commands, smoke suites, CLI workflow, and quality gates |
 | What rules govern implementation? | [`AGENTS.md`](../AGENTS.md) | Research gate, architecture invariants, documentation contract, and required checks |
@@ -29,12 +30,27 @@ implementation, while the foundation note remains the historical design
 record. The production qualification note is the current cross-cutting
 summary.
 
+The public explanation must show the universal work-control-plane model before
+showing repository-specific proof. Repository maintenance is the current
+adapter and qualification path; it is not evidence that future HTTP, SQL,
+cloud, or business-system adapters already exist. Link the canonical
+[universal work-control-plane overview](68-universal-work-control-plane.md)
+when a reader needs the product definition, and link the relevant foundation
+note when a reader needs implementation detail.
+
+The public reading order should make the product boundary clear: the universal
+work control plane comes first, and the repository adapter is presented as the
+first concrete qualification path. A repository example may be the easiest
+way to demonstrate a command, but it must not imply that repository semantics
+are embedded in the universal contracts.
+
 ## The public explanation of Fornix
 
 Every subsystem should be explainable in this order. The repository as a whole
-should follow the same order: start with the production-system problem, explain
-the repository-maintenance wedge when it is the concrete example, then show
-the user-visible result and the machinery that makes it trustworthy.
+should follow the same order: start with the production-system problem, define
+the universal operation boundary, explain the repository-maintenance wedge
+when it is the concrete example, then show the user-visible result and the
+machinery that makes it trustworthy.
 
 1. **User problem.** What expensive, unsafe, or ambiguous workflow does this
    solve?
@@ -53,6 +69,11 @@ the user-visible result and the machinery that makes it trustworthy.
 7. **Evidence.** How can a user inspect the result, provenance, artifact,
    event, checkpoint, replay hash, or audit record?
 8. **Limitations.** What is intentionally not implemented yet?
+
+For universal-scope changes, also state which parts are implemented in the
+current alpha, which are adapter-specific, and which are only roadmap work.
+Use a current/planned matrix rather than future-tense examples that could be
+mistaken for supported commands or APIs.
 
 This order makes the docs useful to both a first-time user and an engineer
 reviewing a production decision. Avoid describing a subsystem only as a list
