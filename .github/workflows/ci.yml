@@ -319,6 +319,12 @@ jobs:
         env:
           FORNIX_TEST_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
         run: go test ./internal/contracts ./internal/policy ./internal/store -run 'TestAdmission|TestOperation' -count=1 -v
+      - name: Run universal reference connector tests
+        env:
+          FORNIX_TEST_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+        run: |
+          go test ./internal/connector ./internal/adapters/httpapi ./internal/adapters/sqlreadonly -count=1 -v
+          go test ./internal/store -run 'TestConnectorBinding' -count=1 -v
 
   local-runtime:
     name: Managed local runtime smoke

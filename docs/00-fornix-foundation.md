@@ -188,7 +188,10 @@ authoritative structured state
   admission, deterministic bounded retries, and a shared conformance suite.
   The repository inspection adapter is read-only and hash/evidence based; the
   registry now hands typed requests to the first durable generic operation
-  authority, but the registry itself remains process-local.
+  authority, but the registry itself remains process-local. The first
+  non-repository reference adapters now add bounded HTTP read/list/
+  idempotent-submit and read-only SQL describe/query/explain capabilities;
+  both retain the same typed input, evidence, budget, and workspace boundary.
 - A universal operation-admission/effect boundary with immutable policy
   snapshots, deterministic effect classification, workspace/actor/resource/
   connector/credential/evidence/budget checks, exact approval bindings,
@@ -213,8 +216,12 @@ authoritative structured state
   semantics are durable and replay-safe. Final connector authorization,
   signed callbacks, secret-manager resolution, and production egress
   enforcement remain qualification work under [Issue #40](https://github.com/Kshitij-M/fornix/issues/40).
-- Non-repository HTTP/API, SQL, cloud, ticketing, and business-system adapters
-  are not yet implemented. [Issue #43](https://github.com/Kshitij-M/fornix/issues/43) is the first planned connector qualification slice.
+- The HTTP/API and read-only SQL reference adapters are implemented as an
+  alpha qualification slice under [Issue #43](https://github.com/Kshitij-M/fornix/issues/43).
+  They are deliberately narrow: configured HTTP targets and read-only,
+  allowlisted SQL only. Cloud, ticketing, business-system adapters, durable
+  workflow integration, and production egress/credential qualification remain
+  open.
 - A background evaluation scheduler, general dataset import pipeline, and
   multi-tenant administrative UX. The current operator API/CLI is intentionally
   bounded and requires pre-registered redacted surfaces and authoritative
