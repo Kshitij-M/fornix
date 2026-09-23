@@ -27,6 +27,7 @@ import (
 	"github.com/omaveda/fornix/internal/agentloop"
 	"github.com/omaveda/fornix/internal/change"
 	"github.com/omaveda/fornix/internal/config"
+	connectorruntime "github.com/omaveda/fornix/internal/connector"
 	"github.com/omaveda/fornix/internal/contracts"
 	"github.com/omaveda/fornix/internal/ingest"
 	"github.com/omaveda/fornix/internal/model"
@@ -63,6 +64,7 @@ type server struct {
 	validation        *validationruntime.Service
 	changes           *change.Service
 	toolRegistry      *tool.Registry
+	connectorRegistry *connectorruntime.Registry
 	toolExecutor      *tool.Executor
 	toolRuns          *store.ToolRunStore
 	agentRuns         *store.AgentRunStore
@@ -175,6 +177,11 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 		pool.Close()
 		return nil, fmt.Errorf("register repository tool: %w", err)
 	}
+	connectorRegistry := connectorruntime.NewRegistry()
+	if err := registerRepositoryConnector(connectorRegistry, contracts.DefaultWorkspaceID); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("register repository connector: %w", err)
+	}
 	toolPolicy, err := tool.NewPolicy([]contracts.ToolPolicyRule{{
 		ID: "builtin-default-echo", Priority: 100, WorkspaceID: contracts.DefaultWorkspaceID,
 		ToolID: "fornix.echo", Capability: "process.echo", Mode: contracts.ToolModeAutomatic,
@@ -214,6 +221,7 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 		policies:          policyStore,
 		changes:           changeService,
 		toolRegistry:      toolRegistry,
+		connectorRegistry: connectorRegistry,
 		toolRuns:          toolRuns,
 		toolExecutor:      toolExecutor,
 		agentRuns:         agentRuns,
@@ -272,6 +280,7 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 	// requests still require authenticated workspace authorization.
 	if page, listErr := operatorStore.ListWorkspaces(ctx, 100, ""); listErr == nil {
 		for _, workspace := range page.Items {
+			_ = registerRepositoryConnector(connectorRegistry, workspace.ID)
 			root := workspace.ToolRoot
 			if root == "" {
 				continue

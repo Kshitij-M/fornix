@@ -1,7 +1,7 @@
 # Fornix production-readiness qualification
 
 Status: alpha single-node control and retrieval substrate; not yet the complete
-safe autonomous repository-maintenance product.
+safe autonomous production-system operations product.
 
 Fornix is runnable and testable, but it is not yet a production-grade,
 multi-tenant harness for huge projects. The current system has a durable
@@ -9,10 +9,11 @@ Postgres control database, typed event history, deterministic projections,
 task coordination, retrieval, and code indexing.
 
 The product direction is **verifiable AI work infrastructure for long-running
-repository operations**. The goal is to let teams delegate serious repository
+production-system operations**. The goal is to let teams delegate serious
 work to AI without losing control of scope, cost, evidence, approval, or
-recovery. The current qualification proves the substrate behind that goal; it
-does not qualify unattended changes to important repositories.
+recovery. Repository maintenance is the first qualified adapter. The current
+qualification proves the substrate behind that goal; it does not qualify
+unattended changes to important production systems.
 
 The reference workflow is therefore a showcase of the path from admission to
 replay, not a finished change-management product. The first Work Receipt
@@ -175,6 +176,13 @@ still requires safe patch application and reviewer-facing change validation.
   They are not a general policy programming language, do not execute arbitrary
   code, and do not yet provide organization-wide policy distribution,
   delegated policy administration, or policy-as-code review workflows.
+- Domain-neutral operation contracts are now available for typed system,
+  resource, connector, capability, effect, execution, evidence, plan, result,
+  and external-effect references. A process-local connector/capability
+  registry, fail-closed admission seam, bounded executor, and read-only
+  repository adapter conformance slice are also qualified. Durable generic
+  operation authority, universal policy, external connectors, and non-repository
+  production execution remain outside this alpha qualification.
 - The projection runtime is an internal pull API; no background subscriber or
   public replay API is provided yet.
 - Lease transitions are current coordination state rather than an append-only

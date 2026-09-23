@@ -13,14 +13,16 @@ SQL, exact lookup, or deterministic routing can perform.
 
 The technical foundation serves a product outcome:
 
-> **Fornix is verifiable AI work infrastructure for long-running repository
-> operations.**
+> **Fornix is verifiable AI work infrastructure for long-running
+> production-system operations.**
 
-Teams should be able to delegate serious repository work to AI without losing
-control of scope, cost, evidence, approval, or recovery. The first product
-wedge is safe autonomous repository maintenance—dependency upgrades, security
-remediation, migrations, refactors, CI repair, and related work that teams
-currently keep manual because the result is difficult to verify or recover.
+Teams should be able to delegate serious production-system operations to AI
+without losing control of scope, cost, evidence, approval, or recovery. The
+first product wedge is safe autonomous repository maintenance—dependency
+upgrades, security remediation, migrations, refactors, CI repair, and related
+work that teams currently keep manual because the result is difficult to verify
+or recover. The same control plane is intended to support databases, APIs,
+ticketing systems, cloud resources, and other typed adapters.
 
 The user-facing result is a **Verified Change Packet**. Its durable foundation
 is a future first-class **Work Receipt** linking source manifests, retrieval
@@ -154,12 +156,27 @@ authoritative structured state
   tightening-only budgets, mandatory safety validators, approval and re-index
   controls, lifecycle audit, and exact policy propagation through verified
   change admission.
+- Domain-neutral operation contracts with explicit system/resource/connector
+  references, versioned capabilities, effect classes, execution profiles,
+  evidence requirements, external-effect semantics, deterministic plans and
+  results, and optional hash-only Work Receipt links. Repository packages
+  remain the first adapter.
+- An explicit process-local connector/capability registry with immutable
+  definition hashes, fail-closed health/schema/workspace/credential/approval
+  admission, deterministic bounded retries, and a shared conformance suite.
+  The repository inspection adapter is read-only and hash/evidence based; the
+  registry is not yet the durable operation authority.
 
 ## Current gaps
 
 - OAuth/SSO, external KMS/secret-manager resolution, Postgres row-level
   security, and automated key/credential rotation policy.
 - Typed event integration for every mutation path.
+- Durable generic operation persistence, compatibility links, and lifecycle
+  idempotency are not yet implemented. The connector registry and repository
+  adapter are process-local admission/execution seams; Issue #39 must make
+  operation state authoritative before external adapters are called
+  production-ready.
 - A background evaluation scheduler, general dataset import pipeline, and
   multi-tenant administrative UX. The current operator API/CLI is intentionally
   bounded and requires pre-registered redacted surfaces and authoritative

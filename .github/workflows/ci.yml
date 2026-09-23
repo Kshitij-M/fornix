@@ -29,6 +29,10 @@ jobs:
         run: make fmt-check
       - name: Run unit tests
         run: make test
+      - name: Run domain-neutral contract tests
+        run: go test ./internal/contracts -run '^TestDomainNeutral' -count=1 -v
+      - name: Run connector registry conformance tests
+        run: make test-connectors
       - name: Run race tests
         run: make test-race
       - name: Run vet

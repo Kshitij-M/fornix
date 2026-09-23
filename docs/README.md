@@ -7,10 +7,11 @@ want to use the alpha, operate it locally, review its design, or contribute to
 the repository.
 
 The product direction is **verifiable AI work infrastructure for long-running
-repository operations**. Fornix is intended to let teams delegate serious
-repository work to AI without losing control of scope, cost, evidence,
-approval, or recovery. The current implementation is the durable control and
-retrieval substrate behind that outcome; the [product vision](01-product-vision.md)
+production-system operations**. Fornix is intended to let teams delegate
+serious work to AI without losing control of scope, cost, evidence, approval,
+or recovery. Repository maintenance is the first adapter and qualification
+workflow, not the product boundary. The current implementation is the durable
+control and retrieval substrate behind that outcome; the [product vision](01-product-vision.md)
 explains the distinction.
 
 ## Choose a starting point
@@ -25,6 +26,8 @@ explains the distinction.
 | How to report security concerns | [`SECURITY.md`](../SECURITY.md) |
 | How the project handles community conduct | [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) |
 | Which design rules are non-negotiable | [`00-fornix-foundation.md`](00-fornix-foundation.md) |
+| How generic production-system operations are represented | [`66-domain-neutral-harness-foundation.md`](66-domain-neutral-harness-foundation.md) |
+| How connectors and capabilities are explicitly registered and admitted | [`67-connector-capability-foundation.md`](67-connector-capability-foundation.md) |
 | Which routes and request rules exist | [`53-http-api-reference.md`](53-http-api-reference.md) |
 | What is actually qualified today | [`14-production-readiness-qualification.md`](14-production-readiness-qualification.md) |
 | How documentation should be written | [`52-documentation-guide.md`](52-documentation-guide.md) |
@@ -45,9 +48,10 @@ engineering history:
   foundation intention differs from the current implementation.
 
 The project currently has 23 completed implementation loops. Those loops build
-the control-plane substrate; they are not 19 claims that the complete
-repository-maintenance product is finished. The pairs below are the detailed
-engineering record for each one.
+the control-plane substrate; they are not a claim that the complete
+production-system operations product is finished. Repository maintenance is
+the first adapter and the pairs below are the detailed engineering record for
+each historical loop.
 
 ## Implementation loops
 
