@@ -7,17 +7,25 @@ want to use the alpha, operate it locally, review its design, or contribute to
 the repository.
 
 The product direction is **verifiable AI work infrastructure for long-running
-repository operations**. Fornix is intended to let teams delegate serious
-repository work to AI without losing control of scope, cost, evidence,
-approval, or recovery. The current implementation is the durable control and
-retrieval substrate behind that outcome; the [product vision](01-product-vision.md)
+production-system operations**. Fornix is intended to let teams delegate
+serious work to AI without losing control of scope, cost, evidence, approval,
+or recovery. Repository maintenance is the first adapter and qualification
+workflow, not the product boundary. The current implementation is the durable
+control and retrieval substrate behind that outcome; the [product vision](01-product-vision.md)
 explains the distinction.
+
+The universal transformation is the next product phase. It preserves the
+repository adapter while generalizing the operation authority, policy/effect
+boundary, connectors, and workflow runtime. Read the [universal work control
+plane overview](68-universal-work-control-plane.md) before the chronological
+foundation notes when evaluating the product direction.
 
 ## Choose a starting point
 
 | If you want to know… | Read… |
 | --- | --- |
 | What Fornix is and why it exists | [`README.md`](../README.md) |
+| How the universal control plane works across domains | [`68-universal-work-control-plane.md`](68-universal-work-control-plane.md) |
 | What problem Fornix will own and how the product should feel | [`01-product-vision.md`](01-product-vision.md) |
 | How to run, test, and smoke the service | [`DEVELOPMENT.md`](../DEVELOPMENT.md) |
 | How to install, start, run, and operate the local package | [`63-fornix-local-operations.md`](63-fornix-local-operations.md) |
@@ -25,6 +33,8 @@ explains the distinction.
 | How to report security concerns | [`SECURITY.md`](../SECURITY.md) |
 | How the project handles community conduct | [`CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) |
 | Which design rules are non-negotiable | [`00-fornix-foundation.md`](00-fornix-foundation.md) |
+| How generic production-system operations are represented | [`66-domain-neutral-harness-foundation.md`](66-domain-neutral-harness-foundation.md) |
+| How connectors and capabilities are explicitly registered and admitted | [`67-connector-capability-foundation.md`](67-connector-capability-foundation.md) |
 | Which routes and request rules exist | [`53-http-api-reference.md`](53-http-api-reference.md) |
 | What is actually qualified today | [`14-production-readiness-qualification.md`](14-production-readiness-qualification.md) |
 | How documentation should be written | [`52-documentation-guide.md`](52-documentation-guide.md) |
@@ -45,9 +55,34 @@ engineering history:
   foundation intention differs from the current implementation.
 
 The project currently has 23 completed implementation loops. Those loops build
-the control-plane substrate; they are not 19 claims that the complete
-repository-maintenance product is finished. The pairs below are the detailed
-engineering record for each one.
+the control-plane substrate; they are not a claim that the complete
+production-system operations product is finished. Repository maintenance is
+the first adapter and the pairs below are the detailed engineering record for
+each historical loop.
+
+## Universal transformation roadmap
+
+The historical loops built the durable control-plane substrate. The next
+product phase generalizes that substrate beyond repository operations. The
+canonical top-down explanation is [Universal AI work control plane](68-universal-work-control-plane.md);
+the implementation sequence is tracked by [Issue #38](https://github.com/Kshitij-M/fornix/issues/38).
+
+| Issue | Workstream | Current boundary |
+| --- | --- | --- |
+| [#41](https://github.com/Kshitij-M/fornix/issues/41) | Domain-neutral contracts and adapter boundary | Universal typed vocabulary; repository remains the first adapter |
+| [#45](https://github.com/Kshitij-M/fornix/issues/45) | Connector and capability registry | Explicit process-local registration and fail-closed admission |
+| [#39](https://github.com/Kshitij-M/fornix/issues/39) | Durable generic operation authority | Postgres-backed foundation for common operation identity, lifecycle, attempts, effects, leases, replay, and links; final qualification remains |
+| [#46](https://github.com/Kshitij-M/fornix/issues/46) | Universal policy and external-effect admission | Planned cross-domain policy, approval, and at-least-once effect boundary |
+| [#43](https://github.com/Kshitij-M/fornix/issues/43) | HTTP/API and read-only SQL connectors | Planned bounded connectors with connector-specific safety controls |
+| [#44](https://github.com/Kshitij-M/fornix/issues/44) | Durable multi-step workflow runtime | Planned generic model/tool/connector/approval/validation workflow steps |
+| [#42](https://github.com/Kshitij-M/fornix/issues/42) | Multi-domain reference workflow | Planned fake-first workflow spanning multiple system adapters |
+| [#40](https://github.com/Kshitij-M/fornix/issues/40) | Universal production qualification | Planned security, scale, recovery, backup/restore, and operational evidence |
+
+These issues are a dependency-ordered roadmap, not a claim that all listed
+connectors or workflows are available in the alpha. Supporting issues
+[#23–#30](https://github.com/Kshitij-M/fornix/issues?q=is%3Aissue+is%3Aopen)
+remain open and should be re-scoped as the universal authority and
+qualification work progresses.
 
 ## Implementation loops
 

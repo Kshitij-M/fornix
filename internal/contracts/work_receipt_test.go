@@ -76,6 +76,32 @@ func TestWorkReceiptRejectsUnsafeMetadataAndCrossWorkspaceLinks(t *testing.T) {
 	}
 }
 
+func TestWorkReceiptRequiresCanonicalActorAndHashIntegrity(t *testing.T) {
+	missingActor := testWorkReceiptRequest()
+	missingActor.Actor = ActorRef{}
+	if _, err := missingActor.ToReceipt(time.Unix(1, 0).UTC()); err == nil {
+		t.Fatal("receipt without an actor was accepted")
+	}
+
+	receipt, err := testWorkReceiptRequest().ToReceipt(time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt.CanonicalHash = strings.Repeat("f", 64)
+	if err := receipt.Normalize(); err == nil {
+		t.Fatal("receipt with a forged canonical hash was accepted")
+	}
+
+	receipt, err = testWorkReceiptRequest().ToReceipt(time.Unix(1, 0).UTC())
+	if err != nil {
+		t.Fatal(err)
+	}
+	receipt.Verification.ReceiptHash = strings.Repeat("e", 64)
+	if err := receipt.Normalize(); err == nil {
+		t.Fatal("receipt with a mismatched verification hash was accepted")
+	}
+}
+
 func TestWorkReceiptDisclosureDefaultsAndBudgetLimits(t *testing.T) {
 	request, err := (WorkReceiptDisclosureRequest{WorkspaceID: "workspace-a", ReceiptID: "r", Level: WorkReceiptDisclosureDetail}).Normalize()
 	if err != nil {

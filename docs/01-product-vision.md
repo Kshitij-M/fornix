@@ -12,7 +12,7 @@ registry. It is operational trust.
 ## The problem
 
 Long-running AI work becomes difficult to authorize when it touches an
-important repository or project. A run can use the wrong source version, lose
+important production system or project. A run can use the wrong source version, lose
 its place after a crash, repeat an expensive tool call, exceed a cost budget,
 or produce an answer that cannot be traced back to evidence.
 
@@ -32,17 +32,20 @@ Fornix exists to close that gap.
 
 ## The product definition
 
-> **Fornix is verifiable AI work infrastructure for long-running repository
-> operations.**
+> **Fornix is verifiable AI work infrastructure for long-running
+> production-system operations.**
 
 In practical terms:
 
-> **Fornix lets teams delegate serious repository work to AI without losing
-> control of scope, cost, evidence, approval, or recovery.**
+> **Fornix lets teams delegate serious production-system work to AI without
+> losing control of scope, cost, evidence, approval, or recovery.**
 
 Fornix is still an AI harness technically, but “AI harness” is not the product
-category we want people to remember. The product is safe autonomous work. The
-harness is the mechanism that makes that work admissible.
+category we want people to remember. The product is safe autonomous work over
+systems that matter. The harness is the mechanism that makes that work
+admissible, bounded, recoverable, and verifiable. Repository maintenance is
+the first adapter because it provides a concrete, inspectable wedge—not a
+restriction on the control plane.
 
 ## The first valuable workflow
 
@@ -62,9 +65,18 @@ The initial alpha demonstrates the control and retrieval substrate for this
 workflow. It already provides workspace scope, tasks, fencing, checkpoints,
 deterministic retrieval, model/tool boundaries, evidence, artifacts,
 observability, evaluation, and repository ingestion. It does not yet claim to
-be a complete unattended repository-maintenance product: the current reference
-workflow is deliberately bounded and read-only, and the qualification note
-records the remaining gaps.
+be a complete unattended production-system operations product: the current
+reference workflow is deliberately bounded and read-only, and the
+qualification note records the remaining gaps.
+
+The domain-neutral foundation now represents a typed operation against a
+system resource through a versioned connector and capability. It supports
+read-only and write classifications, bounded execution profiles, evidence
+requirements, and explicit at-least-once external effects. The alpha now also
+has a process-local, fail-closed connector/capability registry and a
+read-only repository adapter conformance seam. Durable operation authority,
+universal policy, verification, and recovery for future database, API, cloud,
+ticketing, and other adapters remain future work.
 
 ## The Work Receipt
 
@@ -130,9 +142,9 @@ claims. See the [production-readiness qualification](14-production-readiness-qua
 
 The product is succeeding when a team says:
 
-> “There is repository work we want AI to perform, but we currently cannot
-> permit it unattended. Fornix gives us enough control and proof to authorize
-> it.”
+> “There is important production-system work we want AI to perform, but we
+> currently cannot permit it unattended. Fornix gives us enough control and
+> proof to authorize it.”
 
 The first validation measures should therefore be task-level outcomes:
 
@@ -144,8 +156,9 @@ The first validation measures should therefore be task-level outcomes:
 - replay consistency;
 - the number of tasks a team is willing to delegate unattended.
 
-The roadmap should prioritize a small number of real repository workflows and
-these measurements over a larger collection of generic harness features.
+The roadmap should prioritize a small number of real production-system
+workflows, beginning with the repository adapter, and these measurements over
+a larger collection of generic harness features.
 
 ## Relationship to the engineering record
 
