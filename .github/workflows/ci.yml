@@ -29,6 +29,10 @@ jobs:
         run: make fmt-check
       - name: Run unit tests
         run: make test
+      - name: Run domain-neutral contract tests
+        run: go test ./internal/contracts -run '^TestDomainNeutral' -count=1 -v
+      - name: Run connector registry conformance tests
+        run: make test-connectors
       - name: Run race tests
         run: make test-race
       - name: Run vet
@@ -311,6 +315,10 @@ jobs:
           FORNIX_URL: http://localhost:8201
           FORNIX_KEY: fornix-ci-test-key
         run: scripts/test/v0.33-policy-smokes.sh
+      - name: Run universal operation admission and effect integration tests
+        env:
+          FORNIX_TEST_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+        run: go test ./internal/contracts ./internal/policy ./internal/store -run 'TestAdmission|TestOperation' -count=1 -v
 
   local-runtime:
     name: Managed local runtime smoke

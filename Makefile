@@ -24,7 +24,7 @@ FORNIX_REFERENCE_WORKDIR ?= /workspace/fixtures/reference-repo
 PROJECTION_PG_DSN ?= postgres://fornix:fornix-dev-only@host.docker.internal:55433/fornix?sslmode=disable
 FORNIX_TEST_PG_DSN ?=
 
-.PHONY: fmt fmt-check test test-race vet build package-check release-check smoke-package python-install python-check docs-check check verify hooks-install install-hooks hooks-uninstall uninstall-hooks hooks-check smoke smoke-local-cli smoke-local-runtime smoke-events smoke-projection smoke-leases smoke-tasks smoke-retrieval smoke-provenance smoke-model smoke-tools smoke-agent smoke-scheduler smoke-identity smoke-artifacts smoke-artifact-output smoke-observability smoke-retrieval-quality smoke-retrieval-evaluation smoke-reference-workflow smoke-reference-openai smoke-ingestion smoke-work-receipts smoke-changes smoke-validation smoke-policy operator-reference dev-up dev-up-ai dev-up-watcher dev-run dev-logs dev-down
+.PHONY: fmt fmt-check test test-race vet build package-check release-check smoke-package python-install python-check docs-check check verify hooks-install install-hooks hooks-uninstall uninstall-hooks hooks-check test-connectors smoke smoke-local-cli smoke-local-runtime smoke-events smoke-projection smoke-leases smoke-tasks smoke-retrieval smoke-provenance smoke-model smoke-tools smoke-agent smoke-scheduler smoke-identity smoke-artifacts smoke-artifact-output smoke-observability smoke-retrieval-quality smoke-retrieval-evaluation smoke-reference-workflow smoke-reference-openai smoke-ingestion smoke-work-receipts smoke-changes smoke-validation smoke-policy smoke-operation-admission operator-reference dev-up dev-up-ai dev-up-watcher dev-run dev-logs dev-down
 
 fmt:
 	$(GOFMT_CMD) -w $(GO_FILES)
@@ -42,6 +42,9 @@ test:
 
 test-race:
 	$(GO_CMD) test -race ./...
+
+test-connectors:
+	$(GO_CMD) test ./internal/connector ./internal/adapters/repository -count=1 -v
 
 vet:
 	$(GO_CMD) vet ./...
@@ -148,6 +151,9 @@ smoke-validation:
 smoke-policy:
 	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) scripts/test/v0.33-policy-smokes.sh
 
+smoke-operation-admission:
+	FORNIX_TEST_PG_DSN=$(PROJECTION_PG_DSN) $(GO_CMD) test ./internal/contracts ./internal/policy ./internal/store -run 'TestAdmission|TestOperation' -count=1 -v
+
 operator-reference: build
 	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) bin/fornix reference-workflow --workspace $${FORNIX_WORKSPACE_ID:-reference-local} --fixture fixtures/reference-repo
 
@@ -175,6 +181,7 @@ smoke:
 	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_REFERENCE_WORKDIR=$(FORNIX_REFERENCE_WORKDIR) scripts/test/v0.31-change-smokes.sh
 	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_BOOTSTRAP_KEY=$(FORNIX_BOOTSTRAP_KEY) FORNIX_REFERENCE_WORKDIR=$(FORNIX_REFERENCE_WORKDIR) scripts/test/v0.32-validation-smokes.sh
 	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) scripts/test/v0.33-policy-smokes.sh
+	$(MAKE) smoke-operation-admission
 	$(MAKE) smoke-local-cli
 
 check: fmt-check test vet python-check docs-check package-check

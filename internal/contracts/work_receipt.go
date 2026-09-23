@@ -60,6 +60,7 @@ const (
 	WorkReceiptReferenceObservation       = "observation"
 	WorkReceiptReferenceCost              = "cost"
 	WorkReceiptReferenceReplay            = "replay"
+	WorkReceiptReferenceOperation         = "operation"
 	WorkReceiptReferenceChangeProposal    = "change_proposal"
 	WorkReceiptReferenceChangeApplication = "change_application"
 )
@@ -169,6 +170,7 @@ type WorkReceipt struct {
 	Actor              ActorRef                `json:"actor"`
 	Task               *EntityRef              `json:"task,omitempty"`
 	Session            *EntityRef              `json:"session,omitempty"`
+	Operation          *OperationReference     `json:"operation,omitempty"`
 	TaskOwnerID        string                  `json:"task_owner_id,omitempty"`
 	TaskFence          uint64                  `json:"task_fence,omitempty"`
 	Policy             *ValidationPolicyRef    `json:"policy,omitempty"`
@@ -198,6 +200,7 @@ type WorkReceiptFinalizeRequest struct {
 	WorkID             string                 `json:"work_id"`
 	Task               *EntityRef             `json:"task,omitempty"`
 	Session            *EntityRef             `json:"session,omitempty"`
+	Operation          *OperationReference    `json:"operation,omitempty"`
 	TaskOwnerID        string                 `json:"task_owner_id,omitempty"`
 	TaskFence          uint64                 `json:"task_fence,omitempty"`
 	Policy             *ValidationPolicyRef   `json:"policy,omitempty"`
@@ -279,17 +282,47 @@ func (r *WorkReceiptFinalizeRequest) Normalize() error {
 	if r.ReceiptID == "" {
 		r.ReceiptID = NewID("receipt")
 	}
-	if r.WorkspaceID == "" || r.IdempotencyKey == "" || r.WorkKind == "" || r.WorkID == "" {
-		return fmt.Errorf("workspace_id, idempotency_key, work_kind, and work_id are required")
+	workspace, err := normalizeDomainWorkspace(r.WorkspaceID)
+	if err != nil {
+		return err
 	}
-	if len(r.ReceiptID) > MaxWorkReceiptIDLength || len(r.RequestID) > MaxWorkReceiptIDLength || len(r.IdempotencyKey) > MaxIdempotencyLength || len(r.WorkKind) > MaxWorkReceiptNameLength || len(r.WorkID) > MaxWorkReceiptIDLength {
-		return fmt.Errorf("work receipt identity is too large")
+	r.WorkspaceID = workspace
+	if r.ReceiptID, err = normalizeDomainIdentifier(r.ReceiptID, "receipt_id", MaxWorkReceiptIDLength, true); err != nil {
+		return err
 	}
-	if r.Task != nil && (r.Task.Kind != "task" || strings.TrimSpace(r.Task.ID) == "" || r.Task.WorkspaceID != r.WorkspaceID) {
-		return fmt.Errorf("task reference must be workspace-scoped")
+	if r.RequestID, err = normalizeDomainIdentifier(r.RequestID, "request_id", MaxWorkReceiptIDLength, true); err != nil {
+		return err
 	}
-	if r.Session != nil && (r.Session.Kind != "session" || strings.TrimSpace(r.Session.ID) == "" || r.Session.WorkspaceID != r.WorkspaceID) {
-		return fmt.Errorf("session reference must be workspace-scoped")
+	if r.IdempotencyKey, err = normalizeDomainIdentifier(r.IdempotencyKey, "idempotency_key", MaxIdempotencyLength, true); err != nil {
+		return err
+	}
+	if r.WorkKind, err = normalizeDomainName(r.WorkKind, "work_kind", MaxWorkReceiptNameLength, true); err != nil {
+		return err
+	}
+	if r.WorkID, err = normalizeDomainIdentifier(r.WorkID, "work_id", MaxWorkReceiptIDLength, true); err != nil {
+		return err
+	}
+	if err := normalizeDomainActor(&r.Actor, r.WorkspaceID); err != nil {
+		return err
+	}
+	if r.TaskOwnerID != "" {
+		if r.TaskOwnerID, err = normalizeDomainIdentifier(r.TaskOwnerID, "task_owner_id", MaxWorkReceiptIDLength, true); err != nil {
+			return err
+		}
+	}
+	if err := normalizeDomainEntity(r.Task, "task", r.WorkspaceID); err != nil {
+		return err
+	}
+	if err := normalizeDomainEntity(r.Session, "session", r.WorkspaceID); err != nil {
+		return err
+	}
+	if r.Operation != nil {
+		if err := r.Operation.Normalize(); err != nil {
+			return fmt.Errorf("operation reference: %w", err)
+		}
+		if r.Operation.WorkspaceID != r.WorkspaceID {
+			return fmt.Errorf("operation reference must be workspace-scoped")
+		}
 	}
 	if r.Policy != nil {
 		if err := r.Policy.Normalize(); err != nil {
@@ -350,6 +383,12 @@ func (r *WorkReceiptFinalizeRequest) Normalize() error {
 			r.References = append(r.References, ref)
 		}
 	}
+	if r.Operation != nil {
+		ref := WorkReceiptReference{WorkspaceID: r.WorkspaceID, Kind: WorkReceiptReferenceOperation, SourceID: r.Operation.ID, Role: "operation", Hash: r.Operation.Hash}
+		if !containsReceiptReference(r.References, ref) {
+			r.References = append(r.References, ref)
+		}
+	}
 	if len(r.References) > MaxWorkReceiptReferences {
 		return fmt.Errorf("work receipt reference count exceeds configured bounds")
 	}
@@ -379,6 +418,7 @@ func (r WorkReceiptFinalizeRequest) ToReceipt(now time.Time) (WorkReceipt, error
 		WorkKind: r.WorkKind, WorkID: r.WorkID, RequestID: r.RequestID,
 		IdempotencyKey: r.IdempotencyKey, Status: WorkReceiptStatusVerified,
 		Actor: r.Actor, Task: r.Task, Session: r.Session, TaskOwnerID: r.TaskOwnerID,
+		Operation: cloneOperationReference(r.Operation),
 		TaskFence: r.TaskFence, Policy: ClonePolicyReference(r.Policy), SourceManifestHash: r.SourceManifestHash,
 		ReplayHash: r.ReplayHash, Steps: append([]WorkReceiptStep(nil), r.Steps...),
 		Evidence:   append([]WorkReceiptEvidence(nil), r.Evidence...),
@@ -402,6 +442,10 @@ func cloneWorkReceiptFinalizeRequest(r WorkReceiptFinalizeRequest) WorkReceiptFi
 		session := *r.Session
 		r.Session = &session
 	}
+	if r.Operation != nil {
+		operation := *r.Operation
+		r.Operation = &operation
+	}
 	if r.Policy != nil {
 		policy := *r.Policy
 		r.Policy = &policy
@@ -421,6 +465,14 @@ func cloneWorkReceiptFinalizeRequest(r WorkReceiptFinalizeRequest) WorkReceiptFi
 	r.Artifacts = append([]WorkReceiptArtifact(nil), r.Artifacts...)
 	r.References = append([]WorkReceiptReference(nil), r.References...)
 	return r
+}
+
+func cloneOperationReference(ref *OperationReference) *OperationReference {
+	if ref == nil {
+		return nil
+	}
+	clone := *ref
+	return &clone
 }
 
 // Normalize validates and applies disclosure defaults.
@@ -462,6 +514,7 @@ func (r *WorkReceipt) Normalize() error {
 		SchemaVersion: r.SchemaVersion, ReceiptID: r.ID, RequestID: r.RequestID,
 		IdempotencyKey: r.IdempotencyKey, WorkspaceID: r.WorkspaceID, Actor: r.Actor,
 		WorkKind: r.WorkKind, WorkID: r.WorkID, Task: r.Task, Session: r.Session,
+		Operation:   cloneOperationReference(r.Operation),
 		TaskOwnerID: r.TaskOwnerID, TaskFence: r.TaskFence, Policy: ClonePolicyReference(r.Policy), SourceManifestHash: r.SourceManifestHash,
 		ReplayHash: r.ReplayHash, Steps: r.Steps, Evidence: r.Evidence, Artifacts: r.Artifacts,
 		References: r.References, Cost: r.Cost,
@@ -469,7 +522,7 @@ func (r *WorkReceipt) Normalize() error {
 	if err := req.Normalize(); err != nil {
 		return err
 	}
-	r.Steps, r.Evidence, r.Artifacts, r.References, r.Cost = req.Steps, req.Evidence, req.Artifacts, req.References, req.Cost
+	r.Steps, r.Evidence, r.Artifacts, r.References, r.Cost, r.Operation = req.Steps, req.Evidence, req.Artifacts, req.References, req.Cost, req.Operation
 	r.SchemaVersion, r.ID, r.WorkspaceID, r.WorkKind, r.WorkID = req.SchemaVersion, req.ReceiptID, req.WorkspaceID, req.WorkKind, req.WorkID
 	r.Status = strings.TrimSpace(r.Status)
 	if r.Status == "" {
@@ -478,24 +531,25 @@ func (r *WorkReceipt) Normalize() error {
 	if r.Status != WorkReceiptStatusVerified && r.Status != WorkReceiptStatusRejected {
 		return fmt.Errorf("invalid work receipt status %q", r.Status)
 	}
-	if r.CanonicalHash == "" {
-		r.CanonicalHash = r.StableHash()
-	}
-	if !canonicalSHA256(r.CanonicalHash) {
-		return fmt.Errorf("canonical_hash must be a lowercase sha256")
-	}
-	if r.RequestHash == "" {
-		r.RequestHash = hashReceiptJSON(r.requestPayload())
-	}
-	if !canonicalSHA256(r.RequestHash) {
-		return fmt.Errorf("request_hash must be a lowercase sha256")
-	}
 	if r.Verification.Status == "" {
 		r.Verification.Status = r.Status
+	} else if r.Verification.Status != r.Status {
+		return fmt.Errorf("verification status must match receipt status")
 	}
-	if r.Verification.ReceiptHash == "" {
-		r.Verification.ReceiptHash = r.CanonicalHash
+	expectedCanonicalHash := r.StableHash()
+	if r.CanonicalHash != "" && r.CanonicalHash != expectedCanonicalHash {
+		return fmt.Errorf("canonical_hash does not match normalized receipt")
 	}
+	r.CanonicalHash = expectedCanonicalHash
+	expectedRequestHash := r.RequestContentHash()
+	if r.RequestHash != "" && r.RequestHash != expectedRequestHash {
+		return fmt.Errorf("request_hash does not match normalized receipt")
+	}
+	r.RequestHash = expectedRequestHash
+	if r.Verification.ReceiptHash != "" && r.Verification.ReceiptHash != r.CanonicalHash {
+		return fmt.Errorf("verification receipt_hash does not match canonical_hash")
+	}
+	r.Verification.ReceiptHash = r.CanonicalHash
 	return nil
 }
 
@@ -544,9 +598,10 @@ func (r WorkReceipt) logicalPayload() any {
 		Evidence           []WorkReceiptEvidence   `json:"evidence,omitempty"`
 		Artifacts          []WorkReceiptArtifact   `json:"artifacts,omitempty"`
 		References         []WorkReceiptReference  `json:"references,omitempty"`
+		Operation          *OperationReference     `json:"operation,omitempty"`
 		Cost               WorkReceiptCost         `json:"cost"`
 		Verification       WorkReceiptVerification `json:"verification"`
-	}{r.SchemaVersion, r.WorkspaceID, r.WorkKind, r.WorkID, r.Status, redactedActor(r.Actor), r.Task, r.Session, r.TaskOwnerID, r.TaskFence, r.Policy, r.SourceManifestHash, r.ReplayHash, r.Steps, r.Evidence, r.Artifacts, r.References, r.Cost, verification}
+	}{SchemaVersion: r.SchemaVersion, WorkspaceID: r.WorkspaceID, WorkKind: r.WorkKind, WorkID: r.WorkID, Status: r.Status, Actor: redactedActor(r.Actor), Task: r.Task, Session: r.Session, TaskOwnerID: r.TaskOwnerID, TaskFence: r.TaskFence, Policy: r.Policy, SourceManifestHash: r.SourceManifestHash, ReplayHash: r.ReplayHash, Steps: r.Steps, Evidence: r.Evidence, Artifacts: r.Artifacts, References: r.References, Operation: r.Operation, Cost: r.Cost, Verification: verification}
 }
 
 func (r WorkReceipt) requestPayload() any {
@@ -607,16 +662,27 @@ func normalizeWorkReceiptStep(s *WorkReceiptStep, _ int) error {
 }
 
 func normalizeWorkReceiptReference(r *WorkReceiptReference, workspaceID string) error {
-	r.WorkspaceID, r.Kind, r.SourceID, r.Role, r.Hash = strings.TrimSpace(r.WorkspaceID), strings.TrimSpace(r.Kind), strings.TrimSpace(r.SourceID), strings.TrimSpace(r.Role), normalizeReceiptHash(r.Hash)
-	if r.WorkspaceID != workspaceID || r.Kind == "" || r.SourceID == "" {
-		return fmt.Errorf("workspace, kind, and source_id must be present")
+	r.WorkspaceID = strings.TrimSpace(r.WorkspaceID)
+	if r.WorkspaceID != workspaceID {
+		return fmt.Errorf("reference workspace is invalid")
 	}
-	if !validWorkReceiptReferenceKind(r.Kind) || len(r.Kind) > MaxWorkReceiptNameLength || len(r.SourceID) > MaxWorkReceiptIDLength || len(r.Role) > MaxWorkReceiptRoleLength {
-		return fmt.Errorf("reference identity is invalid")
+	kind, err := normalizeDomainName(r.Kind, "reference kind", MaxWorkReceiptNameLength, true)
+	if err != nil || !validWorkReceiptReferenceKind(kind) {
+		return fmt.Errorf("reference kind is invalid")
 	}
-	if r.Hash != "" && !canonicalSHA256(r.Hash) {
-		return fmt.Errorf("reference hash must be lowercase sha256")
+	sourceID, err := normalizeDomainIdentifier(r.SourceID, "reference source_id", MaxWorkReceiptIDLength, true)
+	if err != nil {
+		return err
 	}
+	role, err := normalizeDomainName(r.Role, "reference role", MaxWorkReceiptRoleLength, false)
+	if err != nil {
+		return err
+	}
+	hash, err := normalizeDomainHash(r.Hash, "reference hash", false)
+	if err != nil {
+		return err
+	}
+	r.Kind, r.SourceID, r.Role, r.Hash = kind, sourceID, role, hash
 	return nil
 }
 
@@ -661,7 +727,7 @@ func receiptArtifactKey(a WorkReceiptArtifact) string {
 
 func validWorkReceiptReferenceKind(kind string) bool {
 	switch kind {
-	case WorkReceiptReferenceTask, WorkReceiptReferenceEvent, WorkReceiptReferenceAgentRun, WorkReceiptReferenceRetrievalSurface, WorkReceiptReferenceModelCall, WorkReceiptReferenceToolRun, WorkReceiptReferenceEvidence, WorkReceiptReferenceArtifact, WorkReceiptReferenceValidation, WorkReceiptReferenceObservation, WorkReceiptReferenceCost, WorkReceiptReferenceReplay, WorkReceiptReferenceChangeProposal, WorkReceiptReferenceChangeApplication:
+	case WorkReceiptReferenceTask, WorkReceiptReferenceEvent, WorkReceiptReferenceAgentRun, WorkReceiptReferenceRetrievalSurface, WorkReceiptReferenceModelCall, WorkReceiptReferenceToolRun, WorkReceiptReferenceEvidence, WorkReceiptReferenceArtifact, WorkReceiptReferenceValidation, WorkReceiptReferenceObservation, WorkReceiptReferenceCost, WorkReceiptReferenceReplay, WorkReceiptReferenceOperation, WorkReceiptReferenceChangeProposal, WorkReceiptReferenceChangeApplication:
 		return true
 	default:
 		return false

@@ -4,8 +4,9 @@ Status: active architecture and development contract.
 
 ## Purpose
 
-Fornix is an efficiency-first AI harness for long-running, multi-agent work.
-The harness owns state, evidence, scheduling, policy, and cost controls. AI
+Fornix is an efficiency-first AI work control plane for long-running,
+multi-agent production-system operations. The control plane owns state,
+evidence, scheduling, policy, and cost controls across typed adapters. AI
 models are used for interpretation, synthesis, and ambiguity—not for work that
 SQL, exact lookup, or deterministic routing can perform.
 
@@ -13,14 +14,16 @@ SQL, exact lookup, or deterministic routing can perform.
 
 The technical foundation serves a product outcome:
 
-> **Fornix is verifiable AI work infrastructure for long-running repository
-> operations.**
+> **Fornix is verifiable AI work infrastructure for long-running
+> production-system operations.**
 
-Teams should be able to delegate serious repository work to AI without losing
-control of scope, cost, evidence, approval, or recovery. The first product
-wedge is safe autonomous repository maintenance—dependency upgrades, security
-remediation, migrations, refactors, CI repair, and related work that teams
-currently keep manual because the result is difficult to verify or recover.
+Teams should be able to delegate serious production-system operations to AI
+without losing control of scope, cost, evidence, approval, or recovery. The
+first product wedge is safe autonomous repository maintenance—dependency
+upgrades, security remediation, migrations, refactors, CI repair, and related
+work that teams currently keep manual because the result is difficult to verify
+or recover. The same control plane is intended to support databases, APIs,
+ticketing systems, cloud resources, and other typed adapters.
 
 The user-facing result is a **Verified Change Packet**. Its durable foundation
 is a future first-class **Work Receipt** linking source manifests, retrieval
@@ -45,6 +48,27 @@ Admit  →  Execute  →  Prove  →  Improve
 
 The public [product vision](01-product-vision.md) is the narrative contract;
 this document is the engineering contract that makes it possible.
+
+The canonical public explanation of the universal product boundary is the
+[Universal AI work control plane](68-universal-work-control-plane.md). This
+foundation note defines the invariants that every future adapter must
+preserve. Repository maintenance is the first concrete adapter, not the
+authority model or the product ceiling.
+
+Every adapter follows the same high-level path:
+
+```text
+intent
+  → workspace and actor scope
+  → typed capability and policy admission
+  → durable execution, fencing, and checkpoints
+  → evidence, artifacts, cost, and external-effect recording
+  → verification, Work Receipt, and replay
+```
+
+An adapter owns domain validation and side effects for its resource type. It
+must not create a second operation authority, bypass workspace policy, or turn
+an untyped payload into an implicitly authorized effect.
 
 The default retrieval path is:
 
@@ -154,12 +178,43 @@ authoritative structured state
   tightening-only budgets, mandatory safety validators, approval and re-index
   controls, lifecycle audit, and exact policy propagation through verified
   change admission.
+- Domain-neutral operation contracts with explicit system/resource/connector
+  references, versioned capabilities, effect classes, execution profiles,
+  evidence requirements, external-effect semantics, deterministic plans and
+  results, and optional hash-only Work Receipt links. Repository packages
+  remain the first adapter.
+- An explicit process-local connector/capability registry with immutable
+  definition hashes, fail-closed health/schema/workspace/credential/approval
+  admission, deterministic bounded retries, and a shared conformance suite.
+  The repository inspection adapter is read-only and hash/evidence based; the
+  registry now hands typed requests to the first durable generic operation
+  authority, but the registry itself remains process-local.
+- A universal operation-admission/effect boundary with immutable policy
+  snapshots, deterministic effect classification, workspace/actor/resource/
+  connector/credential/evidence/budget checks, exact approval bindings,
+  append-only approval history, and fenced external-effect recovery states.
+  It records at-least-once boundaries without claiming exactly-once remote
+  execution; connectors still own domain execution and verification.
 
 ## Current gaps
 
 - OAuth/SSO, external KMS/secret-manager resolution, Postgres row-level
   security, and automated key/credential rotation policy.
 - Typed event integration for every mutation path.
+- Durable generic operation persistence, compatibility links, lifecycle
+  idempotency, fenced leases, attempts, effect reservations, callbacks, and
+  replay are implemented as the Issue #39 foundation. Final authorization of
+  every compatibility link and full adapter integration remain qualification
+  work; the connector registry and repository adapter are still process-local
+  admission/execution seams.
+- Universal admission is implemented as an alpha Postgres foundation in
+  migration 036: policy snapshots, deterministic decisions, approval history,
+  quota-window accounting, effect-state history, and recovery-required
+  semantics are durable and replay-safe. Final connector authorization,
+  signed callbacks, secret-manager resolution, and production egress
+  enforcement remain qualification work under [Issue #40](https://github.com/Kshitij-M/fornix/issues/40).
+- Non-repository HTTP/API, SQL, cloud, ticketing, and business-system adapters
+  are not yet implemented. [Issue #43](https://github.com/Kshitij-M/fornix/issues/43) is the first planned connector qualification slice.
 - A background evaluation scheduler, general dataset import pipeline, and
   multi-tenant administrative UX. The current operator API/CLI is intentionally
   bounded and requires pre-registered redacted surfaces and authoritative
@@ -194,7 +249,9 @@ authoritative structured state
 4. Add the bounded tool registry, policy, approval, and execution seam.
 5. Add the bounded agent loop and durable model/tool orchestration.
 6. Add provenance graphs, selective unfolding, lifecycle consolidation, and
-  optional learned routing behind measured evaluation.
+   optional learned routing behind measured evaluation.
+7. Generalize the operation authority, policy/effect boundary, connectors, and
+   workflow runtime through the [universal transformation roadmap](68-universal-work-control-plane.md).
 
 Do not begin with a full autonomous swarm or a universal vector-search path.
 The deterministic substrate must be observable and benchmarked first.
