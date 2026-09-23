@@ -72,7 +72,7 @@ the implementation sequence is tracked by [Issue #38](https://github.com/Kshitij
 | [#41](https://github.com/Kshitij-M/fornix/issues/41) | Domain-neutral contracts and adapter boundary | Universal typed vocabulary; repository remains the first adapter |
 | [#45](https://github.com/Kshitij-M/fornix/issues/45) | Connector and capability registry | Explicit process-local registration and fail-closed admission |
 | [#39](https://github.com/Kshitij-M/fornix/issues/39) | Durable generic operation authority | Postgres-backed foundation for common operation identity, lifecycle, attempts, effects, leases, replay, and links; final qualification remains |
-| [#46](https://github.com/Kshitij-M/fornix/issues/46) | Universal policy and external-effect admission | Planned cross-domain policy, approval, and at-least-once effect boundary |
+| [#46](https://github.com/Kshitij-M/fornix/issues/46) | Universal policy and external-effect admission | Alpha Postgres foundation for deterministic policy, approval, quota, and at-least-once effect recovery |
 | [#43](https://github.com/Kshitij-M/fornix/issues/43) | HTTP/API and read-only SQL connectors | Planned bounded connectors with connector-specific safety controls |
 | [#44](https://github.com/Kshitij-M/fornix/issues/44) | Durable multi-step workflow runtime | Planned generic model/tool/connector/approval/validation workflow steps |
 | [#42](https://github.com/Kshitij-M/fornix/issues/42) | Multi-domain reference workflow | Planned fake-first workflow spanning multiple system adapters |
@@ -82,7 +82,9 @@ These issues are a dependency-ordered roadmap, not a claim that all listed
 connectors or workflows are available in the alpha. Supporting issues
 [#23–#30](https://github.com/Kshitij-M/fornix/issues?q=is%3Aissue+is%3Aopen)
 remain open and should be re-scoped as the universal authority and
-qualification work progresses.
+qualification work progresses. The Issue #46 design and delivery record is
+[`70-operation-admission-effects-foundation.md`](70-operation-admission-effects-foundation.md)
+and [`71-loop-25-completion.md`](71-loop-25-completion.md).
 
 ## Implementation loops
 

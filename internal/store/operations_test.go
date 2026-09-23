@@ -496,6 +496,11 @@ func newOperationTestStore(t *testing.T) (*OperationStore, *pgxpool.Pool, string
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cleanupCancel()
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.operation_effect_transitions WHERE workspace_id=$1`, workspace)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.operation_effect_state WHERE workspace_id=$1`, workspace)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.operation_approval_transitions WHERE workspace_id=$1`, workspace)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.operation_approvals WHERE workspace_id=$1`, workspace)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.operation_admission_decisions WHERE workspace_id=$1`, workspace)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.operations WHERE workspace_id=$1`, workspace)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.task_execution_leases WHERE workspace_id=$1`, workspace)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.tasks WHERE workspace_id=$1`, workspace)

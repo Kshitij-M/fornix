@@ -32,7 +32,7 @@ a universal execution platform.
 The next dependency-ordered work is tracked by [Issue #38](https://github.com/Kshitij-M/fornix/issues/38):
 
 1. [#39 — Durable generic operation authority](https://github.com/Kshitij-M/fornix/issues/39) (foundation implemented; final qualification and adapter integration remain).
-2. [#46 — Universal policy, approvals, and external effects](https://github.com/Kshitij-M/fornix/issues/46).
+2. [#46 — Universal policy, approvals, and external effects](https://github.com/Kshitij-M/fornix/issues/46) (alpha admission/effect foundation implemented; connector qualification remains).
 3. [#43 — Bounded HTTP/API and read-only SQL connectors](https://github.com/Kshitij-M/fornix/issues/43).
 4. [#44 — Durable multi-step workflow runtime](https://github.com/Kshitij-M/fornix/issues/44).
 5. [#42 — Multi-domain reference workflow](https://github.com/Kshitij-M/fornix/issues/42).
@@ -208,8 +208,10 @@ contains the current/planned domain matrix and the precise category boundary.
   compatibility links, and read-only replay. A process-local
   connector/capability registry, fail-closed admission seam, bounded executor,
   and read-only repository adapter conformance slice are also qualified.
-  Universal policy, external connectors, link authorization, and
-  non-repository production execution remain outside this alpha qualification.
+  Universal policy is now a tested alpha admission/effect foundation, but
+  external connectors, link authorization, signed callbacks, host-independent
+  egress controls, secret-manager resolution, and non-repository production
+  execution remain outside this qualification.
 - The projection runtime is an internal pull API; no background subscriber or
   public replay API is provided yet.
 - Lease transitions are current coordination state rather than an append-only

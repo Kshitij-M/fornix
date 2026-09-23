@@ -834,6 +834,11 @@ func (s *OperationStore) ReserveEffect(ctx context.Context, input OperationEffec
 	if inserted.RowsAffected() == 0 && stored.RequestHash != input.RequestHash {
 		return OperationEffect{}, false, ErrOperationIdempotency
 	}
+	if inserted.RowsAffected() == 1 {
+		if _, err := ensureEffectState(ctx, tx, input.WorkspaceID, stored.EffectID, input.OperationID, input.OwnerID, input.Fence); err != nil {
+			return OperationEffect{}, false, fmt.Errorf("initialize external effect state: %w", err)
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return OperationEffect{}, false, err
 	}

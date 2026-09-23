@@ -189,6 +189,12 @@ authoritative structured state
   The repository inspection adapter is read-only and hash/evidence based; the
   registry now hands typed requests to the first durable generic operation
   authority, but the registry itself remains process-local.
+- A universal operation-admission/effect boundary with immutable policy
+  snapshots, deterministic effect classification, workspace/actor/resource/
+  connector/credential/evidence/budget checks, exact approval bindings,
+  append-only approval history, and fenced external-effect recovery states.
+  It records at-least-once boundaries without claiming exactly-once remote
+  execution; connectors still own domain execution and verification.
 
 ## Current gaps
 
@@ -201,8 +207,12 @@ authoritative structured state
   every compatibility link and full adapter integration remain qualification
   work; the connector registry and repository adapter are still process-local
   admission/execution seams.
-- Universal policy revisions, approval records, effect classification, and
-  external-effect verification are not yet implemented. [Issue #46](https://github.com/Kshitij-M/fornix/issues/46) owns that fail-closed admission boundary.
+- Universal admission is implemented as an alpha Postgres foundation in
+  migration 036: policy snapshots, deterministic decisions, approval history,
+  quota-window accounting, effect-state history, and recovery-required
+  semantics are durable and replay-safe. Final connector authorization,
+  signed callbacks, secret-manager resolution, and production egress
+  enforcement remain qualification work under [Issue #40](https://github.com/Kshitij-M/fornix/issues/40).
 - Non-repository HTTP/API, SQL, cloud, ticketing, and business-system adapters
   are not yet implemented. [Issue #43](https://github.com/Kshitij-M/fornix/issues/43) is the first planned connector qualification slice.
 - A background evaluation scheduler, general dataset import pipeline, and

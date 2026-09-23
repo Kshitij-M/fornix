@@ -219,7 +219,7 @@ connectors, effects, policy, and workflows first-class:
 | [#41](https://github.com/Kshitij-M/fornix/issues/41) | Domain-neutral contracts and adapter boundary | Implemented alpha slice |
 | [#45](https://github.com/Kshitij-M/fornix/issues/45) | Connector and capability registry | Implemented alpha slice; process-local |
 | [#39](https://github.com/Kshitij-M/fornix/issues/39) | Durable generic operation authority | Alpha foundation implemented; final qualification and adapter integration remain |
-| [#46](https://github.com/Kshitij-M/fornix/issues/46) | Universal policy, approvals, and external effects | Planned after operation authority |
+| [#46](https://github.com/Kshitij-M/fornix/issues/46) | Universal policy, approvals, and external effects | Alpha Postgres admission/effect foundation; connector qualification remains |
 | [#43](https://github.com/Kshitij-M/fornix/issues/43) | HTTP/API and read-only SQL connectors | Planned |
 | [#44](https://github.com/Kshitij-M/fornix/issues/44) | Durable multi-step workflow runtime | Planned |
 | [#42](https://github.com/Kshitij-M/fornix/issues/42) | Multi-domain reference workflow | Planned |

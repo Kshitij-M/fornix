@@ -121,7 +121,7 @@ silently bypass Fornix identity, policy, fencing, evidence, or receipt rules.
 | Repository ingestion and read-only inspection | First qualified adapter | Explicit local mounts, bounded indexing, evidence, artifacts, and replay |
 | Repository change and validation | First write-boundary vertical slice | Approval-gated local filesystem effects with recovery-required semantics |
 | Durable generic operation authority | Implemented alpha foundation: Issue [#39](https://github.com/Kshitij-M/fornix/issues/39) | One Postgres-backed operation identity, lifecycle, attempts, effects, callbacks, leases, replay, and compatibility links; adapter admission is still separate |
-| Universal policy, approvals, and external effects | Roadmap: Issue [#46](https://github.com/Kshitij-M/fornix/issues/46) | Cross-domain admission and explicit remote-effect semantics |
+| Universal policy, approvals, and external effects | Implemented alpha foundation: Issue [#46](https://github.com/Kshitij-M/fornix/issues/46) | Postgres-backed deterministic admission, exact approvals, quota gates, and fenced at-least-once effect recovery; connector qualification remains |
 | Bounded HTTP/API connector | Roadmap: Issue [#43](https://github.com/Kshitij-M/fornix/issues/43) | Read/list/idempotent-submit capabilities with egress, response, and retry bounds |
 | Read-only SQL connector | Roadmap: Issue [#43](https://github.com/Kshitij-M/fornix/issues/43) | Describe/query/explain capabilities with prepared statements and write rejection |
 | Durable multi-step workflow runtime | Roadmap: Issue [#44](https://github.com/Kshitij-M/fornix/issues/44) | Typed model, tool, connector, approval, human, validation, callback, and compensation steps |
@@ -159,7 +159,7 @@ Its implementation sequence is:
 1. [#41 — Domain-neutral contracts and adapter boundary](https://github.com/Kshitij-M/fornix/issues/41).
 2. [#45 — Connector and capability registry](https://github.com/Kshitij-M/fornix/issues/45).
 3. [#39 — Durable generic operation authority](https://github.com/Kshitij-M/fornix/issues/39) (foundation implemented; final qualification and integration remain).
-4. [#46 — Universal policy, approvals, and external effects](https://github.com/Kshitij-M/fornix/issues/46).
+4. [#46 — Universal policy, approvals, and external effects](https://github.com/Kshitij-M/fornix/issues/46) (alpha foundation implemented; qualification continues).
 5. [#43 — Bounded HTTP/API and read-only SQL connectors](https://github.com/Kshitij-M/fornix/issues/43).
 6. [#44 — Durable multi-step workflow runtime](https://github.com/Kshitij-M/fornix/issues/44).
 7. [#42 — Multi-domain incident investigation and controlled remediation](https://github.com/Kshitij-M/fornix/issues/42).
