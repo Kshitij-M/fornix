@@ -71,7 +71,7 @@ the implementation sequence is tracked by [Issue #38](https://github.com/Kshitij
 | --- | --- | --- |
 | [#41](https://github.com/Kshitij-M/fornix/issues/41) | Domain-neutral contracts and adapter boundary | Universal typed vocabulary; repository remains the first adapter |
 | [#45](https://github.com/Kshitij-M/fornix/issues/45) | Connector and capability registry | Explicit process-local registration and fail-closed admission |
-| [#39](https://github.com/Kshitij-M/fornix/issues/39) | Durable generic operation authority | Planned common operation identity, lifecycle, attempts, effects, and links |
+| [#39](https://github.com/Kshitij-M/fornix/issues/39) | Durable generic operation authority | Postgres-backed foundation for common operation identity, lifecycle, attempts, effects, leases, replay, and links; final qualification remains |
 | [#46](https://github.com/Kshitij-M/fornix/issues/46) | Universal policy and external-effect admission | Planned cross-domain policy, approval, and at-least-once effect boundary |
 | [#43](https://github.com/Kshitij-M/fornix/issues/43) | HTTP/API and read-only SQL connectors | Planned bounded connectors with connector-specific safety controls |
 | [#44](https://github.com/Kshitij-M/fornix/issues/44) | Durable multi-step workflow runtime | Planned generic model/tool/connector/approval/validation workflow steps |

@@ -187,18 +187,20 @@ authoritative structured state
   definition hashes, fail-closed health/schema/workspace/credential/approval
   admission, deterministic bounded retries, and a shared conformance suite.
   The repository inspection adapter is read-only and hash/evidence based; the
-  registry is not yet the durable operation authority.
+  registry now hands typed requests to the first durable generic operation
+  authority, but the registry itself remains process-local.
 
 ## Current gaps
 
 - OAuth/SSO, external KMS/secret-manager resolution, Postgres row-level
   security, and automated key/credential rotation policy.
 - Typed event integration for every mutation path.
-- Durable generic operation persistence, compatibility links, and lifecycle
-  idempotency are not yet implemented. The connector registry and repository
-  adapter are process-local admission/execution seams; Issue #39 must make
-  operation state authoritative before external adapters are called
-  production-ready.
+- Durable generic operation persistence, compatibility links, lifecycle
+  idempotency, fenced leases, attempts, effect reservations, callbacks, and
+  replay are implemented as the Issue #39 foundation. Final authorization of
+  every compatibility link and full adapter integration remain qualification
+  work; the connector registry and repository adapter are still process-local
+  admission/execution seams.
 - Universal policy revisions, approval records, effect classification, and
   external-effect verification are not yet implemented. [Issue #46](https://github.com/Kshitij-M/fornix/issues/46) owns that fail-closed admission boundary.
 - Non-repository HTTP/API, SQL, cloud, ticketing, and business-system adapters

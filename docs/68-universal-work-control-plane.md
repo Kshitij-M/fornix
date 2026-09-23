@@ -79,9 +79,11 @@ control-plane authority.
 ```
 
 The current alpha implements the durable control and retrieval substrate,
-domain-neutral contracts, and a process-local connector/capability registry.
-It does not yet implement the full durable generic operation authority or the
-future adapters shown above. See the status matrix below and the
+domain-neutral contracts, a process-local connector/capability registry, and
+the first Postgres-backed generic operation authority. The generic authority
+now owns operation identity, lifecycle history, leases, attempts, effect
+boundaries, callbacks, and replay; it does not yet authorize every connector
+link or execute a domain adapter. See the status matrix below and the
 [production qualification](14-production-readiness-qualification.md) before
 using the system for sensitive work.
 
@@ -118,7 +120,7 @@ silently bypass Fornix identity, policy, fencing, evidence, or receipt rules.
 | Connector and capability registry | Implemented alpha foundation | Process-local, explicit, fail-closed admission; not durable operation authority |
 | Repository ingestion and read-only inspection | First qualified adapter | Explicit local mounts, bounded indexing, evidence, artifacts, and replay |
 | Repository change and validation | First write-boundary vertical slice | Approval-gated local filesystem effects with recovery-required semantics |
-| Durable generic operation authority | Roadmap: Issue [#39](https://github.com/Kshitij-M/fornix/issues/39) | One generic operation identity, lifecycle, attempts, effects, and compatibility links |
+| Durable generic operation authority | Implemented alpha foundation: Issue [#39](https://github.com/Kshitij-M/fornix/issues/39) | One Postgres-backed operation identity, lifecycle, attempts, effects, callbacks, leases, replay, and compatibility links; adapter admission is still separate |
 | Universal policy, approvals, and external effects | Roadmap: Issue [#46](https://github.com/Kshitij-M/fornix/issues/46) | Cross-domain admission and explicit remote-effect semantics |
 | Bounded HTTP/API connector | Roadmap: Issue [#43](https://github.com/Kshitij-M/fornix/issues/43) | Read/list/idempotent-submit capabilities with egress, response, and retry bounds |
 | Read-only SQL connector | Roadmap: Issue [#43](https://github.com/Kshitij-M/fornix/issues/43) | Describe/query/explain capabilities with prepared statements and write rejection |
@@ -156,7 +158,7 @@ Its implementation sequence is:
 
 1. [#41 — Domain-neutral contracts and adapter boundary](https://github.com/Kshitij-M/fornix/issues/41).
 2. [#45 — Connector and capability registry](https://github.com/Kshitij-M/fornix/issues/45).
-3. [#39 — Durable generic operation authority](https://github.com/Kshitij-M/fornix/issues/39).
+3. [#39 — Durable generic operation authority](https://github.com/Kshitij-M/fornix/issues/39) (foundation implemented; final qualification and integration remain).
 4. [#46 — Universal policy, approvals, and external effects](https://github.com/Kshitij-M/fornix/issues/46).
 5. [#43 — Bounded HTTP/API and read-only SQL connectors](https://github.com/Kshitij-M/fornix/issues/43).
 6. [#44 — Durable multi-step workflow runtime](https://github.com/Kshitij-M/fornix/issues/44).

@@ -25,12 +25,13 @@ still requires safe patch application and reviewer-facing change validation.
 
 The repository-first alpha is the first qualified adapter for a broader
 product: a control plane for verifiable AI work against production systems.
-The universal contracts and process-local connector registry establish the
-adapter boundary, but the alpha is not yet a universal execution platform.
+The universal contracts, process-local connector registry, and first generic
+operation authority establish the adapter boundary, but the alpha is not yet
+a universal execution platform.
 
 The next dependency-ordered work is tracked by [Issue #38](https://github.com/Kshitij-M/fornix/issues/38):
 
-1. [#39 — Durable generic operation authority](https://github.com/Kshitij-M/fornix/issues/39).
+1. [#39 — Durable generic operation authority](https://github.com/Kshitij-M/fornix/issues/39) (foundation implemented; final qualification and adapter integration remain).
 2. [#46 — Universal policy, approvals, and external effects](https://github.com/Kshitij-M/fornix/issues/46).
 3. [#43 — Bounded HTTP/API and read-only SQL connectors](https://github.com/Kshitij-M/fornix/issues/43).
 4. [#44 — Durable multi-step workflow runtime](https://github.com/Kshitij-M/fornix/issues/44).
@@ -199,13 +200,16 @@ contains the current/planned domain matrix and the precise category boundary.
   They are not a general policy programming language, do not execute arbitrary
   code, and do not yet provide organization-wide policy distribution,
   delegated policy administration, or policy-as-code review workflows.
-- Domain-neutral operation contracts are now available for typed system,
-  resource, connector, capability, effect, execution, evidence, plan, result,
-  and external-effect references. A process-local connector/capability
-  registry, fail-closed admission seam, bounded executor, and read-only
-  repository adapter conformance slice are also qualified. Durable generic
-  operation authority, universal policy, external connectors, and non-repository
-  production execution remain outside this alpha qualification.
+- Domain-neutral operation contracts and the first Postgres-backed generic
+  operation authority are now available for typed system, resource, connector,
+  capability, effect, execution, evidence, plan, result, and external-effect
+  references. The authority provides durable operation identity, lifecycle
+  history, fenced leases, attempts, external-effect reservations, callbacks,
+  compatibility links, and read-only replay. A process-local
+  connector/capability registry, fail-closed admission seam, bounded executor,
+  and read-only repository adapter conformance slice are also qualified.
+  Universal policy, external connectors, link authorization, and
+  non-repository production execution remain outside this alpha qualification.
 - The projection runtime is an internal pull API; no background subscriber or
   public replay API is provided yet.
 - Lease transitions are current coordination state rather than an append-only
