@@ -163,6 +163,43 @@ func TestDomainNeutralExternalEffectsNeverClaimExactlyOnce(t *testing.T) {
 	}
 }
 
+func TestOperationLifecycleIsExplicitAndTerminal(t *testing.T) {
+	valid := [][2]string{
+		{OperationStatusCreated, OperationStatusPlanned},
+		{OperationStatusPlanned, OperationStatusAdmitted},
+		{OperationStatusAdmitted, OperationStatusRunning},
+		{OperationStatusRunning, OperationStatusAwaitingRetry},
+		{OperationStatusAwaitingRetry, OperationStatusRunning},
+		{OperationStatusRunning, OperationStatusVerifying},
+		{OperationStatusVerifying, OperationStatusSucceeded},
+		{OperationStatusRunning, OperationStatusRecoveryRequired},
+		{OperationStatusRecoveryRequired, OperationStatusDeadLetter},
+	}
+	for _, transition := range valid {
+		if !CanTransitionOperation(transition[0], transition[1]) {
+			t.Fatalf("expected transition %q -> %q to be valid", transition[0], transition[1])
+		}
+	}
+	invalid := [][2]string{
+		{OperationStatusCreated, OperationStatusRunning},
+		{OperationStatusPlanned, OperationStatusSucceeded},
+		{OperationStatusAwaitingExternal, OperationStatusRunning},
+		{OperationStatusSucceeded, OperationStatusRunning},
+		{OperationStatusFailed, OperationStatusCancelled},
+		{"unknown", OperationStatusRunning},
+	}
+	for _, transition := range invalid {
+		if CanTransitionOperation(transition[0], transition[1]) {
+			t.Fatalf("expected transition %q -> %q to be rejected", transition[0], transition[1])
+		}
+	}
+	for _, status := range []string{OperationStatusSucceeded, OperationStatusFailed, OperationStatusCancelled, OperationStatusDeadLetter, OperationStatusAbstained} {
+		if !IsTerminalOperationStatus(status) {
+			t.Fatalf("expected %q to be terminal", status)
+		}
+	}
+}
+
 func TestDomainNeutralMetadataAndSchemaFailClosed(t *testing.T) {
 	request := domainTestOperation(t, "workspace-a", "request-a", "idempotency-a")
 	request.Metadata = map[string]string{"prompt": "do not persist this"}

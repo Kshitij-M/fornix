@@ -607,7 +607,7 @@ func (s *OperationStore) transitionTx(ctx context.Context, tx pgx.Tx, input Oper
 		}
 		return OperationTransitionResult{Operation: operation, Transition: transition, Duplicate: true}, nil
 	}
-	if input.Actor.WorkspaceID != operation.WorkspaceID || input.Actor.ID != operation.Request.Actor.ID || input.Actor.Kind != operation.Request.Actor.Kind {
+	if input.Actor.WorkspaceID != operation.WorkspaceID || input.Actor.ID != operation.Request.Actor.ID || input.Actor.Kind != operation.Request.Actor.Kind || input.Actor.Name != operation.Request.Actor.Name {
 		return OperationTransitionResult{}, ErrOperationWorkspace
 	}
 	if err := validateOperationTaskFence(operation, input.TaskOwnerID, input.TaskFence); err != nil {
@@ -649,7 +649,7 @@ func (s *OperationStore) transitionTx(ctx context.Context, tx pgx.Tx, input Oper
 	if _, err := tx.Exec(ctx, `INSERT INTO fornix.operation_transitions(workspace_id,operation_id,state_version,from_status,to_status,request_id,idempotency_key,actor,task_ref,session_ref,task_owner_id,task_fence,operation_owner_id,operation_fence,causation_id,correlation_id,reason_code,state,state_hash,previous_state_hash,event_sequence) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10::jsonb,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,$19,$20,$21)`, input.WorkspaceID, input.OperationID, version, operation.Status, input.ToStatus, input.RequestID, input.IdempotencyKey, mustJSON(input.Actor), entityValue(operation.Request.Task), entityValue(operation.Request.Session), input.TaskOwnerID, int64(input.TaskFence), input.OwnerID, int64(input.Fence), input.CausationID, input.CorrelationID, input.ReasonCode, stateJSON, stateHash, operation.StateHash, appended.Event.Sequence); err != nil {
 		return OperationTransitionResult{}, fmt.Errorf("insert operation transition: %w", err)
 	}
-	updated, err := tx.Exec(ctx, `UPDATE fornix.operations SET status=$3,state_version=$4,state_hash=$5,result_hash=$6,report_hash=$7,failure=$8::jsonb,next_retry_at=$9,task_owner_id=$10,task_fence=$11,updated_at=clock_timestamp(),started_at=CASE WHEN $3='running' AND started_at IS NULL THEN clock_timestamp() ELSE started_at END,completed_at=CASE WHEN $3 IN ('succeeded','failed','cancelled','dead_letter') THEN COALESCE(completed_at,clock_timestamp()) ELSE completed_at END WHERE workspace_id=$1 AND id=$2 AND state_version=$12`, input.WorkspaceID, input.OperationID, input.ToStatus, version, stateHash, input.ResultHash, input.ReportHash, operationNullableJSON(input.Failure), input.NextRetryAt, input.TaskOwnerID, int64(input.TaskFence), operation.StateVersion)
+	updated, err := tx.Exec(ctx, `UPDATE fornix.operations SET status=$3,state_version=$4,state_hash=$5,result_hash=$6,report_hash=$7,failure=$8::jsonb,next_retry_at=$9,task_owner_id=$10,task_fence=$11,updated_at=clock_timestamp(),started_at=CASE WHEN $3='running' AND started_at IS NULL THEN clock_timestamp() ELSE started_at END,completed_at=CASE WHEN $3 IN ('succeeded','failed','cancelled','dead_letter','abstained') THEN COALESCE(completed_at,clock_timestamp()) ELSE completed_at END WHERE workspace_id=$1 AND id=$2 AND state_version=$12`, input.WorkspaceID, input.OperationID, input.ToStatus, version, stateHash, input.ResultHash, input.ReportHash, operationNullableJSON(input.Failure), input.NextRetryAt, input.TaskOwnerID, int64(input.TaskFence), operation.StateVersion)
 	if err != nil {
 		return OperationTransitionResult{}, fmt.Errorf("update operation projection: %w", err)
 	}
@@ -682,7 +682,7 @@ func (s *OperationStore) ReserveAttempt(ctx context.Context, input OperationAtte
 	if input.AttemptID == "" {
 		input.AttemptID = contracts.NewID("attempt")
 	}
-	if !validHash(input.RequestHash) || input.Attempt < 1 || input.Fence == 0 || input.Fence > maxOperationFence || input.IdempotencyKey == "" {
+	if !validHash(input.RequestHash) || input.Attempt < 1 || input.Fence == 0 || input.Fence > maxOperationFence || input.IdempotencyKey == "" || len(input.IdempotencyKey) > contracts.MaxIdempotencyLength || len(input.OwnerID) > contracts.MaxDomainIDLength || len(input.AttemptID) > contracts.MaxDomainIDLength {
 		return OperationAttempt{}, false, errors.New("attempt requires a request hash, positive attempt, fence, and idempotency key")
 	}
 	tx, err := s.pool.Begin(ctx)
