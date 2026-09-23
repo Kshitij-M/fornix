@@ -17,14 +17,19 @@ const (
 )
 
 const (
+	OperationStatusCreated          = "created"
 	OperationStatusPlanned          = "planned"
+	OperationStatusAdmitted         = "admitted"
 	OperationStatusRunning          = "running"
 	OperationStatusAwaitingApproval = "awaiting_approval"
 	OperationStatusAwaitingRetry    = "awaiting_retry"
 	OperationStatusAwaitingExternal = "awaiting_external"
+	OperationStatusVerifying        = "verifying"
 	OperationStatusSucceeded        = "succeeded"
 	OperationStatusFailed           = "failed"
 	OperationStatusCancelled        = "cancelled"
+	OperationStatusRecoveryRequired = "recovery_required"
+	OperationStatusDeadLetter       = "dead_letter"
 	OperationStatusAbstained        = "abstained"
 )
 
@@ -690,10 +695,58 @@ func (r *OperationResult) Normalize() error {
 
 func validOperationStatus(status string) bool {
 	switch status {
-	case OperationStatusPlanned, OperationStatusRunning, OperationStatusAwaitingApproval,
+	case OperationStatusCreated, OperationStatusPlanned, OperationStatusAdmitted,
+		OperationStatusRunning, OperationStatusAwaitingApproval,
 		OperationStatusAwaitingRetry, OperationStatusAwaitingExternal, OperationStatusSucceeded,
-		OperationStatusFailed, OperationStatusCancelled, OperationStatusAbstained:
+		OperationStatusVerifying, OperationStatusFailed, OperationStatusCancelled,
+		OperationStatusRecoveryRequired, OperationStatusDeadLetter, OperationStatusAbstained:
 		return true
+	default:
+		return false
+	}
+}
+
+// IsTerminalOperationStatus reports whether an operation cannot accept another
+// lifecycle transition. Terminality is part of the durable authority rather
+// than an adapter convention, so callers must use this predicate before
+// attempting to execute or resume work.
+func IsTerminalOperationStatus(status string) bool {
+	switch status {
+	case OperationStatusSucceeded, OperationStatusFailed, OperationStatusCancelled,
+		OperationStatusDeadLetter, OperationStatusAbstained:
+		return true
+	default:
+		return false
+	}
+}
+
+// CanTransitionOperation reports the fail-closed lifecycle graph shared by
+// operation stores, workflow runtimes, and replay validators.
+func CanTransitionOperation(from, to string) bool {
+	if !validOperationStatus(from) || !validOperationStatus(to) || IsTerminalOperationStatus(from) {
+		return false
+	}
+	switch from {
+	case OperationStatusCreated:
+		return to == OperationStatusPlanned || to == OperationStatusCancelled
+	case OperationStatusPlanned:
+		return to == OperationStatusAdmitted || to == OperationStatusCancelled || to == OperationStatusFailed
+	case OperationStatusAdmitted:
+		return to == OperationStatusAwaitingApproval || to == OperationStatusRunning || to == OperationStatusCancelled || to == OperationStatusFailed || to == OperationStatusAbstained
+	case OperationStatusAwaitingApproval:
+		return to == OperationStatusRunning || to == OperationStatusCancelled || to == OperationStatusFailed
+	case OperationStatusRunning:
+		return to == OperationStatusAwaitingRetry || to == OperationStatusAwaitingExternal || to == OperationStatusVerifying ||
+			to == OperationStatusSucceeded || to == OperationStatusFailed || to == OperationStatusCancelled ||
+			to == OperationStatusRecoveryRequired || to == OperationStatusDeadLetter || to == OperationStatusAbstained
+	case OperationStatusAwaitingRetry:
+		return to == OperationStatusRunning || to == OperationStatusCancelled || to == OperationStatusDeadLetter
+	case OperationStatusAwaitingExternal:
+		return to == OperationStatusVerifying || to == OperationStatusRecoveryRequired || to == OperationStatusFailed || to == OperationStatusCancelled
+	case OperationStatusVerifying:
+		return to == OperationStatusSucceeded || to == OperationStatusFailed || to == OperationStatusRecoveryRequired
+	case OperationStatusRecoveryRequired:
+		return to == OperationStatusRunning || to == OperationStatusVerifying || to == OperationStatusSucceeded || to == OperationStatusFailed || to == OperationStatusDeadLetter
 	default:
 		return false
 	}
