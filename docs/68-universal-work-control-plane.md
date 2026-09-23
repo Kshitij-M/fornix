@@ -122,8 +122,8 @@ silently bypass Fornix identity, policy, fencing, evidence, or receipt rules.
 | Repository change and validation | First write-boundary vertical slice | Approval-gated local filesystem effects with recovery-required semantics |
 | Durable generic operation authority | Implemented alpha foundation: Issue [#39](https://github.com/Kshitij-M/fornix/issues/39) | One Postgres-backed operation identity, lifecycle, attempts, effects, callbacks, leases, replay, and compatibility links; adapter admission is still separate |
 | Universal policy, approvals, and external effects | Implemented alpha foundation: Issue [#46](https://github.com/Kshitij-M/fornix/issues/46) | Postgres-backed deterministic admission, exact approvals, quota gates, and fenced at-least-once effect recovery; connector qualification remains |
-| Bounded HTTP/API connector | Roadmap: Issue [#43](https://github.com/Kshitij-M/fornix/issues/43) | Read/list/idempotent-submit capabilities with egress, response, and retry bounds |
-| Read-only SQL connector | Roadmap: Issue [#43](https://github.com/Kshitij-M/fornix/issues/43) | Describe/query/explain capabilities with prepared statements and write rejection |
+| Bounded HTTP/API connector | Alpha reference adapter: Issue [#43](https://github.com/Kshitij-M/fornix/issues/43) | Read/list/idempotent-submit capabilities with configured egress, response, pagination, retry, credential-reference, and effect bounds |
+| Read-only SQL connector | Alpha reference adapter: Issue [#43](https://github.com/Kshitij-M/fornix/issues/43) | Describe/query/explain capabilities with prepared statements, read-only transactions, schema/table allowlists, row/byte/cost bounds, and write rejection |
 | Durable multi-step workflow runtime | Roadmap: Issue [#44](https://github.com/Kshitij-M/fornix/issues/44) | Typed model, tool, connector, approval, human, validation, callback, and compensation steps |
 | Multi-domain incident reference workflow | Roadmap: Issue [#42](https://github.com/Kshitij-M/fornix/issues/42) | Fake-first workflow spanning at least two non-repository domains |
 | Universal production qualification | Roadmap: Issue [#40](https://github.com/Kshitij-M/fornix/issues/40) | Isolation, trust, egress, quotas, recovery, backup/restore, load, and support evidence |
@@ -160,7 +160,7 @@ Its implementation sequence is:
 2. [#45 — Connector and capability registry](https://github.com/Kshitij-M/fornix/issues/45).
 3. [#39 — Durable generic operation authority](https://github.com/Kshitij-M/fornix/issues/39) (foundation implemented; final qualification and integration remain).
 4. [#46 — Universal policy, approvals, and external effects](https://github.com/Kshitij-M/fornix/issues/46) (alpha foundation implemented; qualification continues).
-5. [#43 — Bounded HTTP/API and read-only SQL connectors](https://github.com/Kshitij-M/fornix/issues/43).
+5. [#43 — Bounded HTTP/API and read-only SQL connectors](https://github.com/Kshitij-M/fornix/issues/43) (alpha reference adapters implemented; production qualification continues).
 6. [#44 — Durable multi-step workflow runtime](https://github.com/Kshitij-M/fornix/issues/44).
 7. [#42 — Multi-domain incident investigation and controlled remediation](https://github.com/Kshitij-M/fornix/issues/42).
 8. [#40 — Universal execution-plane production qualification](https://github.com/Kshitij-M/fornix/issues/40).

@@ -33,7 +33,7 @@ The next dependency-ordered work is tracked by [Issue #38](https://github.com/Ks
 
 1. [#39 — Durable generic operation authority](https://github.com/Kshitij-M/fornix/issues/39) (foundation implemented; final qualification and adapter integration remain).
 2. [#46 — Universal policy, approvals, and external effects](https://github.com/Kshitij-M/fornix/issues/46) (alpha admission/effect foundation implemented; connector qualification remains).
-3. [#43 — Bounded HTTP/API and read-only SQL connectors](https://github.com/Kshitij-M/fornix/issues/43).
+3. [#43 — Bounded HTTP/API and read-only SQL connectors](https://github.com/Kshitij-M/fornix/issues/43) (bounded reference adapters implemented; production qualification remains).
 4. [#44 — Durable multi-step workflow runtime](https://github.com/Kshitij-M/fornix/issues/44).
 5. [#42 — Multi-domain reference workflow](https://github.com/Kshitij-M/fornix/issues/42).
 6. [#40 — Universal production qualification](https://github.com/Kshitij-M/fornix/issues/40).
@@ -212,6 +212,17 @@ contains the current/planned domain matrix and the precise category boundary.
   external connectors, link authorization, signed callbacks, host-independent
   egress controls, secret-manager resolution, and non-repository production
   execution remain outside this qualification.
+- The Issue #43 connector slice now provides a fake-first HTTP/API adapter
+  (`read`, `list`, and approval-gated `submit_idempotent`) and a read-only SQL
+  adapter (`describe`, `query_readonly`, and `explain_readonly`). Both enforce
+  workspace-bound typed inputs, configured targets, hard response/row/byte/
+  timeout budgets, redacted hash-only results, and explicit external-effect
+  semantics. The SQL cost limit is a deterministic result-size estimate, not
+  a database planner or provider billing measurement. These adapters are
+  qualified for unit/conformance and clean-migration tests only; public
+  network egress, external credentials, provider-specific verification,
+  high-availability operation, and multi-domain workflow execution remain
+  unqualified.
 - The projection runtime is an internal pull API; no background subscriber or
   public replay API is provided yet.
 - Lease transitions are current coordination state rather than an append-only
