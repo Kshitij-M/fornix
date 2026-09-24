@@ -248,6 +248,13 @@ contains the current/planned domain matrix and the precise category boundary.
   qualification must add signed policy/catalog distribution, DNS-rebinding
   controls independent of individual adapters, and adversarial confused-deputy
   tests.
+- The generic operation authority now has an authenticated execution route for
+  trusted read-only and observation capabilities. It persists deterministic
+  plans and hash-only results transactionally, deduplicates committed result
+  retries, and rejects effectful capabilities until durable effect admission
+  and reservation are connected. This is the first registry-to-authority
+  vertical slice, not a background universal executor or exactly-once remote
+  execution claim.
 - The Issue #43 connector slice now provides a fake-first HTTP/API adapter
   (`read`, `list`, and approval-gated `submit_idempotent`) and a read-only SQL
   adapter (`describe`, `query_readonly`, and `explain_readonly`). Both enforce
@@ -300,6 +307,7 @@ make smoke-package
 make smoke-universal-operation
 make smoke-universal-trust
 make smoke-universal-egress
+make smoke-universal-execution
 ```
 
 For release output produced by GoReleaser, run:

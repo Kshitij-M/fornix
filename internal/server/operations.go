@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	connectorruntime "github.com/omaveda/fornix/internal/connector"
 	"github.com/omaveda/fornix/internal/contracts"
 	"github.com/omaveda/fornix/internal/store"
 )
@@ -50,6 +51,12 @@ type operationTransitionRequest struct {
 type operationReplayRequest struct {
 	FromVersion int64 `json:"from_version,omitempty"`
 	Limit       int   `json:"limit,omitempty"`
+}
+
+type operationExecuteRequest struct {
+	IdempotencyKey  string `json:"idempotency_key,omitempty"`
+	TaskFence       uint64 `json:"task_fence,omitempty"`
+	ApprovalGranted bool   `json:"approval_granted,omitempty"`
 }
 
 func (s *server) handleOperationCreate(w http.ResponseWriter, r *http.Request) {
@@ -125,6 +132,8 @@ func (s *server) handleOperation(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch parts[1] {
+	case "execute":
+		s.handleOperationExecute(w, r, operationID)
 	case "lease":
 		s.handleOperationLease(w, r, operationID)
 	case "renew":
@@ -138,6 +147,186 @@ func (s *server) handleOperation(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeErr(w, http.StatusNotFound, "unknown operation command")
 	}
+}
+
+// handleOperationExecute connects the durable operation authority to the
+// registered connector catalog. The first public executor is intentionally
+// limited to read-only and observation capabilities; effectful connectors
+// must use the durable admission/effect reservation path before they can be
+// exposed here.
+func (s *server) handleOperationExecute(w http.ResponseWriter, r *http.Request, operationID string) {
+	if s.connectorExecutor == nil || s.connectorRegistry == nil {
+		writeErr(w, http.StatusServiceUnavailable, "connector executor unavailable")
+		return
+	}
+	var input operationExecuteRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&input); err != nil && !errors.Is(err, io.EOF) {
+		writeErr(w, http.StatusBadRequest, "invalid operation execution request")
+		return
+	}
+	principal, ok := principalFromRequest(r)
+	if !ok || !principal.Authenticated {
+		writeErr(w, http.StatusUnauthorized, "unauthorised")
+		return
+	}
+	workspaceID := requestWorkspace(r, r.URL.Query().Get("workspace_id"))
+	ctx, cancel := context.WithTimeout(r.Context(), 90*time.Second)
+	defer cancel()
+	operation, err := s.operations.Get(ctx, workspaceID, operationID)
+	if err != nil {
+		writeOperationErr(w, err)
+		return
+	}
+	if operation.Request.Actor.ID != principal.ID || operation.Request.Actor.WorkspaceID != principal.WorkspaceID {
+		writeOperationErr(w, store.ErrOperationWorkspace)
+		return
+	}
+	if stored, resultErr := s.operations.GetResult(ctx, workspaceID, operationID); resultErr == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"operation": publicOperation(operation), "result": publicOperationResult(stored), "duplicate": true})
+		return
+	} else if !errors.Is(resultErr, store.ErrOperationResultNotFound) {
+		writeOperationErr(w, resultErr)
+		return
+	}
+	capability, found := s.connectorRegistry.Lookup(operation.Request.Capability)
+	if !found {
+		writeErr(w, http.StatusConflict, "capability is not available")
+		return
+	}
+	definition := capability.Definition()
+	if definition.Effect != contracts.EffectClassReadOnly && definition.Effect != contracts.EffectClassObservation {
+		writeErr(w, http.StatusConflict, "effectful capability requires durable effect admission")
+		return
+	}
+	if len(operation.Request.Metadata) > 0 && strings.EqualFold(operation.Request.Metadata["external_effect"], "true") {
+		writeErr(w, http.StatusConflict, "external effect execution requires durable effect admission")
+		return
+	}
+	options := connectorruntime.AdmissionOptions{
+		Principal:       &principal,
+		ApprovalGranted: input.ApprovalGranted,
+		Authorize: func(_ context.Context, value contracts.Principal, request contracts.OperationRequest, _ contracts.CapabilityDefinition) (bool, error) {
+			return value.WorkspaceID == request.WorkspaceID && value.ID == request.Actor.ID && value.Has(contracts.PermissionOperationExecute), nil
+		},
+	}
+	admission, err := s.connectorRegistry.Admit(ctx, operation.Request, options)
+	if err != nil {
+		writeErr(w, http.StatusConflict, "operation admission failed")
+		return
+	}
+	plan, err := admission.Capability.Plan(operation.Request)
+	if err != nil {
+		writeErr(w, http.StatusUnprocessableEntity, "connector plan failed")
+		return
+	}
+	ownerID := principal.ID
+	taskOwnerID, taskFence := operation.TaskOwnerID, operation.TaskFence
+	lease, err := operationLeaseForRequest(ctx, s.operations, workspaceID, operationID, ownerID, operationFenceHeader(r), operation.Request.Task != nil)
+	if err != nil {
+		writeOperationErr(w, err)
+		return
+	}
+	if input.TaskFence != 0 {
+		taskFence = input.TaskFence
+	}
+	executionKey := strings.TrimSpace(input.IdempotencyKey)
+	if executionKey == "" {
+		executionKey = contracts.HashStrings("operation-execute", operationID, operation.OperationHash)
+	}
+	if operation.Status == contracts.OperationStatusCreated {
+		planned, planErr := s.operations.AttachPlan(ctx, store.OperationPlanInput{
+			WorkspaceID: workspaceID, OperationID: operationID, OwnerID: ownerID, Fence: lease.Fence,
+			TaskOwnerID: taskOwnerID, TaskFence: taskFence, Actor: principal.Actor(), RequestID: requestIDFromRequest(r),
+			IdempotencyKey: executionKey + ":plan", CausationID: operation.Request.CausationID, CorrelationID: operation.Request.CorrelationID, Plan: plan,
+		})
+		if planErr != nil {
+			writeOperationErr(w, planErr)
+			return
+		}
+		operation = planned.Operation
+	}
+	for _, target := range []string{contracts.OperationStatusAdmitted, contracts.OperationStatusRunning} {
+		if operation.Status == target || operation.Status == contracts.OperationStatusRunning {
+			if operation.Status == contracts.OperationStatusRunning {
+				break
+			}
+			continue
+		}
+		if !contracts.CanTransitionOperation(operation.Status, target) {
+			break
+		}
+		transition, transitionErr := s.operations.Transition(ctx, store.OperationTransitionInput{
+			WorkspaceID: workspaceID, OperationID: operationID, OwnerID: ownerID, Fence: lease.Fence,
+			TaskOwnerID: taskOwnerID, TaskFence: taskFence, Actor: principal.Actor(), RequestID: requestIDFromRequest(r),
+			IdempotencyKey: executionKey + ":" + target, CausationID: operation.Request.CausationID, CorrelationID: operation.Request.CorrelationID,
+			ToStatus: target, ReasonCode: "connector_execute",
+		})
+		if transitionErr != nil {
+			writeOperationErr(w, transitionErr)
+			return
+		}
+		operation = transition.Operation
+	}
+	outcome, executeErr := s.connectorExecutor.Execute(ctx, operation.Request, options)
+	if executeErr != nil {
+		failure := &contracts.OperationFailure{SchemaVersion: contracts.DomainNeutralSchemaVersion, WorkspaceID: workspaceID, Code: contracts.OperationFailureAdapter, Retryable: false, DetailHash: contracts.HashStrings("connector-execution-failure", safeConnectorFailure(executeErr))}
+		failed := contracts.OperationResult{ID: operationID + "-result", OperationID: operationID, OperationHash: operation.OperationHash, RequestID: operation.RequestID, WorkspaceID: workspaceID, Actor: principal.Actor(), Status: contracts.OperationStatusFailed, Failure: failure}
+		written, writeErr := s.operations.RecordResult(ctx, store.OperationResultInput{WorkspaceID: workspaceID, OperationID: operationID, OwnerID: ownerID, Fence: lease.Fence, TaskOwnerID: taskOwnerID, TaskFence: taskFence, Actor: principal.Actor(), RequestID: requestIDFromRequest(r), IdempotencyKey: executionKey + ":result", CausationID: operation.Request.CausationID, CorrelationID: operation.Request.CorrelationID, Result: failed})
+		if writeErr != nil {
+			writeOperationErr(w, writeErr)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"operation": publicOperation(written.Operation), "result": publicOperationResult(written.Record), "duplicate": written.Duplicate})
+		return
+	}
+	if outcome.Admission.Definition.Effect != contracts.EffectClassReadOnly && outcome.Admission.Definition.Effect != contracts.EffectClassObservation || len(outcome.Result.ExternalEffects) != 0 {
+		writeErr(w, http.StatusConflict, "connector returned an unreserved external effect")
+		return
+	}
+	if operation.PlanHash != "" && operation.PlanHash != outcome.Plan.StableHash() {
+		writeErr(w, http.StatusConflict, "connector plan changed during execution")
+		return
+	}
+	written, err := s.operations.RecordResult(ctx, store.OperationResultInput{WorkspaceID: workspaceID, OperationID: operationID, OwnerID: ownerID, Fence: lease.Fence, TaskOwnerID: taskOwnerID, TaskFence: taskFence, Actor: principal.Actor(), RequestID: requestIDFromRequest(r), IdempotencyKey: executionKey + ":result", CausationID: operation.Request.CausationID, CorrelationID: operation.Request.CorrelationID, Result: outcome.Result})
+	if err != nil {
+		writeOperationErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"operation": publicOperation(written.Operation), "result": publicOperationResult(written.Record), "attempts": outcome.Attempts, "duplicate": written.Duplicate})
+}
+
+func operationLeaseForRequest(ctx context.Context, operations *store.OperationStore, workspaceID, operationID, ownerID string, fence uint64, taskBound bool) (store.OperationLease, error) {
+	if fence != 0 {
+		return store.OperationLease{WorkspaceID: workspaceID, OperationID: operationID, OwnerID: ownerID, Fence: fence}, nil
+	}
+	result, err := operations.AcquireLease(ctx, workspaceID, operationID, ownerID, 90*time.Second)
+	if err != nil && taskBound {
+		return store.OperationLease{}, err
+	}
+	if err != nil {
+		return store.OperationLease{}, err
+	}
+	return result.Lease, nil
+}
+
+func operationFenceHeader(r *http.Request) uint64 {
+	value := strings.TrimSpace(r.Header.Get("X-Operation-Fence"))
+	if value == "" {
+		return 0
+	}
+	fence, err := strconv.ParseUint(value, 10, 64)
+	if err != nil {
+		return 0
+	}
+	return fence
+}
+
+func safeConnectorFailure(err error) string {
+	var failure *connectorruntime.FailureError
+	if errors.As(err, &failure) && failure != nil && strings.TrimSpace(failure.Code) != "" {
+		return strings.ToLower(strings.TrimSpace(failure.Code))
+	}
+	return "adapter_failure"
 }
 
 func (s *server) handleOperationLeaseRenew(w http.ResponseWriter, r *http.Request, operationID string) {
@@ -301,6 +490,17 @@ func publicOperationLease(lease store.OperationLease) map[string]any {
 	return map[string]any{"workspace_id": lease.WorkspaceID, "operation_id": lease.OperationID, "owner_id": lease.OwnerID, "fence": lease.Fence, "lease_until": lease.LeaseUntil, "acquired_at": lease.AcquiredAt, "renewed_at": lease.RenewedAt, "released_at": lease.ReleasedAt}
 }
 
+func publicOperationResult(record store.OperationResultRecord) map[string]any {
+	return map[string]any{
+		"workspace_id": record.WorkspaceID,
+		"operation_id": record.OperationID,
+		"result_id":    record.ResultID,
+		"result_hash":  record.ResultHash,
+		"result":       record.Result,
+		"created_at":   record.CreatedAt,
+	}
+}
+
 func writeOperationErr(w http.ResponseWriter, err error) {
 	status := http.StatusBadRequest
 	switch {
@@ -308,7 +508,7 @@ func writeOperationErr(w http.ResponseWriter, err error) {
 		status = http.StatusNotFound
 	case errors.Is(err, store.ErrOperationWorkspace), errors.Is(err, store.ErrOperationTaskFence):
 		status = http.StatusForbidden
-	case errors.Is(err, store.ErrOperationIdempotency), errors.Is(err, store.ErrOperationTransition), errors.Is(err, store.ErrOperationLeaseMissing), errors.Is(err, store.ErrOperationLeaseHeld), errors.Is(err, store.ErrOperationLeaseOwned), errors.Is(err, store.ErrOperationLeaseFenced), errors.Is(err, store.ErrOperationLeaseExpired), errors.Is(err, store.ErrOperationLeaseReleased):
+	case errors.Is(err, store.ErrOperationIdempotency), errors.Is(err, store.ErrOperationPlanConflict), errors.Is(err, store.ErrOperationResultConflict), errors.Is(err, store.ErrOperationTransition), errors.Is(err, store.ErrOperationLeaseMissing), errors.Is(err, store.ErrOperationLeaseHeld), errors.Is(err, store.ErrOperationLeaseOwned), errors.Is(err, store.ErrOperationLeaseFenced), errors.Is(err, store.ErrOperationLeaseExpired), errors.Is(err, store.ErrOperationLeaseReleased):
 		status = http.StatusConflict
 	case errors.Is(err, store.ErrOperationReplay):
 		status = http.StatusUnprocessableEntity

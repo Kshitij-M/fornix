@@ -68,6 +68,7 @@ type server struct {
 	changes           *change.Service
 	toolRegistry      *tool.Registry
 	connectorRegistry *connectorruntime.Registry
+	connectorExecutor *connectorruntime.Executor
 	connectorBindings *store.ConnectorBindingStore
 	incidentWorkflows *incidentworkflow.Service
 	toolExecutor      *tool.Executor
@@ -240,6 +241,7 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 		changes:           changeService,
 		toolRegistry:      toolRegistry,
 		connectorRegistry: connectorRegistry,
+		connectorExecutor: &connectorruntime.Executor{Registry: connectorRegistry},
 		connectorBindings: store.NewConnectorBindingStore(pool, events),
 		toolRuns:          toolRuns,
 		toolExecutor:      toolExecutor,

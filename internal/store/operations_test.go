@@ -137,6 +137,109 @@ func TestOperationIntegrationCreateDuplicateConflictAndLinks(t *testing.T) {
 	}
 }
 
+func TestOperationPlanAndResultAreAtomicFencedAndIdempotent(t *testing.T) {
+	operationStore, pool, workspace := newOperationTestStore(t)
+	request := operationTestRequest(t, workspace, "execute-result-key")
+	created, err := operationStore.Create(context.Background(), OperationCreateInput{Request: request})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := operationStore.AcquireLease(context.Background(), workspace, created.Operation.ID, "operator", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan := operationTestPlan(t, request)
+	planned, err := operationStore.AttachPlan(context.Background(), OperationPlanInput{WorkspaceID: workspace, OperationID: created.Operation.ID, OwnerID: lease.Lease.OwnerID, Fence: lease.Lease.Fence, Actor: request.Actor, IdempotencyKey: "execute-plan-key", Plan: plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if planned.Operation.Status != contracts.OperationStatusPlanned || planned.Operation.PlanHash == "" {
+		t.Fatalf("unexpected planned operation: %+v", planned.Operation)
+	}
+	for _, status := range []string{contracts.OperationStatusAdmitted, contracts.OperationStatusRunning} {
+		transition, transitionErr := operationStore.Transition(context.Background(), OperationTransitionInput{WorkspaceID: workspace, OperationID: created.Operation.ID, OwnerID: lease.Lease.OwnerID, Fence: lease.Lease.Fence, Actor: request.Actor, IdempotencyKey: "execute-transition-" + status, ToStatus: status})
+		if transitionErr != nil {
+			t.Fatal(transitionErr)
+		}
+		if transition.Operation.Status != status {
+			t.Fatalf("status=%s, got=%s", status, transition.Operation.Status)
+		}
+	}
+	result := contracts.OperationResult{
+		ID: "result-1", OperationID: created.Operation.ID, OperationHash: created.Operation.OperationHash,
+		RequestID: request.RequestID, WorkspaceID: workspace, Actor: request.Actor, Status: contracts.OperationStatusSucceeded,
+		OutputSchemaVersion: 1, OutputSchemaHash: testHash("output-schema"), OutputHash: testHash("output"),
+		Steps: []contracts.OperationStepResult{{StepID: plan.Steps[0].ID, Status: contracts.OperationStatusSucceeded, OutputSchemaVersion: 1, OutputSchemaHash: testHash("output-schema"), OutputHash: testHash("output")}},
+	}
+	written, err := operationStore.RecordResult(context.Background(), OperationResultInput{WorkspaceID: workspace, OperationID: created.Operation.ID, OwnerID: lease.Lease.OwnerID, Fence: lease.Lease.Fence, Actor: request.Actor, IdempotencyKey: "execute-result-key", Result: result})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if written.Duplicate || written.Operation.Status != contracts.OperationStatusSucceeded || written.Record.ResultHash == "" {
+		t.Fatalf("unexpected result write: %+v", written)
+	}
+	duplicate, err := operationStore.RecordResult(context.Background(), OperationResultInput{WorkspaceID: workspace, OperationID: created.Operation.ID, OwnerID: "stale-owner", Fence: 1, Actor: request.Actor, IdempotencyKey: "different-retry-key", Result: result})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !duplicate.Duplicate || duplicate.Record.ResultHash != written.Record.ResultHash {
+		t.Fatalf("duplicate result was not stable: %+v", duplicate)
+	}
+	var resultRows int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM fornix.operation_results WHERE workspace_id=$1 AND operation_id=$2`, workspace, created.Operation.ID).Scan(&resultRows); err != nil {
+		t.Fatal(err)
+	}
+	if resultRows != 1 {
+		t.Fatalf("result rows=%d, want 1", resultRows)
+	}
+}
+
+func TestOperationResultCrashBeforeCommitLeavesNoResult(t *testing.T) {
+	operationStore, _, workspace := newOperationTestStore(t)
+	request := operationTestRequest(t, workspace, "execute-result-crash-key")
+	created, err := operationStore.Create(context.Background(), OperationCreateInput{Request: request, Plan: func() *contracts.OperationPlan { plan := operationTestPlan(t, request); return &plan }()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := operationStore.AcquireLease(context.Background(), workspace, created.Operation.ID, "operator", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []string{contracts.OperationStatusAdmitted, contracts.OperationStatusRunning} {
+		if status == contracts.OperationStatusAdmitted {
+			// The operation starts in created when a plan is supplied; persist the
+			// planned transition before admission.
+			if _, err := operationStore.Transition(context.Background(), OperationTransitionInput{WorkspaceID: workspace, OperationID: created.Operation.ID, OwnerID: lease.Lease.OwnerID, Fence: lease.Lease.Fence, Actor: request.Actor, IdempotencyKey: "crash-transition-planned", ToStatus: contracts.OperationStatusPlanned}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if _, err := operationStore.Transition(context.Background(), OperationTransitionInput{WorkspaceID: workspace, OperationID: created.Operation.ID, OwnerID: lease.Lease.OwnerID, Fence: lease.Lease.Fence, Actor: request.Actor, IdempotencyKey: "crash-transition-" + status, ToStatus: status}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	operationStore.SetFailureHook(func(point string) error {
+		if point == "operation_transition_committed" {
+			return errors.New("injected result commit failure")
+		}
+		return nil
+	})
+	result := contracts.OperationResult{ID: "crash-result", OperationID: created.Operation.ID, OperationHash: created.Operation.OperationHash, RequestID: request.RequestID, WorkspaceID: workspace, Actor: request.Actor, Status: contracts.OperationStatusSucceeded, OutputSchemaVersion: 1, OutputSchemaHash: testHash("output-schema"), OutputHash: testHash("output")}
+	if _, err := operationStore.RecordResult(context.Background(), OperationResultInput{WorkspaceID: workspace, OperationID: created.Operation.ID, OwnerID: lease.Lease.OwnerID, Fence: lease.Lease.Fence, Actor: request.Actor, IdempotencyKey: "crash-result", Result: result}); err == nil {
+		t.Fatal("injected result commit failure unexpectedly succeeded")
+	}
+	operationStore.SetFailureHook(nil)
+	if _, err := operationStore.GetResult(context.Background(), workspace, created.Operation.ID); !errors.Is(err, ErrOperationResultNotFound) {
+		t.Fatalf("result survived rollback: %v", err)
+	}
+	current, err := operationStore.Get(context.Background(), workspace, created.Operation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current.Status != contracts.OperationStatusRunning {
+		t.Fatalf("operation status after rollback=%s, want running", current.Status)
+	}
+}
+
 func TestOperationIntegrationTransitionDuplicateReplayAndRollback(t *testing.T) {
 	store, _, workspace := newOperationTestStore(t)
 	created, err := store.Create(context.Background(), OperationCreateInput{Request: operationTestRequest(t, workspace, "transition-create"), Plan: func() *contracts.OperationPlan {
@@ -501,6 +604,7 @@ func newOperationTestStore(t *testing.T) (*OperationStore, *pgxpool.Pool, string
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.operation_approval_transitions WHERE workspace_id=$1`, workspace)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.operation_approvals WHERE workspace_id=$1`, workspace)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.operation_admission_decisions WHERE workspace_id=$1`, workspace)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.operation_results WHERE workspace_id=$1`, workspace)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.operations WHERE workspace_id=$1`, workspace)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.task_execution_leases WHERE workspace_id=$1`, workspace)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.tasks WHERE workspace_id=$1`, workspace)

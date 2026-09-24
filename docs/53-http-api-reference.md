@@ -120,6 +120,7 @@ input and producing the input/schema hashes before admission.
 | `POST` | `/v1/operations/{id}/renew` | Renew the current operation lease | `operation:execute` |
 | `POST` | `/v1/operations/{id}/release` | Release the current operation lease | `operation:execute` |
 | `POST` | `/v1/operations/{id}/transition` | Advance one legal state transition | `operation:execute` |
+| `POST` | `/v1/operations/{id}/execute` | Execute one trusted read-only or observation capability and persist its result | `operation:execute` |
 | `POST` | `/v1/operations/{id}/replay` | Verify the durable transition/event hash chain | `operation:read` |
 
 The create body contains a `request` object and may contain a normalized
@@ -135,12 +136,24 @@ task-bound worker must hold both authorities. Reusing a command idempotency
 key with the same canonical request returns the existing result; changing the
 logical request or plan under that key is a conflict.
 
+The execute route uses the authenticated actor as the operation owner, acquires
+or validates the operation fence, persists a deterministic connector plan when
+needed, and records a bounded hash-only result in the same transaction as the
+terminal state transition. It currently admits only read-only and observation
+capabilities. A capability that declares an external effect is rejected until
+the durable admission and effect-reservation path is used; Fornix never
+silently turns a connector call into an untracked side effect. Duplicate
+execution delivery returns the committed result without requiring a second
+connector call. Raw output, credentials, and provider diagnostics remain in
+their domain authorities and are not included in the operation result.
+
 The CLI maps this surface without adding a second authority:
 
 ```sh
 fornix operation create --request-file operation-request.json [--plan-file operation-plan.json]
 fornix operation get --id op-123
 fornix operation lease --id op-123
+fornix operation execute --id op-123
 fornix operation transition --id op-123 --fence 1 --to-status planned
 fornix operation replay --id op-123
 ```

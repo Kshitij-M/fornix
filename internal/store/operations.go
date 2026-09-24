@@ -39,6 +39,9 @@ var (
 	ErrOperationTaskFence      = errors.New("task-bound operation fence is invalid")
 	ErrOperationReplay         = errors.New("operation replay integrity failure")
 	ErrOperationWorkspace      = errors.New("operation workspace violation")
+	ErrOperationPlanConflict   = errors.New("operation plan conflicts with existing state")
+	ErrOperationResultNotFound = errors.New("operation result not found")
+	ErrOperationResultConflict = errors.New("operation result conflicts with existing state")
 )
 
 // Operation is the current projection of one generic operation. Raw inputs and
@@ -104,6 +107,64 @@ type OperationCreateResult struct {
 	Operation Operation
 	Event     contracts.EventEnvelope
 	Duplicate bool
+}
+
+// OperationPlanInput is the fenced command that persists a connector's
+// normalized deterministic plan before any adapter execution begins.
+type OperationPlanInput struct {
+	WorkspaceID    string
+	OperationID    string
+	OwnerID        string
+	Fence          uint64
+	TaskOwnerID    string
+	TaskFence      uint64
+	Actor          contracts.ActorRef
+	RequestID      string
+	IdempotencyKey string
+	CausationID    string
+	CorrelationID  string
+	Plan           contracts.OperationPlan
+}
+
+type OperationPlanResult struct {
+	Operation  Operation
+	Transition OperationTransition
+	Event      contracts.EventEnvelope
+	Duplicate  bool
+}
+
+// OperationResultRecord is the immutable, hash-only result authority for one
+// generic operation. Domain adapters own raw output and evidence bytes.
+type OperationResultRecord struct {
+	WorkspaceID string
+	OperationID string
+	ResultID    string
+	ResultHash  string
+	Result      contracts.OperationResult
+	CreatedAt   time.Time
+}
+
+type OperationResultInput struct {
+	WorkspaceID    string
+	OperationID    string
+	OwnerID        string
+	Fence          uint64
+	TaskOwnerID    string
+	TaskFence      uint64
+	Actor          contracts.ActorRef
+	RequestID      string
+	IdempotencyKey string
+	CausationID    string
+	CorrelationID  string
+	Result         contracts.OperationResult
+}
+
+type OperationResultWrite struct {
+	Operation  Operation
+	Record     OperationResultRecord
+	Transition OperationTransition
+	Event      contracts.EventEnvelope
+	Duplicate  bool
 }
 
 // OperationTransitionInput is a fenced command. The store never calls an
@@ -421,6 +482,213 @@ func (s *OperationStore) Get(ctx context.Context, workspaceID, operationID strin
 		return Operation{}, ErrOperationNotFound
 	}
 	return value, err
+}
+
+// AttachPlan persists the connector-produced plan and advances an operation
+// from created to planned in one fenced transaction. The operation lease and,
+// when present, the live task lease are both validated before mutation.
+func (s *OperationStore) AttachPlan(ctx context.Context, input OperationPlanInput) (OperationPlanResult, error) {
+	if s == nil || s.pool == nil || s.events == nil {
+		return OperationPlanResult{}, errors.New("operation store is not configured")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return OperationPlanResult{}, fmt.Errorf("begin operation plan: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := s.attachPlanTx(ctx, tx, input)
+	if err != nil {
+		return OperationPlanResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return OperationPlanResult{}, fmt.Errorf("commit operation plan: %w", err)
+	}
+	return result, nil
+}
+
+func (s *OperationStore) attachPlanTx(ctx context.Context, tx pgx.Tx, input OperationPlanInput) (OperationPlanResult, error) {
+	input.WorkspaceID, input.OperationID, input.OwnerID = strings.TrimSpace(input.WorkspaceID), strings.TrimSpace(input.OperationID), strings.TrimSpace(input.OwnerID)
+	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
+	if input.WorkspaceID == "" || input.OperationID == "" || input.OwnerID == "" || input.Fence == 0 || input.Fence > maxOperationFence || input.IdempotencyKey == "" {
+		return OperationPlanResult{}, ErrOperationLeaseFenced
+	}
+	operation, err := readOperationByID(ctx, tx, input.WorkspaceID, input.OperationID, true)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return OperationPlanResult{}, ErrOperationNotFound
+	}
+	if err != nil {
+		return OperationPlanResult{}, err
+	}
+	planJSON, planHash, plan, err := normalizePlan(operation.Request, &input.Plan)
+	if err != nil {
+		return OperationPlanResult{}, err
+	}
+	if operation.Status != contracts.OperationStatusCreated {
+		if operation.PlanHash == planHash {
+			return OperationPlanResult{Operation: operation, Duplicate: true}, nil
+		}
+		return OperationPlanResult{}, ErrOperationPlanConflict
+	}
+	if err := validateOperationTaskFence(operation, input.TaskOwnerID, input.TaskFence); err != nil {
+		return OperationPlanResult{}, err
+	}
+	if operation.Request.Task != nil {
+		if input.OwnerID != operation.TaskOwnerID || input.TaskFence == 0 {
+			return OperationPlanResult{}, ErrOperationTaskFence
+		}
+		if err := validateTaskFenceForOperationTx(ctx, tx, operation.Request.Task, input.TaskOwnerID, input.TaskFence); err != nil {
+			return OperationPlanResult{}, err
+		}
+	}
+	if _, err := s.validateLease(ctx, tx, OperationLease{WorkspaceID: input.WorkspaceID, OperationID: input.OperationID, OwnerID: input.OwnerID, Fence: input.Fence}); err != nil {
+		return OperationPlanResult{}, err
+	}
+	if operation.PlanHash != "" {
+		if operation.PlanHash != planHash {
+			return OperationPlanResult{}, ErrOperationPlanConflict
+		}
+	} else {
+		if _, err := tx.Exec(ctx, `UPDATE fornix.operations SET plan=$3::jsonb,plan_hash=$4 WHERE workspace_id=$1 AND id=$2 AND status=$5`, input.WorkspaceID, input.OperationID, planJSON, planHash, contracts.OperationStatusCreated); err != nil {
+			return OperationPlanResult{}, fmt.Errorf("persist operation plan: %w", err)
+		}
+		if err := s.insertChildren(ctx, tx, operation.Request, plan, nil, nil); err != nil {
+			return OperationPlanResult{}, fmt.Errorf("persist operation steps: %w", err)
+		}
+	}
+	transition, err := s.transitionTx(ctx, tx, OperationTransitionInput{
+		WorkspaceID: input.WorkspaceID, OperationID: input.OperationID, OwnerID: input.OwnerID, Fence: input.Fence,
+		TaskOwnerID: input.TaskOwnerID, TaskFence: input.TaskFence, Actor: input.Actor, RequestID: input.RequestID,
+		IdempotencyKey: input.IdempotencyKey, CausationID: input.CausationID, CorrelationID: input.CorrelationID,
+		ToStatus: contracts.OperationStatusPlanned, ReasonCode: "connector_plan",
+	})
+	if err != nil {
+		return OperationPlanResult{}, err
+	}
+	_ = plan
+	return OperationPlanResult{Operation: transition.Operation, Transition: transition.Transition, Event: transition.Event}, nil
+}
+
+// GetResult reads the immutable result for one workspace-scoped operation.
+func (s *OperationStore) GetResult(ctx context.Context, workspaceID, operationID string) (OperationResultRecord, error) {
+	if s == nil || s.pool == nil {
+		return OperationResultRecord{}, errors.New("operation store is not configured")
+	}
+	record, err := readOperationResult(ctx, s.pool, strings.TrimSpace(workspaceID), strings.TrimSpace(operationID))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return OperationResultRecord{}, ErrOperationResultNotFound
+	}
+	return record, err
+}
+
+// RecordResult inserts one bounded hash-only connector result and advances the
+// operation to the result status atomically. A committed duplicate returns
+// the original result without requiring a live lease, while a new write is
+// always fenced.
+func (s *OperationStore) RecordResult(ctx context.Context, input OperationResultInput) (OperationResultWrite, error) {
+	if s == nil || s.pool == nil || s.events == nil {
+		return OperationResultWrite{}, errors.New("operation store is not configured")
+	}
+	if err := input.Result.Normalize(); err != nil {
+		return OperationResultWrite{}, fmt.Errorf("normalize operation result: %w", err)
+	}
+	if input.Result.WorkspaceID != strings.TrimSpace(input.WorkspaceID) || input.Result.OperationID != strings.TrimSpace(input.OperationID) {
+		return OperationResultWrite{}, ErrOperationWorkspace
+	}
+	if input.Result.StableHash() == "" {
+		return OperationResultWrite{}, ErrOperationResultConflict
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return OperationResultWrite{}, fmt.Errorf("begin operation result: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := s.recordResultTx(ctx, tx, input)
+	if err != nil {
+		return OperationResultWrite{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return OperationResultWrite{}, fmt.Errorf("commit operation result: %w", err)
+	}
+	return result, nil
+}
+
+func (s *OperationStore) recordResultTx(ctx context.Context, tx pgx.Tx, input OperationResultInput) (OperationResultWrite, error) {
+	operation, err := readOperationByID(ctx, tx, input.WorkspaceID, input.OperationID, true)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return OperationResultWrite{}, ErrOperationNotFound
+	}
+	if err != nil {
+		return OperationResultWrite{}, err
+	}
+	resultHash := input.Result.StableHash()
+	if existing, readErr := readOperationResult(ctx, tx, input.WorkspaceID, input.OperationID); readErr == nil {
+		if existing.ResultHash != resultHash {
+			return OperationResultWrite{}, ErrOperationResultConflict
+		}
+		return OperationResultWrite{Operation: operation, Record: existing, Duplicate: true}, nil
+	} else if !errors.Is(readErr, pgx.ErrNoRows) {
+		return OperationResultWrite{}, readErr
+	}
+	if operation.Status != contracts.OperationStatusRunning && operation.Status != contracts.OperationStatusRecoveryRequired {
+		return OperationResultWrite{}, fmt.Errorf("%w: operation is %s", ErrOperationTransition, operation.Status)
+	}
+	if input.Actor.ID == "" {
+		input.Actor = operation.Request.Actor
+	}
+	if input.Actor.WorkspaceID != operation.WorkspaceID || input.Actor.ID != operation.Request.Actor.ID || input.Actor.Kind != operation.Request.Actor.Kind || input.Actor.Name != operation.Request.Actor.Name {
+		return OperationResultWrite{}, ErrOperationWorkspace
+	}
+	if err := validateOperationTaskFence(operation, input.TaskOwnerID, input.TaskFence); err != nil {
+		return OperationResultWrite{}, err
+	}
+	if operation.Request.Task != nil {
+		if input.OwnerID != operation.TaskOwnerID || input.TaskFence == 0 {
+			return OperationResultWrite{}, ErrOperationTaskFence
+		}
+		if err := validateTaskFenceForOperationTx(ctx, tx, operation.Request.Task, input.TaskOwnerID, input.TaskFence); err != nil {
+			return OperationResultWrite{}, err
+		}
+	}
+	if _, err := s.validateLease(ctx, tx, OperationLease{WorkspaceID: input.WorkspaceID, OperationID: input.OperationID, OwnerID: input.OwnerID, Fence: input.Fence}); err != nil {
+		return OperationResultWrite{}, err
+	}
+	resultID := input.Result.ID
+	if resultID == "" {
+		resultID = contracts.NewID("operation-result")
+	}
+	resultJSON, err := json.Marshal(input.Result)
+	if err != nil {
+		return OperationResultWrite{}, err
+	}
+	if len(resultJSON) > 262144 {
+		return OperationResultWrite{}, ErrOperationResultConflict
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO fornix.operation_results(workspace_id,operation_id,result_id,result_hash,result) VALUES($1,$2,$3,$4,$5::jsonb)`, input.WorkspaceID, input.OperationID, resultID, resultHash, resultJSON); err != nil {
+		return OperationResultWrite{}, fmt.Errorf("insert operation result: %w", err)
+	}
+	for _, step := range input.Result.Steps {
+		updated, updateErr := tx.Exec(ctx, `UPDATE fornix.operation_steps SET status=$4,output_hash=$5 WHERE workspace_id=$1 AND operation_id=$2 AND step_id=$3`, input.WorkspaceID, input.OperationID, step.StepID, step.Status, step.OutputHash)
+		if updateErr != nil {
+			return OperationResultWrite{}, fmt.Errorf("update operation step result: %w", updateErr)
+		}
+		if updated.RowsAffected() != 1 {
+			return OperationResultWrite{}, fmt.Errorf("operation result references unknown step %q", step.StepID)
+		}
+	}
+	transition, err := s.transitionTx(ctx, tx, OperationTransitionInput{
+		WorkspaceID: input.WorkspaceID, OperationID: input.OperationID, OwnerID: input.OwnerID, Fence: input.Fence,
+		TaskOwnerID: input.TaskOwnerID, TaskFence: input.TaskFence, Actor: input.Actor, RequestID: input.RequestID,
+		IdempotencyKey: input.IdempotencyKey, CausationID: input.CausationID, CorrelationID: input.CorrelationID,
+		ToStatus: input.Result.Status, ResultHash: resultHash, ReportHash: input.Result.ReportHash, Failure: input.Result.Failure,
+	})
+	if err != nil {
+		return OperationResultWrite{}, err
+	}
+	record, err := readOperationResult(ctx, tx, input.WorkspaceID, input.OperationID)
+	if err != nil {
+		return OperationResultWrite{}, err
+	}
+	return OperationResultWrite{Operation: transition.Operation, Record: record, Transition: transition.Transition, Event: transition.Event}, nil
 }
 
 func (s *OperationStore) AcquireLease(ctx context.Context, workspaceID, operationID, ownerID string, ttl time.Duration) (OperationLeaseResult, error) {
@@ -1279,6 +1547,23 @@ func readOperationQuery(ctx context.Context, queryer interface {
 		value.Failure = &failure
 	}
 	return value, nil
+}
+
+func readOperationResult(ctx context.Context, queryer interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, workspaceID, operationID string) (OperationResultRecord, error) {
+	var record OperationResultRecord
+	var resultJSON []byte
+	if err := queryer.QueryRow(ctx, `SELECT workspace_id,operation_id,result_id,result_hash,result,created_at FROM fornix.operation_results WHERE workspace_id=$1 AND operation_id=$2`, workspaceID, operationID).Scan(&record.WorkspaceID, &record.OperationID, &record.ResultID, &record.ResultHash, &resultJSON, &record.CreatedAt); err != nil {
+		return OperationResultRecord{}, err
+	}
+	if err := json.Unmarshal(resultJSON, &record.Result); err != nil {
+		return OperationResultRecord{}, fmt.Errorf("decode operation result: %w", err)
+	}
+	if record.Result.StableHash() != record.ResultHash {
+		return OperationResultRecord{}, ErrOperationResultConflict
+	}
+	return record, nil
 }
 
 func readTransition(ctx context.Context, queryer interface {

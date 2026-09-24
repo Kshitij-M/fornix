@@ -179,7 +179,7 @@ Work:
   change      Propose, approve, apply, and disclose repository changes
   validation  Run and inspect post-change validation
   policy      Inspect and resolve validation policy packs
-  operation   Create, lease, renew, release, advance, and replay operations
+  operation   Create, execute, lease, renew, release, advance, and replay operations
   incident    Run the bounded multi-domain incident workflow
 
 Identity and diagnostics:
@@ -450,7 +450,7 @@ func (c *operatorCLI) runCommand(args []string) error {
 // lifecycle commands use the same authenticated HTTP authority.
 func (c *operatorCLI) operationCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("operation requires create, get, lease, renew, release, transition, or replay")
+		return errors.New("operation requires create, execute, get, lease, renew, release, transition, or replay")
 	}
 	switch args[0] {
 	case "create":
@@ -476,6 +476,17 @@ func (c *operatorCLI) operationCommand(args []string) error {
 		}
 		body["idempotency_key"] = idempotencyKey
 		return c.requestPrint(http.MethodPost, "/v1/operations", body, false)
+	case "execute":
+		id := valueArg(args[1:], "id", "")
+		if id == "" {
+			return errors.New("operation execute requires --id ID")
+		}
+		path := "/v1/operations/" + url.PathEscape(id) + "/execute?workspace_id=" + url.QueryEscape(c.workspace)
+		body := map[string]any{"idempotency_key": valueArg(args[1:], "idempotency", ""), "task_fence": uint64Value(args[1:], "task-fence", 0), "approval_granted": valueArg(args[1:], "approval-granted", "false") == "true"}
+		if body["idempotency_key"] == "" {
+			delete(body, "idempotency_key")
+		}
+		return c.requestPrint(http.MethodPost, path, body, false)
 	case "get":
 		return c.requestPrint(http.MethodGet, "/v1/operations/"+url.PathEscape(valueArg(args[1:], "id", ""))+"?workspace_id="+url.QueryEscape(c.workspace), nil, false)
 	case "lease":

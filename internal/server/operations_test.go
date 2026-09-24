@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/omaveda/fornix/internal/adapters/fakeincident"
+	connectorruntime "github.com/omaveda/fornix/internal/connector"
 	"github.com/omaveda/fornix/internal/contracts"
 )
 
@@ -139,6 +141,109 @@ func TestGenericOperationHTTPQualificationLatency(t *testing.T) {
 	}
 	sort.Slice(samples, func(left, right int) bool { return samples[left] < samples[right] })
 	t.Logf("generic operation HTTP create samples=%d p50=%s p95=%s max=%s", len(samples), samples[len(samples)/2], samples[len(samples)*95/100], samples[len(samples)-1])
+}
+
+func TestGenericOperationHTTPExecutesTrustedReadAndDeduplicates(t *testing.T) {
+	srv, pool, workspaceID, token := newServerAuthTest(t, []contracts.Permission{contracts.PermissionOperationRead, contracts.PermissionOperationCreate, contracts.PermissionOperationExecute})
+	registry := connectorruntime.NewRegistry()
+	adapter, err := fakeincident.NewConnector(workspaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Register(adapter); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.TrustWorkspace(workspaceID, "test-v1"); err != nil {
+		t.Fatal(err)
+	}
+	registry.RequireTrustPolicy(true)
+	srv.connectorRegistry = registry
+	srv.connectorExecutor = &connectorruntime.Executor{Registry: registry}
+	handler := withRequestMiddleware(srv.securityMiddleware(srv.routes()), 2<<20)
+	capability, ok := registry.LookupIdentity(workspaceID, fakeincident.ConnectorName, fakeincident.ConnectorVersion, "incident.read", "1")
+	if !ok {
+		t.Fatal("incident read capability was not registered")
+	}
+	definition := capability.Definition()
+	request := contracts.OperationRequest{
+		WorkspaceID: workspaceID, IdempotencyKey: "generic-execute-key",
+		Capability: definition.Ref, Target: contracts.ResourceRef{WorkspaceID: workspaceID, System: contracts.SystemRef{WorkspaceID: workspaceID, Type: "incident", ID: "monitor", Version: "1"}, Kind: fakeincident.ResourceKind, ID: "incident-1", Version: "1"},
+		InputType: fakeincident.InputType, InputSchemaVersion: definition.InputSchemaVersion, InputSchemaHash: definition.InputSchemaHash, InputHash: contracts.HashStrings("incident-input"), Profile: definition.Profile,
+	}
+	body, err := json.Marshal(operationCreateRequest{Request: request, Idempotency: request.IdempotencyKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	createdResponse := performOperationRequest(handler, token, workspaceID, http.MethodPost, "/v1/operations", body, nil)
+	if createdResponse.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", createdResponse.Code, createdResponse.Body.String())
+	}
+	operationID := stringValue(t, objectValue(t, decodeOperationJSON(t, createdResponse), "operation"), "id")
+	executePath := "/v1/operations/" + operationID + "/execute?workspace_id=" + workspaceID
+	executeResponse := performOperationRequest(handler, token, workspaceID, http.MethodPost, executePath, []byte(`{"idempotency_key":"generic-execute-delivery"}`), nil)
+	if executeResponse.Code != http.StatusOK {
+		t.Fatalf("execute status=%d body=%s", executeResponse.Code, executeResponse.Body.String())
+	}
+	executed := decodeOperationJSON(t, executeResponse)
+	if stringValue(t, objectValue(t, executed, "operation"), "status") != contracts.OperationStatusSucceeded {
+		t.Fatalf("operation did not succeed: %s", responseJSON(executed))
+	}
+	result := objectValue(t, executed, "result")
+	if stringValue(t, result, "result_hash") == "" {
+		t.Fatalf("missing durable result: %s", responseJSON(executed))
+	}
+	duplicateResponse := performOperationRequest(handler, token, workspaceID, http.MethodPost, executePath, []byte(`{"idempotency_key":"different-delivery"}`), nil)
+	if duplicateResponse.Code != http.StatusOK {
+		t.Fatalf("duplicate execute status=%d body=%s", duplicateResponse.Code, duplicateResponse.Body.String())
+	}
+	if !boolValue(t, decodeOperationJSON(t, duplicateResponse), "duplicate") {
+		t.Fatal("duplicate execution was not reported")
+	}
+	var count int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM fornix.operation_results WHERE workspace_id=$1 AND operation_id=$2`, workspaceID, operationID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("durable result count=%d, want 1", count)
+	}
+}
+
+func TestGenericOperationHTTPRejectsEffectfulCapabilityWithoutReservation(t *testing.T) {
+	srv, _, workspaceID, token := newServerAuthTest(t, []contracts.Permission{contracts.PermissionOperationRead, contracts.PermissionOperationCreate, contracts.PermissionOperationExecute})
+	registry := connectorruntime.NewRegistry()
+	adapter, err := fakeincident.NewConnector(workspaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Register(adapter); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.TrustWorkspace(workspaceID, "test-v1"); err != nil {
+		t.Fatal(err)
+	}
+	registry.RequireTrustPolicy(true)
+	srv.connectorRegistry = registry
+	srv.connectorExecutor = &connectorruntime.Executor{Registry: registry}
+	handler := withRequestMiddleware(srv.securityMiddleware(srv.routes()), 2<<20)
+	capability, ok := registry.LookupIdentity(workspaceID, fakeincident.ConnectorName, fakeincident.ConnectorVersion, "incident.remediate", "1")
+	if !ok {
+		t.Fatal("incident remediation capability was not registered")
+	}
+	definition := capability.Definition()
+	request := contracts.OperationRequest{WorkspaceID: workspaceID, IdempotencyKey: "generic-effect-key", Capability: definition.Ref, Target: contracts.ResourceRef{WorkspaceID: workspaceID, System: contracts.SystemRef{WorkspaceID: workspaceID, Type: "incident", ID: "monitor", Version: "1"}, Kind: fakeincident.ResourceKind, ID: "incident-1", Version: "1"}, InputType: fakeincident.InputType, InputSchemaVersion: definition.InputSchemaVersion, InputSchemaHash: definition.InputSchemaHash, InputHash: contracts.HashStrings("incident-input"), Profile: definition.Profile}
+	body, err := json.Marshal(operationCreateRequest{Request: request, Idempotency: request.IdempotencyKey})
+	if err != nil {
+		t.Fatal(err)
+	}
+	createdResponse := performOperationRequest(handler, token, workspaceID, http.MethodPost, "/v1/operations", body, nil)
+	if createdResponse.Code != http.StatusOK {
+		t.Fatalf("create status=%d body=%s", createdResponse.Code, createdResponse.Body.String())
+	}
+	operationID := stringValue(t, objectValue(t, decodeOperationJSON(t, createdResponse), "operation"), "id")
+	executeResponse := performOperationRequest(handler, token, workspaceID, http.MethodPost, "/v1/operations/"+operationID+"/execute?workspace_id="+workspaceID, []byte(`{}`), nil)
+	if executeResponse.Code != http.StatusConflict {
+		t.Fatalf("effectful execute status=%d body=%s", executeResponse.Code, executeResponse.Body.String())
+	}
 }
 
 func genericOperationRequest(workspaceID string) contracts.OperationRequest {
