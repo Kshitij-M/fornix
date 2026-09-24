@@ -88,10 +88,12 @@ intent
 ```
 
 The repository adapter is the first concrete adapter and qualification path.
-The current alpha does not claim that HTTP, SQL, cloud, ticketing, or generic
-workflow adapters are already implemented. See the [universal work control
-plane overview](docs/68-universal-work-control-plane.md) for the current/planned
-domain matrix and the [production qualification](docs/14-production-readiness-qualification.md)
+Bounded HTTP/API and read-only SQL adapters also exist as alpha reference
+implementations, but they are not live-production-qualified. Cloud, ticketing,
+and generic effectful execution remain adapter and recovery work. See
+[`docs/02-what-works-today.md`](docs/02-what-works-today.md) for the concise
+capability map, the [universal work control plane overview](docs/68-universal-work-control-plane.md)
+for the architecture, and the [production qualification](docs/14-production-readiness-qualification.md)
 for verified boundaries.
 
 ### What Fornix is relative to adjacent tools
@@ -141,6 +143,11 @@ Fornix is not currently:
 
 These boundaries are intentional. The current qualification and gap list are
 maintained in [`docs/14-production-readiness-qualification.md`](docs/14-production-readiness-qualification.md).
+
+For a quick answer about supported domains, read
+[`docs/02-what-works-today.md`](docs/02-what-works-today.md). For the meaning
+of workspace, operation, capability, lease, fence, effect, evidence, artifact,
+and replay, read [`docs/03-concepts.md`](docs/03-concepts.md).
 
 ## How the architecture works
 

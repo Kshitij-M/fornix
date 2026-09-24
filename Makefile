@@ -23,6 +23,7 @@ FORNIX_KEY ?= $(shell value=$$(sed -n 's/^FORNIX_KEY=//p' .env 2>/dev/null | hea
 FORNIX_REFERENCE_WORKDIR ?= /workspace/fixtures/reference-repo
 PROJECTION_PG_DSN ?= postgres://fornix:fornix-dev-only@host.docker.internal:55433/fornix?sslmode=disable
 FORNIX_TEST_PG_DSN ?=
+UNIVERSAL_TEST_PG_DSN = $(if $(strip $(FORNIX_TEST_PG_DSN)),$(FORNIX_TEST_PG_DSN),$(PROJECTION_PG_DSN))
 
 .PHONY: fmt fmt-check test test-race vet build package-check release-check smoke-package python-install python-check docs-check check verify hooks-install install-hooks hooks-uninstall uninstall-hooks hooks-check test-connectors smoke smoke-local-cli smoke-local-runtime smoke-events smoke-projection smoke-leases smoke-tasks smoke-retrieval smoke-provenance smoke-model smoke-tools smoke-agent smoke-scheduler smoke-identity smoke-artifacts smoke-artifact-output smoke-observability smoke-retrieval-quality smoke-retrieval-evaluation smoke-reference-workflow smoke-reference-openai smoke-ingestion smoke-work-receipts smoke-changes smoke-validation smoke-policy smoke-operation-admission smoke-universal-operation smoke-universal-trust smoke-universal-egress smoke-universal-execution smoke-universal-effects smoke-reference-connectors smoke-workflow smoke-multidomain operator-reference dev-up dev-up-ai dev-up-watcher dev-run dev-logs dev-down
 
@@ -60,6 +61,7 @@ package-check:
 	sh -n scripts/release/verify-artifacts.sh
 	sh -n scripts/test/v0.36-package-smokes.sh
 	sh -n scripts/test/v0.39-universal-operation-smokes.sh
+	sh -n scripts/test/v0.40-universal-effect-smokes.sh
 	@test -x scripts/install.sh
 	@test -x scripts/release/verify-artifacts.sh
 	@test -x scripts/test/v0.36-package-smokes.sh
@@ -167,10 +169,10 @@ smoke-universal-egress:
 	$(GO_CMD) test ./internal/connector ./internal/adapters/httpapi -run 'Test(DestinationPolicy|HTTP)' -count=1 -v
 
 smoke-universal-execution:
-	$(GO_CMD) test ./internal/store ./internal/server -run 'Test(OperationPlanAndResult|OperationResultCrash|GenericOperationHTTPExecutesTrustedReadAndDeduplicates|GenericOperationHTTPRejectsEffectfulCapabilityWithoutReservation)' -count=1 -v
+	FORNIX_TEST_PG_DSN=$(UNIVERSAL_TEST_PG_DSN) $(GO_CMD) test ./internal/store ./internal/server -run 'Test(OperationPlanAndResult|OperationResultCrash|GenericOperationHTTPExecutesTrustedReadAndDeduplicates|GenericOperationHTTPRejectsEffectfulCapabilityWithoutReservation)' -count=1 -v
 
 smoke-universal-effects:
-	$(GO_CMD) test ./internal/store ./internal/server -run 'Test(AdmissionStoreEffectRecoveryIsFencedAndReplayable|GenericOperationHTTPReservesAndReconcilesExternalEffect)' -count=1 -v
+	FORNIX_TEST_PG_DSN=$(UNIVERSAL_TEST_PG_DSN) $(GO_CMD) test ./internal/store ./internal/server -run 'Test(AdmissionStoreEffectRecoveryIsFencedAndReplayable|GenericOperationHTTPReservesAndReconcilesExternalEffect)' -count=1 -v
 
 smoke-reference-connectors:
 	FORNIX_TEST_PG_DSN=$(PROJECTION_PG_DSN) $(GO_CMD) test ./internal/connector ./internal/adapters/httpapi ./internal/adapters/sqlreadonly -count=1 -v

@@ -25,6 +25,8 @@ foundation notes when evaluating the product direction.
 | If you want to know… | Read… |
 | --- | --- |
 | What Fornix is and why it exists | [`README.md`](../README.md) |
+| What works today and what is not production-qualified | [`02-what-works-today.md`](02-what-works-today.md) |
+| The meaning of workspace, operation, capability, fence, effect, and replay | [`03-concepts.md`](03-concepts.md) |
 | How the universal control plane works across domains | [`68-universal-work-control-plane.md`](68-universal-work-control-plane.md) |
 | What problem Fornix will own and how the product should feel | [`01-product-vision.md`](01-product-vision.md) |
 | How to run, test, and smoke the service | [`DEVELOPMENT.md`](../DEVELOPMENT.md) |
@@ -37,6 +39,8 @@ foundation notes when evaluating the product direction.
 | How connectors and capabilities are explicitly registered and admitted | [`67-connector-capability-foundation.md`](67-connector-capability-foundation.md) |
 | Which routes and request rules exist | [`53-http-api-reference.md`](53-http-api-reference.md) |
 | What is actually qualified today | [`14-production-readiness-qualification.md`](14-production-readiness-qualification.md) |
+| How to operate a generic operation and reconcile an external effect | [`89-universal-operator-runbook.md`](89-universal-operator-runbook.md) |
+| How to run qualification commands and interpret evidence | [`90-qualification-runbook.md`](90-qualification-runbook.md) |
 | How documentation should be written | [`52-documentation-guide.md`](52-documentation-guide.md) |
 | Which reference projects informed the design | [`13-reference-reuse-matrix.md`](13-reference-reuse-matrix.md) |
 
@@ -54,7 +58,7 @@ engineering history:
   summaries. A completion note is the more reliable source when a historical
   foundation intention differs from the current implementation.
 
-The project has 32 numbered repository/control-plane and universal-operation
+The project has 33 numbered repository/control-plane and universal-operation
 implementation loops plus the packaging and transformation delivery records
 below. Those loops build the control-plane substrate and reference adapters;
 they are not a claim that the complete production-system operations product is
