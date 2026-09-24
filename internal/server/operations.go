@@ -650,7 +650,13 @@ func (s *server) handleOperationReplay(w http.ResponseWriter, r *http.Request, o
 		writeOperationErr(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"operation": publicOperation(result.Operation), "state_version": result.StateVersion, "state_hash": result.StateHash, "replay_hash": result.ReplayHash, "transition_count": result.TransitionCount, "verified": result.Verified})
+	writeJSON(w, http.StatusOK, map[string]any{
+		"operation": publicOperation(result.Operation), "state_version": result.StateVersion,
+		"state_hash": result.StateHash, "current_state_version": result.CurrentStateVersion,
+		"current_state_hash": result.CurrentStateHash, "next_from_version": result.NextFromVersion,
+		"has_more": result.HasMore, "complete": result.Complete, "replay_hash": result.ReplayHash,
+		"transition_count": result.TransitionCount, "verified": result.Verified,
+	})
 }
 
 func publicOperation(operation store.Operation) map[string]any {

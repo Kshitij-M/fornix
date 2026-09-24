@@ -706,6 +706,12 @@ func validOperationStatus(status string) bool {
 	}
 }
 
+// IsKnownOperationStatus is exported for read-only replay validators. Mutation
+// paths should continue to use CanTransitionOperation for lifecycle changes.
+func IsKnownOperationStatus(status string) bool {
+	return validOperationStatus(strings.ToLower(strings.TrimSpace(status)))
+}
+
 // IsTerminalOperationStatus reports whether an operation cannot accept another
 // lifecycle transition. Terminality is part of the durable authority rather
 // than an adapter convention, so callers must use this predicate before

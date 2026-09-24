@@ -377,6 +377,21 @@ func TestOperationIntegrationTransitionDuplicateReplayAndRollback(t *testing.T) 
 	if !replay.Verified || replay.StateHash != current.StateHash || replay.TransitionCount != 2 {
 		t.Fatalf("replay=%+v current=%+v", replay, current)
 	}
+	page, err := store.Replay(context.Background(), workspace, created.Operation.ID, 0, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !page.Verified || page.Complete || !page.HasMore || page.StateVersion != 1 || page.CurrentStateVersion != current.StateVersion {
+		t.Fatalf("bounded replay page=%+v current=%+v", page, current)
+	}
+	repeatedPage, err := store.Replay(context.Background(), workspace, created.Operation.ID, 0, 1)
+	if err != nil || repeatedPage.ReplayHash != page.ReplayHash {
+		t.Fatalf("bounded replay is not deterministic: first=%+v repeated=%+v err=%v", page, repeatedPage, err)
+	}
+	finalPage, err := store.Replay(context.Background(), workspace, created.Operation.ID, page.NextFromVersion, 1)
+	if err != nil || !finalPage.Complete || finalPage.HasMore || finalPage.StateVersion != current.StateVersion || finalPage.StateHash != current.StateHash {
+		t.Fatalf("replay continuation=%+v current=%+v err=%v", finalPage, current, err)
+	}
 	checkpoint, err := store.Replay(context.Background(), workspace, created.Operation.ID, 1, 100)
 	if err != nil {
 		t.Fatal(err)

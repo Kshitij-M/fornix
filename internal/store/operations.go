@@ -324,12 +324,17 @@ type OperationCallback struct {
 }
 
 type OperationReplayResult struct {
-	Operation       Operation
-	StateVersion    int64
-	StateHash       string
-	ReplayHash      string
-	TransitionCount int
-	Verified        bool
+	Operation           Operation
+	StateVersion        int64
+	StateHash           string
+	CurrentStateVersion int64
+	CurrentStateHash    string
+	NextFromVersion     int64
+	HasMore             bool
+	Complete            bool
+	ReplayHash          string
+	TransitionCount     int
+	Verified            bool
 }
 
 // OperationStore is the sole Postgres mutation boundary for generic operation
@@ -1203,56 +1208,96 @@ func (s *OperationStore) RecordCallback(ctx context.Context, input OperationCall
 	return stored, inserted.RowsAffected() == 1, nil
 }
 
-// Replay is read-only and validates every committed transition hash and
-// version. It cannot invoke a connector, model, tool, or callback.
+// Replay is read-only and validates a bounded page of committed transitions
+// against one repeatable-read snapshot. It cannot invoke a connector, model,
+// tool, or callback. A page can be continued with NextFromVersion; when the
+// page reaches the current projection, Complete is true.
 func (s *OperationStore) Replay(ctx context.Context, workspaceID, operationID string, fromVersion int64, limit int) (OperationReplayResult, error) {
-	operation, err := s.Get(ctx, workspaceID, operationID)
-	if err != nil {
-		return OperationReplayResult{}, err
+	workspaceID, operationID = strings.TrimSpace(workspaceID), strings.TrimSpace(operationID)
+	if s == nil || s.pool == nil {
+		return OperationReplayResult{}, errors.New("operation store is not configured")
 	}
-	if fromVersion < 0 || fromVersion > operation.StateVersion {
+	if fromVersion < 0 {
 		return OperationReplayResult{}, ErrOperationReplay
 	}
 	if limit <= 0 || limit > maxOperationReplayLimit {
 		limit = maxOperationReplayLimit
 	}
-	rows, err := s.pool.Query(ctx, `
+	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return OperationReplayResult{}, fmt.Errorf("begin operation replay: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	operation, err := readOperationByID(ctx, tx, workspaceID, operationID, false)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return OperationReplayResult{}, ErrOperationNotFound
+	}
+	if err != nil {
+		return OperationReplayResult{}, err
+	}
+	if fromVersion > operation.StateVersion {
+		return OperationReplayResult{}, ErrOperationReplay
+	}
+
+	previousVersion := int64(0)
+	previousStatus := contracts.OperationStatusCreated
+	previousHash, err := hashState(operationState{Status: previousStatus, StateVersion: 0, PlanHash: operation.PlanHash})
+	if err != nil {
+		return OperationReplayResult{}, fmt.Errorf("hash initial operation state: %w", err)
+	}
+	if fromVersion > 0 {
+		var checkpointHash string
+		var checkpointStateJSON []byte
+		if err := tx.QueryRow(ctx, `
+			SELECT state_hash,state
+			FROM fornix.operation_transitions
+			WHERE workspace_id=$1 AND operation_id=$2 AND state_version=$3`, workspaceID, operationID, fromVersion).
+			Scan(&checkpointHash, &checkpointStateJSON); err != nil {
+			return OperationReplayResult{}, fmt.Errorf("read replay checkpoint: %w", ErrOperationReplay)
+		}
+		var checkpoint operationState
+		if err := json.Unmarshal(checkpointStateJSON, &checkpoint); err != nil {
+			return OperationReplayResult{}, ErrOperationReplay
+		}
+		computed, hashErr := hashState(checkpoint)
+		if hashErr != nil || computed != checkpointHash || checkpoint.StateVersion != fromVersion || !contracts.IsKnownOperationStatus(checkpoint.Status) {
+			return OperationReplayResult{}, ErrOperationReplay
+		}
+		previousVersion, previousStatus, previousHash = fromVersion, checkpoint.Status, checkpointHash
+	}
+
+	rows, err := tx.Query(ctx, `
 		SELECT t.state_version, t.state_hash, t.previous_state_hash,
 		       t.from_status, t.to_status, t.state, t.event_sequence,
-		       e.sequence
+		       e.sequence, e.event_type, e.workspace_id, e.payload
 		FROM fornix.operation_transitions t
 		LEFT JOIN fornix.control_events e
 		  ON e.workspace_id=t.workspace_id AND e.sequence=t.event_sequence
-		WHERE t.workspace_id=$1 AND t.operation_id=$2
-		ORDER BY t.state_version ASC LIMIT $3`, strings.TrimSpace(workspaceID), strings.TrimSpace(operationID), limit)
+		WHERE t.workspace_id=$1 AND t.operation_id=$2 AND t.state_version>$3
+		ORDER BY t.state_version ASC LIMIT $4`, workspaceID, operationID, fromVersion, limit+1)
 	if err != nil {
 		return OperationReplayResult{}, err
 	}
 	defer rows.Close()
-	previousVersion := int64(0)
-	previousStatus := contracts.OperationStatusCreated
-	previousHash, err := hashState(operationState{
-		Status:       contracts.OperationStatusCreated,
-		StateVersion: 0,
-		PlanHash:     operation.PlanHash,
-	})
-	if err != nil {
-		return OperationReplayResult{}, fmt.Errorf("hash initial operation state: %w", err)
-	}
-	transitions := make([]string, 0)
+	transitions := make([]string, 0, limit)
 	count := 0
-	checkpointSeen := fromVersion == 0
+	hasMore := false
 	for rows.Next() {
 		var version int64
-		var storedHash string
-		var storedPreviousHash string
+		var storedHash, storedPreviousHash string
 		var fromStatus, toStatus string
 		var stateJSON []byte
 		var eventSequence, matchedEventSequence *int64
-		if err := rows.Scan(&version, &storedHash, &storedPreviousHash, &fromStatus, &toStatus, &stateJSON, &eventSequence, &matchedEventSequence); err != nil {
+		var eventType, eventWorkspace string
+		var eventPayload []byte
+		if err := rows.Scan(&version, &storedHash, &storedPreviousHash, &fromStatus, &toStatus, &stateJSON, &eventSequence, &matchedEventSequence, &eventType, &eventWorkspace, &eventPayload); err != nil {
 			return OperationReplayResult{}, err
 		}
-		if version != previousVersion+1 || storedPreviousHash != previousHash || fromStatus != previousStatus || eventSequence == nil || matchedEventSequence == nil {
+		if count == limit {
+			hasMore = true
+			break
+		}
+		if version != previousVersion+1 || storedPreviousHash != previousHash || fromStatus != previousStatus || eventSequence == nil || matchedEventSequence == nil || *eventSequence != *matchedEventSequence || eventWorkspace != workspaceID {
 			return OperationReplayResult{}, fmt.Errorf("%w: broken transition chain at version %d", ErrOperationReplay, version)
 		}
 		var state operationState
@@ -1263,31 +1308,50 @@ func (s *OperationStore) Replay(ctx context.Context, workspaceID, operationID st
 		if err != nil || computed != storedHash || state.StateVersion != version || state.Status != toStatus || state.PreviousStateHash != storedPreviousHash || !contracts.CanTransitionOperation(fromStatus, toStatus) {
 			return OperationReplayResult{}, ErrOperationReplay
 		}
+		var payload struct {
+			OperationID   string `json:"operation_id"`
+			OperationHash string `json:"operation_hash"`
+			Status        string `json:"status"`
+			StateVersion  int64  `json:"state_version"`
+			StateHash     string `json:"state_hash"`
+		}
+		if eventType != "operation."+toStatus || json.Unmarshal(eventPayload, &payload) != nil || payload.OperationID != operation.ID || payload.OperationHash != operation.OperationHash || payload.Status != toStatus || payload.StateVersion != version || payload.StateHash != storedHash {
+			return OperationReplayResult{}, fmt.Errorf("%w: event binding at version %d", ErrOperationReplay, version)
+		}
 		previousVersion, previousStatus, previousHash = version, toStatus, storedHash
-		if version == fromVersion {
-			checkpointSeen = true
-		}
-		if version > fromVersion {
-			count++
-			transitions = append(transitions, fmt.Sprintf("%d:%s", version, storedHash))
-		}
+		count++
+		transitions = append(transitions, fmt.Sprintf("%d:%s", version, storedHash))
 	}
+	rows.Close()
 	if err := rows.Err(); err != nil {
 		return OperationReplayResult{}, err
 	}
-	if !checkpointSeen || previousVersion != operation.StateVersion || previousHash != operation.StateHash {
+	if previousVersion != operation.StateVersion && !hasMore {
+		return OperationReplayResult{}, ErrOperationReplay
+	}
+	complete := !hasMore && previousVersion == operation.StateVersion && previousHash == operation.StateHash
+	if !hasMore && !complete {
 		return OperationReplayResult{}, ErrOperationReplay
 	}
 	replayHash, err := hashValue(struct {
 		WorkspaceID string   `json:"workspace_id"`
 		OperationID string   `json:"operation_id"`
 		FromVersion int64    `json:"from_version"`
+		ToVersion   int64    `json:"to_version"`
 		States      []string `json:"states"`
-	}{workspaceID, operationID, fromVersion, transitions})
+	}{workspaceID, operationID, fromVersion, previousVersion, transitions})
 	if err != nil {
 		return OperationReplayResult{}, err
 	}
-	return OperationReplayResult{Operation: operation, StateVersion: operation.StateVersion, StateHash: operation.StateHash, ReplayHash: replayHash, TransitionCount: count, Verified: true}, nil
+	if err := tx.Commit(ctx); err != nil {
+		return OperationReplayResult{}, fmt.Errorf("commit operation replay snapshot: %w", err)
+	}
+	return OperationReplayResult{
+		Operation: operation, StateVersion: previousVersion, StateHash: previousHash,
+		CurrentStateVersion: operation.StateVersion, CurrentStateHash: operation.StateHash,
+		NextFromVersion: previousVersion, HasMore: hasMore, Complete: complete,
+		ReplayHash: replayHash, TransitionCount: count, Verified: true,
+	}, nil
 }
 
 type operationState struct {
