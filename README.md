@@ -237,7 +237,7 @@ connectors, effects, policy, and workflows first-class:
 | [#43](https://github.com/Kshitij-M/fornix/issues/43) | HTTP/API and read-only SQL connectors | Alpha bounded reference adapters implemented; production qualification remains |
 | [#44](https://github.com/Kshitij-M/fornix/issues/44) | Durable multi-step workflow runtime | Alpha foundation implemented; qualification remains |
 | [#42](https://github.com/Kshitij-M/fornix/issues/42) | Multi-domain reference workflow | Fake-first alpha workflow implemented; production qualification remains |
-| [#40](https://github.com/Kshitij-M/fornix/issues/40) | Universal production qualification | In progress: authority/API qualification slice; security, scale, recovery, backup/restore, and operational evidence remain |
+| [#40](https://github.com/Kshitij-M/fornix/issues/40) | Universal production qualification | In progress: authority, RLS, capacity, queue-claim, and adapter-worker qualification slices; production security, fairness, HA, recovery, backup/restore, and operational evidence remain |
 
 This roadmap is not a claim that the complete universal production platform
 already exists. It is the sequence for extending the implemented control-plane
