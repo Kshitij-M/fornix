@@ -560,6 +560,98 @@ func (s *WorkflowStore) RecoverRunning(ctx context.Context, workspaceID, runID, 
 	return run, ErrWorkflowStepNotFound
 }
 
+// RetryRecovery safely requeues a step left uncertain by a worker crash. The
+// control plane permits automatic retry only for read-only or observation
+// steps; effectful steps remain recovery_required until a verifier or operator
+// supplies an explicit decision. The mutation is fenced and append-only.
+func (s *WorkflowStore) RetryRecovery(ctx context.Context, input WorkflowStepStartInput) (contracts.WorkflowRun, error) {
+	if s == nil || s.pool == nil || s.operations == nil || s.events == nil {
+		return contracts.WorkflowRun{}, errors.New("workflow store is not configured")
+	}
+	if err := normalizeWorkflowCommand(input.WorkspaceID, input.RunID, input.StepID, input.OwnerID, input.Fence, input.IdempotencyKey); err != nil {
+		return contracts.WorkflowRun{}, err
+	}
+	if input.RequestID == "" {
+		input.RequestID = contracts.NewID("workflow-recovery")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return contracts.WorkflowRun{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	operation, err := readOperationByID(ctx, tx, input.WorkspaceID, input.RunID, true)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return contracts.WorkflowRun{}, ErrWorkflowNotFound
+	}
+	if err != nil {
+		return contracts.WorkflowRun{}, err
+	}
+	if err := s.validateWorkflowLeaseAndTask(ctx, tx, operation, input.OwnerID, input.Fence, input.TaskOwnerID, input.TaskFence); err != nil {
+		return contracts.WorkflowRun{}, err
+	}
+	run, err := readWorkflowForOperation(ctx, tx, operation, true)
+	if err != nil {
+		return contracts.WorkflowRun{}, err
+	}
+	stepIndex, step, err := findWorkflowStep(run, input.StepID)
+	if err != nil {
+		return contracts.WorkflowRun{}, err
+	}
+	if step.Status != contracts.WorkflowStepRecoveryRequired {
+		return run, ErrWorkflowTransition
+	}
+	var planStep contracts.OperationStep
+	for _, candidate := range run.Plan.Steps {
+		if candidate.ID == input.StepID {
+			planStep = candidate
+			break
+		}
+	}
+	if planStep.ID == "" {
+		return contracts.WorkflowRun{}, ErrWorkflowStepNotFound
+	}
+	if planStep.Effect != contracts.EffectClassReadOnly && planStep.Effect != contracts.EffectClassObservation {
+		return run, ErrWorkflowTransition
+	}
+	commandHash, err := workflowHash(struct {
+		StepID       string `json:"step_id"`
+		StateVersion int64  `json:"state_version"`
+		Recovery     bool   `json:"recovery"`
+	}{input.StepID, run.StateVersion, true})
+	if err != nil {
+		return contracts.WorkflowRun{}, err
+	}
+	duplicate, err := reserveWorkflowCommand(ctx, tx, input.WorkspaceID, run.ID, input.StepID, input.IdempotencyKey, commandHash)
+	if err != nil {
+		return contracts.WorkflowRun{}, err
+	}
+	if duplicate {
+		return run, nil
+	}
+	next := cloneWorkflowRun(run)
+	nextStep := &next.Steps[stepIndex]
+	nextStep.Status, nextStep.Failure, nextStep.Wait, nextStep.NextRetryAt = contracts.WorkflowStepPlanned, nil, nil, nil
+	nextStep.IdempotencyKey = ""
+	nextStep.StateVersion = run.StateVersion + 1
+	next.StateVersion = run.StateVersion + 1
+	next.Status, next.Wait, next.Failure, next.TerminalReason = contracts.WorkflowStatusRunning, nil, nil, "recovery_retry"
+	next.UpdatedAt = time.Now().UTC()
+	next.StateHash = next.StableHash()
+	if err := s.finalizeWorkflowTransition(ctx, tx, operation, run, next, input.StepID, step.Status, nextStep.Status, input.OwnerID, input.Fence, input.TaskOwnerID, input.TaskFence, input.Actor, input.RequestID, input.IdempotencyKey, input.CausationID, input.CorrelationID, commandHash, nil); err != nil {
+		return contracts.WorkflowRun{}, err
+	}
+	if _, err := s.advanceOperationForWorkflow(ctx, tx, operation, contracts.OperationStatusRunning, next.StateHash, input, "recovery_retry", nil); err != nil {
+		return contracts.WorkflowRun{}, err
+	}
+	if err := s.fail("workflow_recovery_retried"); err != nil {
+		return contracts.WorkflowRun{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return contracts.WorkflowRun{}, err
+	}
+	return next, nil
+}
+
 func (s *WorkflowStore) Replay(ctx context.Context, workspaceID, runID string, fromVersion int64, limit int) (WorkflowReplayResult, error) {
 	if s == nil || s.pool == nil {
 		return WorkflowReplayResult{}, errors.New("workflow store is not configured")

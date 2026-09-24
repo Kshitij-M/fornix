@@ -117,6 +117,15 @@ func (s *AdmissionStore) Admit(ctx context.Context, input contracts.AdmissionInp
 	if s == nil || s.pool == nil || s.events == nil {
 		return AdmissionResult{}, fmt.Errorf("admission store is not configured")
 	}
+	// Admission normalization canonicalizes nested slices (policy rules,
+	// allowlists, and credential states). Normalize an owned copy so concurrent
+	// callers reusing an immutable request template cannot race or observe
+	// store-local quota facts being written into their input.
+	owned, err := cloneAdmissionInput(input)
+	if err != nil {
+		return AdmissionResult{}, fmt.Errorf("clone operation admission: %w", err)
+	}
+	input = owned
 	if err := input.Normalize(); err != nil {
 		return AdmissionResult{}, err
 	}
@@ -276,6 +285,18 @@ func (s *AdmissionStore) Admit(ctx context.Context, input contracts.AdmissionInp
 		return AdmissionResult{}, fmt.Errorf("commit operation admission: %w", err)
 	}
 	return AdmissionResult{Decision: stored, Approval: approval}, nil
+}
+
+func cloneAdmissionInput(input contracts.AdmissionInput) (contracts.AdmissionInput, error) {
+	raw, err := json.Marshal(input)
+	if err != nil {
+		return contracts.AdmissionInput{}, err
+	}
+	var clone contracts.AdmissionInput
+	if err := json.Unmarshal(raw, &clone); err != nil {
+		return contracts.AdmissionInput{}, err
+	}
+	return clone, nil
 }
 
 // DecideApproval applies one authorized, idempotent approval decision. An
