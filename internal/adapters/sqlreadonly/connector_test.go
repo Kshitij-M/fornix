@@ -14,6 +14,7 @@ import (
 	"github.com/omaveda/fornix/internal/adapters/sqlreadonly"
 	"github.com/omaveda/fornix/internal/connector"
 	"github.com/omaveda/fornix/internal/contracts"
+	"github.com/omaveda/fornix/internal/store"
 )
 
 func TestSQLReadonlyQueryUsesFixtureAndStableEvidence(t *testing.T) {
@@ -132,6 +133,12 @@ func TestPGDatabaseUsesReadOnlyTransaction(t *testing.T) {
 	}
 	defer pool.Close()
 	if err := pool.Ping(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Package tests run concurrently against a fresh integration database. Make
+	// this adapter-level test self-sufficient instead of racing the server or
+	// another package's first migration application.
+	if err := store.ApplyMigrations(ctx, pool); err != nil {
 		t.Fatal(err)
 	}
 	database := sqlreadonly.PGDatabase{Pool: pool}

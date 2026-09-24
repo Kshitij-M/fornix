@@ -225,6 +225,11 @@ func permissionForRequest(r *http.Request) contracts.Permission {
 			return contracts.PermissionAgentRead
 		}
 		return contracts.PermissionAgentRun
+	case strings.HasPrefix(path, "/v1/incident/workflows"):
+		if r.Method == http.MethodGet || strings.HasSuffix(path, "/replay") {
+			return contracts.PermissionAgentRead
+		}
+		return contracts.PermissionAgentRun
 	case path == "/v1/retrieve" || path == "/v1/rag" || path == "/v1/memo/search" || path == "/v1/symbol/search" || path == "/v1/router/recommend":
 		return contracts.PermissionRetrievalRead
 	case path == "/v1/evaluations/retrieval/surfaces":

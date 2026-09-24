@@ -38,6 +38,7 @@ import (
 	"github.com/omaveda/fornix/internal/tool"
 	validationruntime "github.com/omaveda/fornix/internal/validation"
 	"github.com/omaveda/fornix/internal/version"
+	incidentworkflow "github.com/omaveda/fornix/internal/workflows/incident"
 )
 
 const embeddingDim = 768
@@ -68,6 +69,7 @@ type server struct {
 	toolRegistry      *tool.Registry
 	connectorRegistry *connectorruntime.Registry
 	connectorBindings *store.ConnectorBindingStore
+	incidentWorkflows *incidentworkflow.Service
 	toolExecutor      *tool.Executor
 	toolRuns          *store.ToolRunStore
 	agentRuns         *store.AgentRunStore
@@ -187,6 +189,10 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 		pool.Close()
 		return nil, fmt.Errorf("register repository connector: %w", err)
 	}
+	if err := registerIncidentConnector(connectorRegistry, contracts.DefaultWorkspaceID); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("register incident connector: %w", err)
+	}
 	toolPolicy, err := tool.NewPolicy([]contracts.ToolPolicyRule{{
 		ID: "builtin-default-echo", Priority: 100, WorkspaceID: contracts.DefaultWorkspaceID,
 		ToolID: "fornix.echo", Capability: "process.echo", Mode: contracts.ToolModeAutomatic,
@@ -248,6 +254,7 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 		maxBodyBytes:    cfg.MaxBodyBytes,
 		shutdownTimeout: cfg.ShutdownTimeout,
 	}
+	srv.incidentWorkflows = incidentworkflow.NewService(store.NewIncidentStore(pool, events, evidenceStore), workflows, evidenceStore, artifactStore, workReceipts, connectorRegistry, modelGateway)
 	srv.ingests = store.NewIngestStore(pool, events, srv.artifacts)
 	srv.ingests.SetEmbedder(func(embedCtx context.Context, text string) ([]float32, error) {
 		return srv.embed(embedCtx, text)
@@ -2758,6 +2765,35 @@ func (s *server) routes() http.Handler {
 			return
 		}
 		s.handleAgentRunCreate(w, r)
+	})
+	mux.HandleFunc("/v1/incident/workflows", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleIncidentWorkflowStart(w, r)
+	})
+	mux.HandleFunc("/v1/incident/workflows/", func(w http.ResponseWriter, r *http.Request) {
+		rest := strings.TrimPrefix(r.URL.Path, "/v1/incident/workflows/")
+		parts := strings.Split(strings.Trim(rest, "/"), "/")
+		if len(parts) == 0 || parts[0] == "" {
+			writeErr(w, http.StatusNotFound, "incident workflow id required")
+			return
+		}
+		runID := parts[0]
+		if len(parts) == 1 && r.Method == http.MethodGet {
+			s.handleIncidentWorkflowGet(w, r, runID)
+			return
+		}
+		if len(parts) == 2 && parts[1] == "approve" && r.Method == http.MethodPost {
+			s.handleIncidentWorkflowApprove(w, r, runID)
+			return
+		}
+		if len(parts) == 2 && parts[1] == "replay" && r.Method == http.MethodPost {
+			s.handleIncidentWorkflowReplay(w, r, runID)
+			return
+		}
+		writeErr(w, http.StatusNotFound, "unknown incident workflow operation")
 	})
 	mux.HandleFunc("/v1/agent/runs", s.handleAgentRunList)
 	mux.HandleFunc("/v1/agent/run/", func(w http.ResponseWriter, r *http.Request) {

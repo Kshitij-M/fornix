@@ -1,7 +1,8 @@
 # Fornix production-readiness qualification
 
-Status: alpha single-node control and retrieval substrate; not yet the complete
-safe autonomous production-system operations product.
+Status: alpha single-node control and retrieval substrate with a fake-first
+multi-domain reference workflow; not yet the complete safe autonomous
+production-system operations product.
 
 Fornix is runnable and testable, but it is not yet a production-grade,
 multi-tenant harness for huge projects. The current system has a durable
@@ -35,7 +36,7 @@ The next dependency-ordered work is tracked by [Issue #38](https://github.com/Ks
 2. [#46 — Universal policy, approvals, and external effects](https://github.com/Kshitij-M/fornix/issues/46) (alpha admission/effect foundation implemented; connector qualification remains).
 3. [#43 — Bounded HTTP/API and read-only SQL connectors](https://github.com/Kshitij-M/fornix/issues/43) (bounded reference adapters implemented; production qualification remains).
 4. [#44 — Durable multi-step workflow runtime](https://github.com/Kshitij-M/fornix/issues/44) (alpha foundation implemented; operator surface and qualification remain).
-5. [#42 — Multi-domain reference workflow](https://github.com/Kshitij-M/fornix/issues/42).
+5. [#42 — Multi-domain reference workflow](https://github.com/Kshitij-M/fornix/issues/42) (fake-first incident workflow implemented; live connector and production qualification remain).
 6. [#40 — Universal production qualification](https://github.com/Kshitij-M/fornix/issues/40).
 
 Issues [#41](https://github.com/Kshitij-M/fornix/issues/41) and
@@ -121,6 +122,14 @@ contains the current/planned domain matrix and the precise category boundary.
   compatibility shim now share workspace bootstrap, identity/role/API-key
   lifecycle, bounded ingest metadata, task/run inspection, disclosure, metrics,
   and reference-workflow semantics.
+- The first non-repository reference workflow is now implemented as a
+  fake-first incident path. It durably captures typed incident delivery,
+  duplicate/conflict semantics, runbook and diagnostic steps, model/tool
+  evidence, approval or rejection, a fenced remediation record, verification,
+  Work Receipt linkage, CLI/HTTP/MCP access, crash recovery, and inert replay.
+  This is a control-plane qualification workflow; it does not enable live
+  monitoring verification, cloud/database/ticketing effects, or exactly-once
+  remote execution.
 - Approval-gated repository change packets are now typed, workspace-scoped,
   idempotent, content-addressed, and persisted in migration 029. The planner
   rejects traversal and symlink escapes, the application boundary uses

@@ -341,6 +341,33 @@ Compatibility writes remain workspace-authorized. Their rows are not a reason
 to bypass the append-only event, evidence, artifact, or ingestion authorities
 when a durable workflow depends on replay or provenance.
 
+## Multi-domain incident reference workflow
+
+The incident surface is a fake-first qualification workflow for demonstrating
+the universal control-plane contract outside repository maintenance. It accepts
+a bounded typed event, creates an idempotent incident identity, executes
+read-only investigation steps, pauses before remediation, records an approval
+or rejection, and exposes a replay-only result. The default connector never
+contacts a monitoring, deployment, cloud, database, or ticketing system.
+
+| Method | Route | Purpose |
+| --- | --- | --- |
+| `POST` | `/v1/incident/workflows` | Ingest a bounded incident event and advance a workflow until approval or terminal state |
+| `GET` | `/v1/incident/workflows/{run_id}` | Read the authorized incident, workflow, evidence, and receipt summary |
+| `POST` | `/v1/incident/workflows/{run_id}/approve` | Record an approval or rejection bound to the exact waiting step |
+| `POST` | `/v1/incident/workflows/{run_id}/replay` | Verify recorded transitions from a checkpoint without external effects |
+
+Use a stable `Idempotency-Key` for event delivery and approval. A repeated
+delivery with the same workspace/source/external identity and payload hash is
+read-only; a changed payload is rejected as a conflict. Approval decisions
+are durable and auditable. A rejection is terminal and cannot unlock the
+remediation step. All routes require workspace authorization and preserve
+actor, request, causation, correlation, evidence, and operation references.
+
+The equivalent CLI commands are `fornix incident start`, `get`, `approve`,
+and `replay`; the MCP shim exposes `fornix__incident_start`, `get`, `approve`,
+and `replay`. These surfaces intentionally share the same HTTP semantics.
+
 ## CLI and MCP equivalence
 
 The `fornix` CLI and MCP compatibility shim call the same workspace-scoped

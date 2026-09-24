@@ -225,7 +225,7 @@ connectors, effects, policy, and workflows first-class:
 | [#46](https://github.com/Kshitij-M/fornix/issues/46) | Universal policy, approvals, and external effects | Alpha Postgres admission/effect foundation; connector qualification remains |
 | [#43](https://github.com/Kshitij-M/fornix/issues/43) | HTTP/API and read-only SQL connectors | Alpha bounded reference adapters implemented; production qualification remains |
 | [#44](https://github.com/Kshitij-M/fornix/issues/44) | Durable multi-step workflow runtime | Alpha foundation implemented; qualification remains |
-| [#42](https://github.com/Kshitij-M/fornix/issues/42) | Multi-domain reference workflow | Planned |
+| [#42](https://github.com/Kshitij-M/fornix/issues/42) | Multi-domain reference workflow | Fake-first alpha workflow implemented; production qualification remains |
 | [#40](https://github.com/Kshitij-M/fornix/issues/40) | Universal production qualification | Planned |
 
 This roadmap is not a claim that the complete universal production platform
@@ -323,6 +323,29 @@ replay. The separate `fornix change` workflow now demonstrates the approval-
 gated write boundary for explicitly configured local mounts; it does not yet
 automatically turn every agent response into a proposed patch or provide a
 host-independent sandbox.
+
+The first non-repository reference workflow is also available as a bounded,
+fake-first incident investigation flow. It accepts a typed monitoring event,
+reads a runbook through a connector seam, builds evidence-backed diagnostics,
+pauses for approval, records an idempotent remediation attempt, verifies the
+recorded external state, and produces a replayable result. It is a showcase
+of the universal control-plane contract—not a live monitoring or remediation
+integration.
+
+With the service running, exercise it through the shared HTTP/CLI/MCP surface:
+
+```sh
+bin/fornix incident start --workspace reference-local \
+  --source monitor --external-id payment-1 \
+  --payload '{"service":"payments","status":"degraded"}'
+bin/fornix incident approve --workspace reference-local \
+  --run-id <run-id> --decision approve
+bin/fornix incident replay --workspace reference-local --run-id <run-id>
+```
+
+The default incident adapter is deterministic and offline. No live external
+effect is enabled by this workflow, and rejection, duplicate delivery,
+workspace isolation, crash recovery, and inert replay are tested explicitly.
 
 With the service running:
 

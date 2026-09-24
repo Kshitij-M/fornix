@@ -108,6 +108,8 @@ func runCLI(args []string) error {
 		return cli.validationCommand(parts[1:])
 	case "policy":
 		return cli.policyCommand(parts[1:])
+	case "incident":
+		return cli.incidentCommand(parts[1:])
 	case "reference-workflow":
 		return cli.referenceWorkflow(parts[1:])
 	default:
@@ -174,6 +176,7 @@ Work:
   change      Propose, approve, apply, and disclose repository changes
   validation  Run and inspect post-change validation
   policy      Inspect and resolve validation policy packs
+  incident    Run the bounded multi-domain incident workflow
 
 Identity and diagnostics:
   setup       Bootstrap the local workspace and actor

@@ -12,6 +12,7 @@ Tools exposed (compatibility shim plus deterministic validation and handoff):
   - fornix__validation_run / fornix__validation_get / fornix__validation_results
   - fornix__validation_replay / fornix__validation_disclose / fornix__validation_resume
   - fornix__validation_cancel / fornix__reindex_handoff_get / fornix__reindex_handoff_submit
+  - fornix__incident_start / fornix__incident_get / fornix__incident_approve / fornix__incident_replay
 
 Speaks MCP stdio (JSON-RPC 2.0). Configure in ~/.claude.json mcpServers.fornix
 with command python3 + args [this file path] + env FORNIX_URL + FORNIX_KEY.
@@ -137,6 +138,49 @@ def tool_run_get(args: dict) -> dict:
 
 def tool_run_replay(args: dict) -> dict:
     return _call("POST", f"/v1/agent/run/{args['run_id']}/replay?workspace_id={FORNIX_WORKSPACE}", {})
+
+
+def tool_incident_start(args: dict) -> dict:
+    payload = args.get("payload", {"service": "example", "status": "degraded"})
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    encoded = json.dumps(payload, separators=(",", ":")).encode()
+    if len(encoded) > 64 * 1024:
+        raise ValueError("incident payload exceeds 65536 bytes")
+    external_id = str(args.get("external_id") or "incident-mcp-demo")
+    key = str(args.get("idempotency_key") or f"incident:mcp:{FORNIX_WORKSPACE}:{external_id}")
+    event = {
+        "workspace_id": FORNIX_WORKSPACE,
+        "source_system": str(args.get("source_system") or "fornix-mcp-monitor"),
+        "external_id": external_id,
+        "severity": str(args.get("severity") or "warning"),
+        "summary": str(args.get("summary") or "bounded incident qualification workflow"),
+        "payload": payload,
+        "delivery_mode": str(args.get("delivery_mode") or "fake"),
+        "idempotency_key": key,
+    }
+    if event["delivery_mode"] == "signed":
+        event["signature_hash"] = str(args.get("signature_hash") or "0" * 64)
+        event["signature_scheme"] = str(args.get("signature_scheme") or "preverified")
+    return _call("POST", "/v1/incident/workflows", {"workspace_id": FORNIX_WORKSPACE, "idempotency_key": key, "event": event}, key)
+
+
+def tool_incident_get(args: dict) -> dict:
+    return _call("GET", f"/v1/incident/workflows/{quote(str(args['run_id']), safe='')}?workspace_id={FORNIX_WORKSPACE}")
+
+
+def tool_incident_approve(args: dict) -> dict:
+    run_id = str(args["run_id"])
+    decision = str(args.get("decision") or "approve")
+    key = str(args.get("idempotency_key") or f"incident-approval:mcp:{run_id}:{decision}")
+    return _call("POST", f"/v1/incident/workflows/{quote(run_id, safe='')}/approve", {
+        "workspace_id": FORNIX_WORKSPACE, "decision": decision, "idempotency_key": key,
+    }, key)
+
+
+def tool_incident_replay(args: dict) -> dict:
+    run_id = str(args["run_id"])
+    return _call("POST", f"/v1/incident/workflows/{quote(run_id, safe='')}/replay?workspace_id={FORNIX_WORKSPACE}", {})
 
 
 def tool_artifact_disclose(args: dict) -> dict:
@@ -638,6 +682,30 @@ TOOLS = [
         "description": "Replay an agent run from its durable event history without remote effects.",
         "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}}, "required": ["run_id"]},
         "fn": tool_run_replay,
+    },
+    {
+        "name": "fornix__incident_start",
+        "description": "Start a deterministic fake-first, approval-gated incident investigation workflow.",
+        "inputSchema": {"type": "object", "properties": {"source_system": {"type": "string"}, "external_id": {"type": "string"}, "severity": {"type": "string", "enum": ["info", "warning", "critical"]}, "summary": {"type": "string"}, "payload": {}, "delivery_mode": {"type": "string", "enum": ["fake", "signed"]}, "signature_hash": {"type": "string"}, "signature_scheme": {"type": "string"}, "idempotency_key": {"type": "string"}}, "additionalProperties": False},
+        "fn": tool_incident_start,
+    },
+    {
+        "name": "fornix__incident_get",
+        "description": "Inspect one workspace-scoped incident workflow without causing external effects.",
+        "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}}, "required": ["run_id"], "additionalProperties": False},
+        "fn": tool_incident_get,
+    },
+    {
+        "name": "fornix__incident_approve",
+        "description": "Record an auditable approve or reject decision for incident remediation.",
+        "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}, "decision": {"type": "string", "enum": ["approve", "reject"]}, "idempotency_key": {"type": "string"}}, "required": ["run_id", "decision"], "additionalProperties": False},
+        "fn": tool_incident_approve,
+    },
+    {
+        "name": "fornix__incident_replay",
+        "description": "Verify incident workflow transition history without rerunning models, tools, or remediation.",
+        "inputSchema": {"type": "object", "properties": {"run_id": {"type": "string"}}, "required": ["run_id"], "additionalProperties": False},
+        "fn": tool_incident_replay,
     },
     {
         "name": "fornix__artifact_disclose",

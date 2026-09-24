@@ -124,8 +124,8 @@ silently bypass Fornix identity, policy, fencing, evidence, or receipt rules.
 | Universal policy, approvals, and external effects | Implemented alpha foundation: Issue [#46](https://github.com/Kshitij-M/fornix/issues/46) | Postgres-backed deterministic admission, exact approvals, quota gates, and fenced at-least-once effect recovery; connector qualification remains |
 | Bounded HTTP/API connector | Alpha reference adapter: Issue [#43](https://github.com/Kshitij-M/fornix/issues/43) | Read/list/idempotent-submit capabilities with configured egress, response, pagination, retry, credential-reference, and effect bounds |
 | Read-only SQL connector | Alpha reference adapter: Issue [#43](https://github.com/Kshitij-M/fornix/issues/43) | Describe/query/explain capabilities with prepared statements, read-only transactions, schema/table allowlists, row/byte/cost bounds, and write rejection |
-| Durable multi-step workflow runtime | Roadmap: Issue [#44](https://github.com/Kshitij-M/fornix/issues/44) | Typed model, tool, connector, approval, human, validation, callback, and compensation steps |
-| Multi-domain incident reference workflow | Roadmap: Issue [#42](https://github.com/Kshitij-M/fornix/issues/42) | Fake-first workflow spanning at least two non-repository domains |
+| Durable multi-step workflow runtime | Alpha foundation: Issue [#44](https://github.com/Kshitij-M/fornix/issues/44) | Typed model, tool, connector, approval, human, validation, callback, and compensation steps; qualification remains |
+| Multi-domain incident reference workflow | Alpha reference workflow: Issue [#42](https://github.com/Kshitij-M/fornix/issues/42) | Fake-first incident investigation, approval, remediation-record, verification, receipt, and inert replay path; live qualification remains |
 | Universal production qualification | Roadmap: Issue [#40](https://github.com/Kshitij-M/fornix/issues/40) | Isolation, trust, egress, quotas, recovery, backup/restore, load, and support evidence |
 
 This matrix is a product-status statement, not a promise that planned
@@ -162,7 +162,7 @@ Its implementation sequence is:
 4. [#46 — Universal policy, approvals, and external effects](https://github.com/Kshitij-M/fornix/issues/46) (alpha foundation implemented; qualification continues).
 5. [#43 — Bounded HTTP/API and read-only SQL connectors](https://github.com/Kshitij-M/fornix/issues/43) (alpha reference adapters implemented; production qualification continues).
 6. [#44 — Durable multi-step workflow runtime](https://github.com/Kshitij-M/fornix/issues/44).
-7. [#42 — Multi-domain incident investigation and controlled remediation](https://github.com/Kshitij-M/fornix/issues/42).
+7. [#42 — Multi-domain incident investigation and controlled remediation](https://github.com/Kshitij-M/fornix/issues/42) (fake-first reference workflow implemented; live connector qualification remains).
 8. [#40 — Universal execution-plane production qualification](https://github.com/Kshitij-M/fornix/issues/40).
 
 Issues [#23–#30](https://github.com/Kshitij-M/fornix/issues?q=is%3Aissue+is%3Aopen)
@@ -171,8 +171,9 @@ generic authority and qualification work exposes their dependencies.
 
 ## The honest starting point
 
-The current supported experience is still the repository adapter. It is the
-smallest complete path for demonstrating the universal contract:
+The current supported experience includes the repository adapter and a
+fake-first incident workflow. They are the smallest complete paths for
+demonstrating the universal contract:
 
 ```sh
 make build
@@ -180,6 +181,11 @@ make build
 ./bin/fornix start --repo .
 ./bin/fornix demo --repo .
 ```
+
+The incident path can be exercised with `bin/fornix incident start`,
+`incident approve`, and `incident replay`. It remains deliberately offline;
+it does not qualify live monitoring, deployment, cloud, ticketing, or database
+effects.
 
 The default provider is deterministic and offline. The resulting evidence,
 artifacts, validation, replay hashes, and Work Receipt demonstrate the

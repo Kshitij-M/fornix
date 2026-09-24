@@ -38,6 +38,9 @@ func (s *server) handleOperatorBootstrap(w http.ResponseWriter, r *http.Request)
 		// operator diagnosis without pretending it rolled back the workspace.
 		log.Printf("register workspace connector %s: %v", result.Workspace.ID, err)
 	}
+	if err := registerIncidentConnector(s.connectorRegistry, result.Workspace.ID); err != nil {
+		log.Printf("register incident connector %s: %v", result.Workspace.ID, err)
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 

@@ -54,12 +54,12 @@ engineering history:
   summaries. A completion note is the more reliable source when a historical
   foundation intention differs from the current implementation.
 
-The project has 23 numbered repository/control-plane implementation loops plus
-the packaging and universal transformation delivery records below. Those loops
-build the control-plane substrate; they are not a claim that the complete
-production-system operations product is finished. Repository maintenance is
-the first adapter and the pairs below are the detailed engineering record for
-each implementation loop.
+The project has 28 numbered repository/control-plane and universal-operation
+implementation loops plus the packaging and transformation delivery records
+below. Those loops build the control-plane substrate and reference adapters;
+they are not a claim that the complete production-system operations product is
+finished. Repository maintenance remains the first qualified adapter, and the
+pairs below are the detailed engineering record for each implementation loop.
 
 ## Universal transformation roadmap
 
@@ -76,7 +76,7 @@ the implementation sequence is tracked by [Issue #38](https://github.com/Kshitij
 | [#46](https://github.com/Kshitij-M/fornix/issues/46) | Universal policy and external-effect admission | Alpha Postgres foundation for deterministic policy, approval, quota, and at-least-once effect recovery |
 | [#43](https://github.com/Kshitij-M/fornix/issues/43) | HTTP/API and read-only SQL connectors | Alpha bounded reference adapters: HTTP read/list/idempotent-submit and SQL describe/query/explain; production qualification remains |
 | [#44](https://github.com/Kshitij-M/fornix/issues/44) | Durable multi-step workflow runtime | Alpha foundation implemented; generic durable steps, waits, fences, replay, and bounded read-only fan-out |
-| [#42](https://github.com/Kshitij-M/fornix/issues/42) | Multi-domain reference workflow | Planned fake-first workflow spanning multiple system adapters |
+| [#42](https://github.com/Kshitij-M/fornix/issues/42) | Multi-domain reference workflow | Fake-first incident workflow implemented; live connector and production qualification remain |
 | [#40](https://github.com/Kshitij-M/fornix/issues/40) | Universal production qualification | Planned security, scale, recovery, backup/restore, and operational evidence |
 
 These issues are a dependency-ordered roadmap, not a claim that all listed
@@ -118,6 +118,7 @@ and [`71-loop-25-completion.md`](71-loop-25-completion.md).
 | 25 | Universal operation admission and external effects | [`70-operation-admission-effects-foundation.md`](70-operation-admission-effects-foundation.md) | [`71-loop-25-completion.md`](71-loop-25-completion.md) |
 | 26 | Bounded universal reference connectors | [`72-reference-connectors-foundation.md`](72-reference-connectors-foundation.md) | [`73-loop-26-completion.md`](73-loop-26-completion.md) |
 | 27 | Durable multi-step workflow runtime | [`74-workflow-runtime-foundation.md`](74-workflow-runtime-foundation.md) | [`75-loop-27-completion.md`](75-loop-27-completion.md) |
+| 28 | Multi-domain incident reference workflow | [`76-multi-domain-reference-workflow-foundation.md`](76-multi-domain-reference-workflow-foundation.md) | [`77-loop-28-completion.md`](77-loop-28-completion.md) |
 
 ## Local package and managed runtime
 

@@ -553,6 +553,36 @@ PROJECTION_PG_DSN='postgres://fornix:fornix-dev-only@127.0.0.1:55433/fornix?sslm
   make smoke-workflow
 ```
 
+### Loop 28: multi-domain incident reference workflow
+
+Loop 28 demonstrates the universal control-plane contract outside repository
+maintenance with a deterministic fake incident source, runbook connector,
+bounded investigation, approval/rejection gate, remediation record,
+verification, Work Receipt linkage, and inert replay. It is intentionally
+offline and does not enable live monitoring or remediation effects.
+
+Run the focused tests against a Postgres database:
+
+```sh
+FORNIX_TEST_PG_DSN='postgres://fornix:fornix-dev-only@127.0.0.1:55433/fornix?sslmode=disable' \
+  make smoke-multidomain
+```
+
+The operator surfaces are equivalent:
+
+```sh
+bin/fornix incident start --workspace reference-local \
+  --source monitor --external-id payment-1 \
+  --payload '{"service":"payments","status":"degraded"}'
+bin/fornix incident approve --workspace reference-local --run-id <run-id> --decision approve
+bin/fornix incident replay --workspace reference-local --run-id <run-id>
+```
+
+The workflow pauses before remediation. Its durable approval is bound to the
+workspace, run, waiting step, operation hash, plan hash, actor, and evidence
+hash. Replay reads committed history only and never invokes the fake connector,
+model gateway, tools, or external systems.
+
 ## Repository rules
 
 Never commit `.env`, database volumes, model files, raw transcripts, or

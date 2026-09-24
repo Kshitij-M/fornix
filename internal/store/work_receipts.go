@@ -450,6 +450,8 @@ func validateReceiptReferenceTx(ctx context.Context, tx pgx.Tx, workspaceID stri
 		err = tx.QueryRow(ctx, `SELECT true, packet_hash FROM fornix.change_proposals WHERE workspace_id=$1 AND id=$2`, workspaceID, ref.SourceID).Scan(&found, &sourceHash)
 	case contracts.WorkReceiptReferenceChangeApplication:
 		err = tx.QueryRow(ctx, `SELECT true, packet_hash FROM fornix.change_applications WHERE workspace_id=$1 AND id=$2 AND status='applied'`, workspaceID, ref.SourceID).Scan(&found, &sourceHash)
+	case contracts.WorkReceiptReferenceOperation:
+		err = tx.QueryRow(ctx, `SELECT true, operation_hash FROM fornix.operations WHERE workspace_id=$1 AND id=$2`, workspaceID, ref.SourceID).Scan(&found, &sourceHash)
 	default:
 		return fmt.Errorf("%w: unsupported reference kind %q", ErrWorkReceiptIntegrity, ref.Kind)
 	}
