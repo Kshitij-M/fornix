@@ -16,6 +16,8 @@ Delivered:
   and control-event history for replay;
 - `make qualification-capacity`, development guidance, and public runbook
   documentation.
+- CI runs a smaller bounded workload and provisions a disposable non-owner
+  PostgreSQL role/database for the RLS qualification.
 
 Measured local qualification on the local Postgres 17 container with 128
 operations and four workers:

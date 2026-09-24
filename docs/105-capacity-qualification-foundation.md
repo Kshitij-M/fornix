@@ -43,6 +43,10 @@ limits. An optional p95 threshold can fail the run. The threshold is a
 qualification budget chosen by the operator, not a universal performance
 promise.
 
+CI runs the harness with a smaller workload and a bounded local p95 budget.
+The CI result proves that the qualification path remains executable; it is not
+evidence that GitHub-hosted runner timings are a production SLO.
+
 ## Safety and cleanup
 
 The harness requires a dedicated `FORNIX_CAPACITY_PG_DSN`. It creates one

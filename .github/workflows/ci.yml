@@ -127,6 +127,26 @@ jobs:
           done
           cat /tmp/fornix.log
           exit 1
+      - name: Run bounded generic-operation capacity qualification
+        env:
+          FORNIX_CAPACITY_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+          FORNIX_CAPACITY_OPERATIONS: '64'
+          FORNIX_CAPACITY_WORKERS: '4'
+          FORNIX_CAPACITY_MAX_P95_MS: '2000'
+        run: make qualification-capacity
+      - name: Run non-owner PostgreSQL workspace-isolation qualification
+        env:
+          PGPASSWORD: fornix-ci
+          FORNIX_RLS_ADMIN_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix_rls_ci?sslmode=disable
+          FORNIX_RLS_TEST_DSN: postgres://fornix_rls_ci:fornix-rls-ci@localhost:5432/fornix_rls_ci?sslmode=disable
+        run: |
+          psql -h localhost -U fornix -d postgres -v ON_ERROR_STOP=1 -c "DROP DATABASE IF EXISTS fornix_rls_ci"
+          psql -h localhost -U fornix -d postgres -v ON_ERROR_STOP=1 -c "DROP ROLE IF EXISTS fornix_rls_ci"
+          psql -h localhost -U fornix -d postgres -v ON_ERROR_STOP=1 -c "CREATE ROLE fornix_rls_ci LOGIN PASSWORD 'fornix-rls-ci' NOSUPERUSER NOBYPASSRLS"
+          createdb -h localhost -U fornix -O fornix fornix_rls_ci
+          FORNIX_TEST_PG_DSN="$FORNIX_RLS_ADMIN_DSN" go test ./internal/store -run '^TestOperationIntegrationCreateDuplicateConflictAndLinks$' -count=1 -v
+          psql -h localhost -U fornix -d fornix_rls_ci -v ON_ERROR_STOP=1 -c "GRANT CONNECT ON DATABASE fornix_rls_ci TO fornix_rls_ci; GRANT USAGE ON SCHEMA fornix TO fornix_rls_ci; GRANT SELECT, INSERT ON fornix.operations TO fornix_rls_ci; GRANT EXECUTE ON FUNCTION fornix.set_workspace_context(TEXT) TO fornix_rls_ci;"
+          FORNIX_RLS_TEST_DSN="$FORNIX_RLS_TEST_DSN" make qualification-workspace-isolation
       - name: Run baseline smoke
         env:
           FORNIX_URL: http://localhost:8201
