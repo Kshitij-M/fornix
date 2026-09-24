@@ -150,6 +150,12 @@ contains the current/planned domain matrix and the precise category boundary.
   command. Claims are ordered deterministically, workspace-scoped, fenced,
   expiry-recoverable, and exclude uncertain external-effect work. This is a
   worker-claim primitive, not a background scheduler or provider dispatcher.
+- Generic operation claims now have an adapter-owned worker-consumption
+  boundary. The worker supplies heartbeats, cancellation, bounded polling,
+  fail-closed lease-loss behavior, and expiry-based recovery without becoming
+  a universal provider dispatcher. Adapter handlers must persist their own
+  plan/result/transition and use the independent external-effect authority;
+  the worker does not claim exactly-once remote execution.
 - Built-in connector capabilities are now admitted through explicit,
   workspace-scoped trust snapshots that pin connector identity and definition
   hashes. Credential-bearing HTTP adapters can use a bounded lease resolver;
@@ -206,9 +212,12 @@ contains the current/planned domain matrix and the precise category boundary.
   semantics, deterministic repository validation, and a reviewer-facing
   change UI remain product work.
 
-- No OAuth/SSO, external KMS/secret-manager provider, or Postgres row-level
-  security policy. The operator identity/API-key surface is intentionally
-  bounded; local compatibility still requires explicit development mode.
+- No OAuth/SSO or external KMS/secret-manager provider is integrated. Postgres
+  row-level-security policies exist for the generic operation/admission/effect
+  tables, but production role separation and deployment-wide enforcement are
+  still required before this can be claimed as complete tenant isolation. The
+  operator identity/API-key surface is intentionally bounded; local
+  compatibility still requires explicit development mode.
 - Not every mutation path emits typed events yet.
 - Not every historical inline prompt/tool/evidence payload has been migrated to
   artifact references, and there is no general memory compiler yet. Task 14
@@ -260,9 +269,11 @@ contains the current/planned domain matrix and the precise category boundary.
   execution remain outside this qualification.
 - The generic operation HTTP/CLI surface is intentionally narrow: it does not
   expose a universal operation list endpoint, connector-specific payload
-  submission, external credential resolution, or a background operation
-  worker. Those concerns remain in the connector, workflow, policy, and Issue
-  #40 qualification layers.
+  submission, external credential resolution, or a server-wired background
+  worker supervisor. An adapter-owned worker package now supplies the bounded
+  claim/heartbeat/release contract, while deployment composition and handler
+  registration remain in the connector, workflow, policy, and Issue #40
+  qualification layers.
 - Shared egress policy is currently a typed in-process admission contract. It
   is not yet durably versioned on every generic effect, enforced by a central
   network boundary, or implemented by every future connector. Production

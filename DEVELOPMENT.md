@@ -117,6 +117,7 @@ make smoke-package
 make release-check
 FORNIX_RLS_TEST_DSN='postgres://APP_ROLE:APP_PASSWORD@HOST:PORT/RLS_DATABASE?sslmode=disable' make qualification-workspace-isolation
 FORNIX_CAPACITY_PG_DSN='postgres://USER:PASSWORD@HOST:PORT/DISPOSABLE_DATABASE?sslmode=disable' make qualification-capacity
+FORNIX_TEST_PG_DSN='postgres://USER:PASSWORD@HOST:PORT/DISPOSABLE_DATABASE?sslmode=disable' make test-operation-worker
 make operator-reference
 make dev-up
 make dev-run

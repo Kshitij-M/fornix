@@ -138,6 +138,7 @@ and [`71-loop-25-completion.md`](71-loop-25-completion.md).
 | 40 | Postgres workspace-isolation foundation | [`103-postgres-workspace-isolation-foundation.md`](103-postgres-workspace-isolation-foundation.md) | [`104-loop-40-completion.md`](104-loop-40-completion.md) |
 | 41 | Generic operation capacity qualification | [`105-capacity-qualification-foundation.md`](105-capacity-qualification-foundation.md) | [`106-loop-41-completion.md`](106-loop-41-completion.md) |
 | 42 | Generic operation queue and worker claims | [`107-generic-operation-queue-foundation.md`](107-generic-operation-queue-foundation.md) | [`108-loop-42-completion.md`](108-loop-42-completion.md) |
+| 43 | Adapter-owned generic operation worker | [`109-generic-operation-worker-foundation.md`](109-generic-operation-worker-foundation.md) | [`110-loop-43-completion.md`](110-loop-43-completion.md) |
 
 ## Local package and managed runtime
 

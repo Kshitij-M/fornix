@@ -212,6 +212,10 @@ The current implementation includes the following tested slices:
 - a domain-neutral durable workflow runtime with typed model/tool/connector,
   approval/human/callback, validation, compensation, wait, retry, checkpoint,
   fencing, and inert replay seams; repository maintenance is only one adapter.
+- a generic Postgres operation queue and adapter-owned worker boundary with
+  deterministic claims, heartbeats, cancellation, expiry takeover, and
+  fail-closed fencing; it does not dispatch providers or claim exactly-once
+  remote execution.
 
 The [HTTP API reference](docs/53-http-api-reference.md) maps the current
 routes. The [production qualification](docs/14-production-readiness-qualification.md)

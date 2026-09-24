@@ -50,8 +50,9 @@ operation_id=$(printf '%s' "$created" | jq -r '.operation.id')
 duplicate=$(env FORNIX_URL="$url" FORNIX_KEY="$key" FORNIX_WORKSPACE_ID="$workspace" "$binary" operation create --request-file "$request_file")
 printf '%s' "$duplicate" | jq -e --arg id "$operation_id" '.duplicate == true and .operation.id == $id' >/dev/null
 
-lease=$(env FORNIX_URL="$url" FORNIX_KEY="$key" FORNIX_WORKSPACE_ID="$workspace" "$binary" operation lease --id "$operation_id")
-fence=$(printf '%s' "$lease" | jq -r '.lease.fence')
+claim=$(env FORNIX_URL="$url" FORNIX_KEY="$key" FORNIX_WORKSPACE_ID="$workspace" "$binary" operation claim --limit 1 --ttl-ms 30000)
+printf '%s' "$claim" | jq -e --arg id "$operation_id" '.count == 1 and .claims[0].operation.id == $id' >/dev/null
+fence=$(printf '%s' "$claim" | jq -r '.claims[0].lease.fence')
 [ "$fence" -gt 0 ]
 
 env FORNIX_URL="$url" FORNIX_KEY="$key" FORNIX_WORKSPACE_ID="$workspace" "$binary" operation renew --id "$operation_id" --fence "$fence" >/dev/null
@@ -72,4 +73,4 @@ grep -F 'operation lease fence is stale' "$tmp/stale.err" >/dev/null
 replay=$(env FORNIX_URL="$url" FORNIX_KEY="$key" FORNIX_WORKSPACE_ID="$workspace" "$binary" operation replay --id "$operation_id")
 printf '%s' "$replay" | jq -e '.verified == true and .replay_hash != ""' >/dev/null
 
-printf '%s\n' "universal operation smoke: CLI create, duplicate, fenced lease lifecycle, stale rejection, transition, and replay passed ($operation_id)"
+printf '%s\n' "universal operation smoke: CLI create, duplicate, queue claim, fenced lease lifecycle, stale rejection, transition, and replay passed ($operation_id)"

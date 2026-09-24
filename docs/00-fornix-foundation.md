@@ -201,15 +201,17 @@ authoritative structured state
 
 ## Current gaps
 
-- OAuth/SSO, external KMS/secret-manager resolution, Postgres row-level
-  security, and automated key/credential rotation policy.
+- OAuth/SSO, external KMS/secret-manager resolution, production role-separated
+  Postgres row-level-security enforcement across every historical surface, and
+  automated key/credential rotation policy.
 - Typed event integration for every mutation path.
 - Durable generic operation persistence, compatibility links, lifecycle
   idempotency, fenced leases, attempts, effect reservations, callbacks, and
-  replay are implemented as the Issue #39 foundation. Final authorization of
-  every compatibility link and full adapter integration remain qualification
-  work; the connector registry and repository adapter are still process-local
-  admission/execution seams.
+  replay are implemented as the Issue #39 foundation. Deterministic queue
+  claims and an adapter-owned heartbeat/expiry worker boundary are now
+  qualified; final authorization of every compatibility link and full adapter
+  integration remain qualification work; the connector registry and repository
+  adapter are still process-local admission/execution seams.
 - Universal admission is implemented as an alpha Postgres foundation in
   migration 036: policy snapshots, deterministic decisions, approval history,
   quota-window accounting, effect-state history, and recovery-required

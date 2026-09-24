@@ -25,7 +25,7 @@ PROJECTION_PG_DSN ?= postgres://fornix:fornix-dev-only@host.docker.internal:5543
 FORNIX_TEST_PG_DSN ?=
 UNIVERSAL_TEST_PG_DSN = $(if $(strip $(FORNIX_TEST_PG_DSN)),$(FORNIX_TEST_PG_DSN),$(PROJECTION_PG_DSN))
 
-.PHONY: fmt fmt-check test test-race vet build package-check release-check smoke-package qualification-backup-restore qualification-workspace-isolation qualification-capacity python-install python-check docs-check check verify hooks-install install-hooks hooks-uninstall uninstall-hooks hooks-check test-connectors smoke smoke-local-cli smoke-local-runtime smoke-events smoke-projection smoke-leases smoke-tasks smoke-retrieval smoke-provenance smoke-model smoke-tools smoke-agent smoke-scheduler smoke-identity smoke-artifacts smoke-artifact-output smoke-observability smoke-retrieval-quality smoke-retrieval-evaluation smoke-reference-workflow smoke-reference-openai smoke-ingestion smoke-work-receipts smoke-changes smoke-validation smoke-policy smoke-operation-admission smoke-universal-operation smoke-universal-trust smoke-universal-egress smoke-universal-execution smoke-universal-effects smoke-reference-connectors smoke-workflow smoke-multidomain operator-reference dev-up dev-up-ai dev-up-watcher dev-run dev-logs dev-down
+.PHONY: fmt fmt-check test test-race vet build package-check release-check smoke-package qualification-backup-restore qualification-workspace-isolation qualification-capacity test-operation-worker python-install python-check docs-check check verify hooks-install install-hooks hooks-uninstall uninstall-hooks hooks-check test-connectors smoke smoke-local-cli smoke-local-runtime smoke-events smoke-projection smoke-leases smoke-tasks smoke-retrieval smoke-provenance smoke-model smoke-tools smoke-agent smoke-scheduler smoke-identity smoke-artifacts smoke-artifact-output smoke-observability smoke-retrieval-quality smoke-retrieval-evaluation smoke-reference-workflow smoke-reference-openai smoke-ingestion smoke-work-receipts smoke-changes smoke-validation smoke-policy smoke-operation-admission smoke-universal-operation smoke-universal-trust smoke-universal-egress smoke-universal-execution smoke-universal-effects smoke-reference-connectors smoke-workflow smoke-multidomain operator-reference dev-up dev-up-ai dev-up-watcher dev-run dev-logs dev-down
 
 fmt:
 	$(GOFMT_CMD) -w $(GO_FILES)
@@ -85,6 +85,9 @@ qualification-workspace-isolation:
 
 qualification-capacity:
 	scripts/qualification/operation-capacity.sh
+
+test-operation-worker:
+	FORNIX_TEST_PG_DSN=$(UNIVERSAL_TEST_PG_DSN) $(GO_CMD) test ./internal/operationworker ./internal/store -run 'TestWorker|TestOperationQueue' -count=1 -v
 
 smoke-package: build
 	scripts/test/v0.36-package-smokes.sh
