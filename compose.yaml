@@ -25,6 +25,7 @@ services:
     environment:
       FORNIX_AUTH_MODE: ${FORNIX_AUTH_MODE:-development}
       FORNIX_WORKER_ENABLED: ${FORNIX_WORKER_ENABLED:-true}
+      FORNIX_ENABLE_LEGACY_GLOBAL_SURFACES: ${FORNIX_ENABLE_LEGACY_GLOBAL_SURFACES:-false}
       # Required only when FORNIX_AUTH_MODE=development; workspace mode uses
       # hashed Postgres-backed API keys and does not need the legacy key.
       FORNIX_KEY: ${FORNIX_KEY:-}

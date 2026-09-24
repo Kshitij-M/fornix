@@ -120,7 +120,20 @@ func (s *server) securityMiddleware(next http.Handler) http.Handler {
 			writeErr(w, http.StatusServiceUnavailable, "authorization unavailable")
 			return
 		}
+		if isLegacyGlobalSurface(r.URL.Path) && !s.legacyGlobalSurfaces {
+			// These handlers read/write historical global tables. They remain
+			// registered for an explicit migration-only opt-in, but production
+			// workspace requests must fail closed before reaching them.
+			writeErr(w, http.StatusNotFound, "route unavailable")
+			return
+		}
 		permission := permissionForRequest(r)
+		if permission == "" {
+			// Never turn an unreviewed or misspelled route into an implicit
+			// workspace-read capability.
+			writeErr(w, http.StatusNotFound, "route unavailable")
+			return
+		}
 		decision, err := s.auth.Authorize(r.Context(), principal, requestIDFromRequest(r), permission, r.URL.Path, r.Method, r.URL.Path)
 		if errors.Is(err, store.ErrAuthorizationDenied) {
 			writeErr(w, http.StatusForbidden, "forbidden")
@@ -192,6 +205,10 @@ func validateRequestWorkspace(r *http.Request, principal contracts.Principal) er
 	return nil
 }
 
+func isLegacyGlobalSurface(path string) bool {
+	return strings.HasPrefix(path, "/v1/federation/") || path == "/v1/router/observation" || path == "/v1/router/recommend"
+}
+
 func permissionForRequest(r *http.Request) contracts.Permission {
 	path := r.URL.Path
 	switch {
@@ -242,6 +259,13 @@ func permissionForRequest(r *http.Request) contracts.Permission {
 		return contracts.PermissionOperationExecute
 	case path == "/v1/retrieve" || path == "/v1/rag" || path == "/v1/memo/search" || path == "/v1/symbol/search" || path == "/v1/router/recommend":
 		return contracts.PermissionRetrievalRead
+	case path == "/v1/router/observation":
+		return contracts.PermissionRetrievalWrite
+	case strings.HasPrefix(path, "/v1/federation/"):
+		if r.Method == http.MethodGet {
+			return contracts.PermissionWorkspaceRead
+		}
+		return contracts.PermissionWorkspaceWrite
 	case path == "/v1/evaluations/retrieval/surfaces":
 		if r.Method == http.MethodGet {
 			return contracts.PermissionEvaluationRead
@@ -339,6 +363,6 @@ func permissionForRequest(r *http.Request) contracts.Permission {
 	case strings.HasPrefix(path, "/v1/scheduler"):
 		return contracts.PermissionSchedulerRun
 	default:
-		return contracts.PermissionWorkspaceRead
+		return ""
 	}
 }

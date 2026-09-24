@@ -12,6 +12,7 @@ func clearConfigEnv(t *testing.T) {
 		"FORNIX_KEY", "FORNIX_PG_DSN", "FORNIX_LISTEN", "FORNIX_OLLAMA_URL", "OLLAMA_URL",
 		"FORNIX_AUTH_MODE",
 		"FORNIX_WORKER_ENABLED",
+		"FORNIX_ENABLE_LEGACY_GLOBAL_SURFACES",
 		"FORNIX_ENV", "FORNIX_MAX_BODY_BYTES",
 		"FORNIX_SHUTDOWN_TIMEOUT_SECONDS", "FORNIX_DB_MAX_CONNS", "FORNIX_DB_MIN_CONNS",
 		"FORNIX_OPENAI_ENABLED", "FORNIX_OPENAI_BASE_URL", "FORNIX_OPENAI_MODEL",
@@ -43,6 +44,9 @@ func TestLoadCanonicalDefaults(t *testing.T) {
 	}
 	if !c.WorkerEnabled {
 		t.Fatal("worker should be enabled by default")
+	}
+	if c.EnableLegacyGlobalSurfaces {
+		t.Fatal("legacy global surfaces must be disabled by default")
 	}
 }
 
@@ -134,5 +138,27 @@ func TestLoadWorkerCanBeDisabledExplicitly(t *testing.T) {
 	}
 	if c.WorkerEnabled {
 		t.Fatal("worker disable flag was ignored")
+	}
+}
+
+func TestLoadLegacyGlobalSurfacesRequireExplicitNonProductionOptIn(t *testing.T) {
+	clearConfigEnv(t)
+	t.Setenv("FORNIX_AUTH_MODE", "development")
+	t.Setenv("FORNIX_KEY", "key")
+	t.Setenv("FORNIX_PG_DSN", "postgres://fornix@localhost/fornix")
+	t.Setenv("FORNIX_ENABLE_LEGACY_GLOBAL_SURFACES", "true")
+
+	c, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.EnableLegacyGlobalSurfaces {
+		t.Fatal("explicit legacy global surface opt-in was ignored")
+	}
+
+	t.Setenv("FORNIX_ENV", "production")
+	t.Setenv("FORNIX_AUTH_MODE", "workspace")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "LEGACY_GLOBAL_SURFACES") {
+		t.Fatalf("production legacy-surface configuration error = %v", err)
 	}
 }

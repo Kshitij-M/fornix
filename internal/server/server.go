@@ -45,47 +45,48 @@ const embeddingDim = 768
 const embeddingModel = "nomic-embed-text"
 
 type server struct {
-	pool              *pgxpool.Pool
-	events            *store.EventStore
-	operations        *store.OperationStore
-	admission         *store.AdmissionStore
-	workflows         *store.WorkflowStore
-	evidence          *store.EvidenceStore
-	artifacts         *store.ArtifactStore
-	ingests           *store.IngestStore
-	tasks             *store.TaskStore
-	retrieval         *retrieval.Store
-	retrievalSurfaces *store.RetrievalSurfaceStore
-	modelRegistry     *model.Registry
-	modelGateway      *model.Gateway
-	modelCalls        *store.ModelCallStore
-	operator          *store.OperatorStore
-	observability     *store.ObservabilityStore
-	evaluations       *store.EvaluationStore
-	workReceipts      *store.WorkReceiptStore
-	validations       *store.ValidationStore
-	policies          *store.PolicyStore
-	validation        *validationruntime.Service
-	changes           *change.Service
-	toolRegistry      *tool.Registry
-	connectorRegistry *connectorruntime.Registry
-	connectorExecutor *connectorruntime.Executor
-	connectorBindings *store.ConnectorBindingStore
-	incidentWorkflows *incidentworkflow.Service
-	toolExecutor      *tool.Executor
-	toolRuns          *store.ToolRunStore
-	agentRuns         *store.AgentRunStore
-	auth              *store.AuthStore
-	agentLoop         *agentloop.Orchestrator
-	agentWorker       *scheduler.Worker
-	apiKey            string
-	bootstrapKey      string
-	authMode          string
-	workerEnabled     bool
-	ollamaURL         string
-	httpClient        *http.Client
-	maxBodyBytes      int64
-	shutdownTimeout   time.Duration
+	pool                 *pgxpool.Pool
+	events               *store.EventStore
+	operations           *store.OperationStore
+	admission            *store.AdmissionStore
+	workflows            *store.WorkflowStore
+	evidence             *store.EvidenceStore
+	artifacts            *store.ArtifactStore
+	ingests              *store.IngestStore
+	tasks                *store.TaskStore
+	retrieval            *retrieval.Store
+	retrievalSurfaces    *store.RetrievalSurfaceStore
+	modelRegistry        *model.Registry
+	modelGateway         *model.Gateway
+	modelCalls           *store.ModelCallStore
+	operator             *store.OperatorStore
+	observability        *store.ObservabilityStore
+	evaluations          *store.EvaluationStore
+	workReceipts         *store.WorkReceiptStore
+	validations          *store.ValidationStore
+	policies             *store.PolicyStore
+	validation           *validationruntime.Service
+	changes              *change.Service
+	toolRegistry         *tool.Registry
+	connectorRegistry    *connectorruntime.Registry
+	connectorExecutor    *connectorruntime.Executor
+	connectorBindings    *store.ConnectorBindingStore
+	incidentWorkflows    *incidentworkflow.Service
+	toolExecutor         *tool.Executor
+	toolRuns             *store.ToolRunStore
+	agentRuns            *store.AgentRunStore
+	auth                 *store.AuthStore
+	agentLoop            *agentloop.Orchestrator
+	agentWorker          *scheduler.Worker
+	apiKey               string
+	bootstrapKey         string
+	authMode             string
+	workerEnabled        bool
+	legacyGlobalSurfaces bool
+	ollamaURL            string
+	httpClient           *http.Client
+	maxBodyBytes         int64
+	shutdownTimeout      time.Duration
 }
 
 // New validates configuration, applies durable migrations, and composes the
@@ -255,14 +256,15 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 			loop.Approvals = toolRuns
 			return loop
 		}(),
-		apiKey:          cfg.APIKey,
-		bootstrapKey:    cfg.BootstrapKey,
-		authMode:        cfg.AuthMode,
-		workerEnabled:   cfg.WorkerEnabled,
-		ollamaURL:       cfg.OllamaURL,
-		httpClient:      &http.Client{Timeout: 30 * time.Second},
-		maxBodyBytes:    cfg.MaxBodyBytes,
-		shutdownTimeout: cfg.ShutdownTimeout,
+		apiKey:               cfg.APIKey,
+		bootstrapKey:         cfg.BootstrapKey,
+		authMode:             cfg.AuthMode,
+		workerEnabled:        cfg.WorkerEnabled,
+		legacyGlobalSurfaces: cfg.EnableLegacyGlobalSurfaces,
+		ollamaURL:            cfg.OllamaURL,
+		httpClient:           &http.Client{Timeout: 30 * time.Second},
+		maxBodyBytes:         cfg.MaxBodyBytes,
+		shutdownTimeout:      cfg.ShutdownTimeout,
 	}
 	srv.incidentWorkflows = incidentworkflow.NewService(store.NewIncidentStore(pool, events, evidenceStore), workflows, evidenceStore, artifactStore, workReceipts, connectorRegistry, modelGateway)
 	srv.ingests = store.NewIngestStore(pool, events, srv.artifacts)
@@ -350,7 +352,9 @@ func (s *server) Run(ctx context.Context, listen string) error {
 	bgCtx, cancelBackground := context.WithCancel(ctx)
 	defer cancelBackground()
 	go s.sessionsReaper(bgCtx)
-	go s.federationPoller(bgCtx)
+	if s.legacyGlobalSurfaces {
+		go s.federationPoller(bgCtx)
+	}
 	if s.workerEnabled {
 		go func() {
 			if err := s.agentWorker.Run(bgCtx, ""); err != nil && !errors.Is(err, context.Canceled) {

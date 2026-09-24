@@ -26,6 +26,7 @@ services:
     environment:
       FORNIX_AUTH_MODE: "workspace"
       FORNIX_WORKER_ENABLED: "${FORNIX_WORKER_ENABLED:-true}"
+      FORNIX_ENABLE_LEGACY_GLOBAL_SURFACES: "false"
       FORNIX_ENV: "production"
       FORNIX_LISTEN: ":8201"
       FORNIX_BOOTSTRAP_KEY: "${FORNIX_BOOTSTRAP_KEY:?FORNIX_BOOTSTRAP_KEY is required}"

@@ -41,6 +41,7 @@ foundation notes when evaluating the product direction.
 | What is actually qualified today | [`14-production-readiness-qualification.md`](14-production-readiness-qualification.md) |
 | How to operate a generic operation and reconcile an external effect | [`89-universal-operator-runbook.md`](89-universal-operator-runbook.md) |
 | How to run qualification commands and interpret evidence | [`90-qualification-runbook.md`](90-qualification-runbook.md) |
+| How legacy global federation/router APIs are contained | [`91-legacy-global-surface-containment-foundation.md`](91-legacy-global-surface-containment-foundation.md) |
 | How documentation should be written | [`52-documentation-guide.md`](52-documentation-guide.md) |
 | Which reference projects informed the design | [`13-reference-reuse-matrix.md`](13-reference-reuse-matrix.md) |
 
@@ -128,6 +129,7 @@ and [`71-loop-25-completion.md`](71-loop-25-completion.md).
 | 31 | Shared destination and egress policy | [`82-egress-policy-foundation.md`](82-egress-policy-foundation.md) | [`83-loop-31-completion.md`](83-loop-31-completion.md) |
 | 32 | Durable generic connector execution | [`84-generic-execution-foundation.md`](84-generic-execution-foundation.md) | [`85-loop-32-completion.md`](85-loop-32-completion.md) |
 | 33 | External-effect reservation and reconciliation API | [`86-external-effect-reconciliation-foundation.md`](86-external-effect-reconciliation-foundation.md) | [`87-loop-33-completion.md`](87-loop-33-completion.md) |
+| 34 | Legacy global surface containment | [`91-legacy-global-surface-containment-foundation.md`](91-legacy-global-surface-containment-foundation.md) | [`92-loop-34-completion.md`](92-loop-34-completion.md) |
 
 ## Local package and managed runtime
 

@@ -129,6 +129,46 @@ func TestSecurityMiddlewareDenyByDefaultAndAudit(t *testing.T) {
 	}
 }
 
+func TestSecurityMiddlewareRejectsUnknownAndLegacyGlobalRoutes(t *testing.T) {
+	srv, _, workspaceID, token := newServerAuthTest(t, []contracts.Permission{contracts.PermissionWorkspaceRead})
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { t.Fatal("unreviewed route reached handler") })
+	handler := withRequestMiddleware(srv.securityMiddleware(next), 1<<20)
+	for _, path := range []string{
+		"/v1/not-reviewed?workspace_id=" + workspaceID,
+		"/v1/router/recommend?workspace_id=" + workspaceID,
+		"/v1/federation/peers?workspace_id=" + workspaceID,
+	} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("Authorization", "Bearer "+token)
+		request.Header.Set("X-Request-ID", "route-deny-"+strings.ReplaceAll(path, "/", "-"))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusNotFound {
+			t.Fatalf("unreviewed path %s response=%d body=%s", path, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestSecurityMiddlewareAllowsLegacyGlobalRoutesOnlyWhenOptedIn(t *testing.T) {
+	srv, _, workspaceID, token := newServerAuthTest(t, []contracts.Permission{contracts.PermissionWorkspaceRead})
+	srv.legacyGlobalSurfaces = true
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	handler := withRequestMiddleware(srv.securityMiddleware(next), 1<<20)
+	for _, path := range []string{
+		"/v1/router/recommend?workspace_id=" + workspaceID,
+		"/v1/federation/peers?workspace_id=" + workspaceID,
+	} {
+		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("Authorization", "Bearer "+token)
+		request.Header.Set("X-Request-ID", "route-opt-in-"+strings.ReplaceAll(path, "/", "-"))
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("opt-in path %s response=%d body=%s", path, response.Code, response.Body.String())
+		}
+	}
+}
+
 func TestSecurityMiddlewareAuthorizesEvaluationOperatorSurface(t *testing.T) {
 	srv, _, workspaceID, token := newServerAuthTest(t, []contracts.Permission{
 		contracts.PermissionEvaluationRead,

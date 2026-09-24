@@ -47,6 +47,11 @@ Fornix never claims exactly-once remote execution. If a process dies after a
 provider may have accepted a request, the effect must be inspected and
 reconciled explicitly rather than blindly retried.
 
+Historical federation and router-learning compatibility routes are quarantined
+by default because their original tables predate workspace isolation. They are
+available only for explicit non-production compatibility qualification with
+`FORNIX_ENABLE_LEGACY_GLOBAL_SURFACES=true`; production rejects that setting.
+
 ## Production warning
 
 Do not use the current alpha for unattended production changes, sensitive

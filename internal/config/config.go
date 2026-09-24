@@ -36,6 +36,10 @@ type Config struct {
 	DBMaxConnections    int32
 	DBMinConnections    int32
 	WorkerEnabled       bool
+	// EnableLegacyGlobalSurfaces is a migration-only opt-in for the historical
+	// federation and router APIs whose original tables predate workspace
+	// isolation. It must remain disabled in production.
+	EnableLegacyGlobalSurfaces bool
 }
 
 func Load() (Config, error) {
@@ -71,6 +75,10 @@ func Load() (Config, error) {
 	}
 	c.OpenAIEnabled = parseBoolEnv("FORNIX_OPENAI_ENABLED")
 	c.OpenAIAllowPrivate = parseBoolEnv("FORNIX_OPENAI_ALLOW_PRIVATE")
+	c.EnableLegacyGlobalSurfaces = parseBoolEnv("FORNIX_ENABLE_LEGACY_GLOBAL_SURFACES")
+	if c.Environment == "production" && c.EnableLegacyGlobalSurfaces {
+		return Config{}, fmt.Errorf("FORNIX_ENABLE_LEGACY_GLOBAL_SURFACES is not allowed in production")
+	}
 	if c.OpenAIEnabled && strings.TrimSpace(os.Getenv(c.OpenAICredentialRef)) == "" {
 		return Config{}, fmt.Errorf("%s is required when FORNIX_OPENAI_ENABLED is true", c.OpenAICredentialRef)
 	}
