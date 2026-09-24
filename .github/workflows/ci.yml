@@ -35,6 +35,8 @@ jobs:
         run: make test-connectors
       - name: Run credential lease and capability trust tests
         run: make smoke-universal-trust
+      - name: Run shared destination policy tests
+        run: make smoke-universal-egress
       - name: Run race tests
         run: make test-race
       - name: Run vet

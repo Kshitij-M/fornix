@@ -134,7 +134,10 @@ contains the current/planned domain matrix and the precise category boundary.
   hashes. Credential-bearing HTTP adapters can use a bounded lease resolver;
   lease values remain outside durable state. These are fail-closed seams, not
   a claim that the local profile is an external secret manager or signed
-  supply-chain catalog.
+  supply-chain catalog. Shared destination policy now also normalizes and
+  authorizes connector schemes, hosts, paths, and redirect budgets; HTTP keeps
+  its adapter-specific DNS/private-network and exact-host controls as defense
+  in depth. This is not yet a central egress proxy or signed policy catalog.
 - The first non-repository reference workflow is now implemented as a
   fake-first incident path. It durably captures typed incident delivery,
   duplicate/conflict semantics, runbook and diagnostic steps, model/tool
@@ -239,6 +242,12 @@ contains the current/planned domain matrix and the precise category boundary.
   submission, external credential resolution, or a background operation
   worker. Those concerns remain in the connector, workflow, policy, and Issue
   #40 qualification layers.
+- Shared egress policy is currently a typed in-process admission contract. It
+  is not yet durably versioned on every generic effect, enforced by a central
+  network boundary, or implemented by every future connector. Production
+  qualification must add signed policy/catalog distribution, DNS-rebinding
+  controls independent of individual adapters, and adversarial confused-deputy
+  tests.
 - The Issue #43 connector slice now provides a fake-first HTTP/API adapter
   (`read`, `list`, and approval-gated `submit_idempotent`) and a read-only SQL
   adapter (`describe`, `query_readonly`, and `explain_readonly`). Both enforce
@@ -290,6 +299,7 @@ make smoke-policy
 make smoke-package
 make smoke-universal-operation
 make smoke-universal-trust
+make smoke-universal-egress
 ```
 
 For release output produced by GoReleaser, run:

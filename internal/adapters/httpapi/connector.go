@@ -94,6 +94,7 @@ type Connector struct {
 	credentialResolver CredentialResolver
 	credentialLease    credentials.LeaseResolver
 	client             *http.Client
+	destinationPolicy  connector.DestinationPolicy
 	definitions        map[string]contracts.CapabilityDefinition
 }
 
@@ -119,11 +120,15 @@ func newConnector(binding Binding, resolver connector.PayloadResolver, credentia
 	if binding.CredentialRef != "" && credentialResolver == nil && credentialLease == nil {
 		return nil, fmt.Errorf("http credential resolver is required for configured credential reference")
 	}
+	destinationPolicy, err := destinationPolicyForBinding(binding)
+	if err != nil {
+		return nil, err
+	}
 	ref := contracts.ConnectorRef{WorkspaceID: binding.WorkspaceID, Name: ConnectorName, Version: ConnectorVersion}
 	if err := ref.Normalize(); err != nil {
 		return nil, err
 	}
-	transportClient, err := configuredClient(binding, client)
+	transportClient, err := configuredClient(binding, destinationPolicy, client)
 	if err != nil {
 		return nil, err
 	}
@@ -159,7 +164,7 @@ func newConnector(binding Binding, resolver connector.PayloadResolver, credentia
 		}
 		definitions[spec.name] = definition
 	}
-	return &Connector{binding: binding, definitionRef: ref, resolver: resolver, credentialResolver: credentialResolver, credentialLease: credentialLease, client: transportClient, definitions: definitions}, nil
+	return &Connector{binding: binding, definitionRef: ref, resolver: resolver, credentialResolver: credentialResolver, credentialLease: credentialLease, client: transportClient, destinationPolicy: destinationPolicy, definitions: definitions}, nil
 }
 
 func (b *Binding) Normalize() error {
@@ -536,10 +541,13 @@ func (c *Connector) urlFor(payload Payload, paginate bool) (string, error) {
 		}
 	}
 	base.RawQuery = values.Encode()
+	if err := c.destinationPolicy.AuthorizeURL(base); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrUnsafeURL, err)
+	}
 	return base.String(), nil
 }
 
-func configuredClient(binding Binding, supplied *http.Client) (*http.Client, error) {
+func configuredClient(binding Binding, destinationPolicy connector.DestinationPolicy, supplied *http.Client) (*http.Client, error) {
 	client := &http.Client{}
 	if supplied != nil {
 		*client = *supplied
@@ -551,7 +559,7 @@ func configuredClient(binding Binding, supplied *http.Client) (*http.Client, err
 		if !binding.AllowRedirects {
 			return http.ErrUseLastResponse
 		}
-		if len(via) >= 5 || request.URL == nil || request.URL.User != nil || !hostAllowed(request.URL, binding.AllowedHosts) || !pathAllowed(request.URL.Path, binding.AllowedPathPrefixes) {
+		if len(via) >= destinationPolicy.MaxRedirects || request.URL == nil || request.URL.User != nil || destinationPolicy.AuthorizeURL(request.URL) != nil || !hostAllowed(request.URL, binding.AllowedHosts) || !pathAllowed(request.URL.Path, binding.AllowedPathPrefixes) {
 			return ErrUnsafeURL
 		}
 		return nil
@@ -573,6 +581,35 @@ func configuredClient(binding Binding, supplied *http.Client) (*http.Client, err
 		client.Transport = transport
 	}
 	return client, nil
+}
+
+func destinationPolicyForBinding(binding Binding) (connector.DestinationPolicy, error) {
+	base, err := url.Parse(binding.BaseURL)
+	if err != nil || base.Scheme == "" || base.Hostname() == "" {
+		return connector.DestinationPolicy{}, fmt.Errorf("http binding destination policy: %w", connector.ErrDestinationPolicy)
+	}
+	hosts := make([]string, 0, len(binding.AllowedHosts))
+	for _, allowed := range binding.AllowedHosts {
+		parsed, parseErr := url.Parse("//" + allowed)
+		if parseErr != nil || parsed.Hostname() == "" {
+			return connector.DestinationPolicy{}, fmt.Errorf("http binding destination policy: %w", connector.ErrDestinationPolicy)
+		}
+		hosts = append(hosts, parsed.Hostname())
+	}
+	policy := connector.DestinationPolicy{
+		AllowedSchemes:       []string{strings.ToLower(base.Scheme)},
+		AllowedHosts:         hosts,
+		AllowedPathPrefixes:  binding.AllowedPathPrefixes,
+		AllowPrivateNetworks: binding.AllowPrivateNetworks,
+		AllowRedirects:       binding.AllowRedirects,
+	}
+	if binding.AllowRedirects {
+		policy.MaxRedirects = 5
+	}
+	if err := policy.Normalize(); err != nil {
+		return connector.DestinationPolicy{}, fmt.Errorf("http binding destination policy: %w", err)
+	}
+	return policy, nil
 }
 
 func safeDialContext(allowPrivate bool) func(context.Context, string, string) (net.Conn, error) {
