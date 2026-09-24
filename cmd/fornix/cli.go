@@ -8,6 +8,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"net/url"
@@ -88,6 +89,8 @@ func runCLI(args []string) error {
 		return cli.taskCommand(parts[1:])
 	case "run":
 		return cli.runCommand(parts[1:])
+	case "operation":
+		return cli.operationCommand(parts[1:])
 	case "runs":
 		return cli.runCommand(append([]string{"list"}, parts[1:]...))
 	case "retrieve":
@@ -176,6 +179,7 @@ Work:
   change      Propose, approve, apply, and disclose repository changes
   validation  Run and inspect post-change validation
   policy      Inspect and resolve validation policy packs
+  operation   Create, lease, renew, release, advance, and replay operations
   incident    Run the bounded multi-domain incident workflow
 
 Identity and diagnostics:
@@ -217,7 +221,7 @@ func printCompletion(args []string) error {
 }
 
 func completionScript(shell string) (string, error) {
-	const commands = "start stop restart status logs doctor setup demo run task ingest retrieve evaluation receipt artifact evidence change validation policy metrics workspace identity role api-key upgrade uninstall support version completion help"
+	const commands = "start stop restart status logs doctor setup demo run task ingest retrieve evaluation receipt artifact evidence change validation policy operation metrics workspace identity role api-key upgrade uninstall support version completion help"
 	switch strings.ToLower(strings.TrimSpace(shell)) {
 	case "bash":
 		return fmt.Sprintf(`_fornix_complete() {
@@ -294,7 +298,7 @@ func (c *operatorCLI) roleCommand(args []string) error {
 }
 
 func contractsPermissionDefaults() string {
-	return "workspace:read,task:read,task:mutate,task:execute,agent:run,agent:read,retrieval:read,retrieval:write,evidence:read,evidence:write,model:invoke,tool:execute,evaluation:read,evaluation:run,receipt:read,receipt:write,change:read,change:propose,change:approve,change:apply,change:validate,change:disclose"
+	return "workspace:read,task:read,task:mutate,task:execute,agent:run,agent:read,retrieval:read,retrieval:write,evidence:read,evidence:write,model:invoke,tool:execute,evaluation:read,evaluation:run,receipt:read,receipt:write,change:read,change:propose,change:approve,change:apply,change:validate,change:disclose,operation:read,operation:create,operation:execute"
 }
 
 func (c *operatorCLI) apiKeyCommand(args []string) error {
@@ -437,6 +441,61 @@ func (c *operatorCLI) runCommand(args []string) error {
 		return c.requestPrint(http.MethodPost, "/v1/agent/run/"+valueArg(args[1:], "id", "")+"/replay?workspace_id="+url.QueryEscape(c.workspace), map[string]any{}, false)
 	default:
 		return fmt.Errorf("unknown run command %q", args[0])
+	}
+}
+
+// operationCommand exposes the generic control-plane lifecycle without
+// inventing a repository-specific wrapper. Create accepts typed request/plan
+// JSON files because capability schemas belong to adapters; all subsequent
+// lifecycle commands use the same authenticated HTTP authority.
+func (c *operatorCLI) operationCommand(args []string) error {
+	if len(args) == 0 {
+		return errors.New("operation requires create, get, lease, renew, release, transition, or replay")
+	}
+	switch args[0] {
+	case "create":
+		requestFile := valueArg(args[1:], "request-file", "")
+		if requestFile == "" {
+			return errors.New("operation create requires --request-file PATH")
+		}
+		requestJSON, err := readBoundedJSONFile(requestFile, 1<<20)
+		if err != nil {
+			return err
+		}
+		body := map[string]any{"workspace_id": c.workspace, "request": json.RawMessage(requestJSON), "task_fence": uint64Value(args[1:], "task-fence", 0)}
+		if planFile := valueArg(args[1:], "plan-file", ""); planFile != "" {
+			planJSON, readErr := readBoundedJSONFile(planFile, 1<<20)
+			if readErr != nil {
+				return readErr
+			}
+			body["plan"] = json.RawMessage(planJSON)
+		}
+		body["idempotency_key"] = valueArg(args[1:], "idempotency", "operation:create:"+c.workspace+":"+sha256String(string(requestJSON)))
+		return c.requestPrint(http.MethodPost, "/v1/operations", body, false)
+	case "get":
+		return c.requestPrint(http.MethodGet, "/v1/operations/"+url.PathEscape(valueArg(args[1:], "id", ""))+"?workspace_id="+url.QueryEscape(c.workspace), nil, false)
+	case "lease":
+		return c.requestPrint(http.MethodPost, "/v1/operations/"+url.PathEscape(valueArg(args[1:], "id", ""))+"/lease?workspace_id="+url.QueryEscape(c.workspace), map[string]any{"ttl_ms": int64Value(args[1:], "ttl-ms", 30000)}, false)
+	case "renew":
+		path := "/v1/operations/" + url.PathEscape(valueArg(args[1:], "id", "")) + "/renew?workspace_id=" + url.QueryEscape(c.workspace)
+		return c.requestPrintWithHeaders(http.MethodPost, path, map[string]any{"ttl_ms": int64Value(args[1:], "ttl-ms", 30000)}, false, map[string]string{"X-Operation-Fence": strconv.FormatUint(uint64Value(args[1:], "fence", 0), 10)})
+	case "release":
+		path := "/v1/operations/" + url.PathEscape(valueArg(args[1:], "id", "")) + "/release?workspace_id=" + url.QueryEscape(c.workspace)
+		return c.requestPrintWithHeaders(http.MethodPost, path, nil, false, map[string]string{"X-Operation-Fence": strconv.FormatUint(uint64Value(args[1:], "fence", 0), 10)})
+	case "transition":
+		fence := uint64Value(args[1:], "fence", 0)
+		path := "/v1/operations/" + url.PathEscape(valueArg(args[1:], "id", "")) + "/transition?workspace_id=" + url.QueryEscape(c.workspace)
+		body := map[string]any{"to_status": valueArg(args[1:], "to-status", ""), "reason_code": valueArg(args[1:], "reason", "operator"), "idempotency_key": valueArg(args[1:], "idempotency", "operation:transition:"+c.workspace+":"+valueArg(args[1:], "id", "")+":"+valueArg(args[1:], "to-status", ""))}
+		response, err := c.requestWithHeaders(http.MethodPost, path, body, false, map[string]string{"X-Operation-Fence": strconv.FormatUint(fence, 10)})
+		if err != nil {
+			return err
+		}
+		return c.print(response)
+	case "replay":
+		path := "/v1/operations/" + url.PathEscape(valueArg(args[1:], "id", "")) + "/replay?workspace_id=" + url.QueryEscape(c.workspace)
+		return c.requestPrint(http.MethodPost, path, map[string]any{"from_version": int64Value(args[1:], "from-version", 0), "limit": intValue(args[1:], "limit", 4096)}, false)
+	default:
+		return fmt.Errorf("unknown operation command %q", args[0])
 	}
 }
 
@@ -896,7 +955,19 @@ func (c *operatorCLI) requestPrint(method, path string, body any, bootstrap bool
 	return c.print(response)
 }
 
+func (c *operatorCLI) requestPrintWithHeaders(method, path string, body any, bootstrap bool, headers map[string]string) error {
+	response, err := c.requestWithHeaders(method, path, body, bootstrap, headers)
+	if err != nil {
+		return err
+	}
+	return c.print(response)
+}
+
 func (c *operatorCLI) request(method, path string, body any, bootstrap bool) (map[string]any, error) {
+	return c.requestWithHeaders(method, path, body, bootstrap, nil)
+}
+
+func (c *operatorCLI) requestWithHeaders(method, path string, body any, bootstrap bool, headers map[string]string) (map[string]any, error) {
 	var data []byte
 	var err error
 	if body != nil {
@@ -919,6 +990,9 @@ func (c *operatorCLI) request(method, path string, body any, bootstrap bool) (ma
 	if c.workspace != "" {
 		req.Header.Set("X-Workspace-ID", c.workspace)
 	}
+	for name, value := range headers {
+		req.Header.Set(name, value)
+	}
 	req.Header.Set("X-Request-ID", "fornix-cli-"+sha256String(method+path+string(data)))
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
@@ -940,6 +1014,26 @@ func (c *operatorCLI) request(method, path string, body any, bootstrap bool) (ma
 		return map[string]any{"value": decoded}, nil
 	}
 	return result, nil
+}
+
+func readBoundedJSONFile(path string, maxBytes int64) ([]byte, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open JSON file: %w", err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read JSON file: %w", err)
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("JSON file exceeds %d bytes", maxBytes)
+	}
+	var value any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return nil, fmt.Errorf("invalid JSON file: %w", err)
+	}
+	return data, nil
 }
 
 func (c *operatorCLI) print(value any) error {

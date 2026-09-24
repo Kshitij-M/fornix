@@ -122,6 +122,13 @@ contains the current/planned domain matrix and the precise category boundary.
   compatibility shim now share workspace bootstrap, identity/role/API-key
   lifecycle, bounded ingest metadata, task/run inspection, disclosure, metrics,
   and reference-workflow semantics.
+- The generic operation authority is now available through authenticated HTTP
+  and CLI routes for typed operation creation, inspection, fenced lease
+  acquisition/takeover, legal transitions, and read-only replay. The adapter
+  supplies the actor from the authenticated principal, reuses the Postgres
+  operation store, and rejects stale fences and cross-workspace requests.
+  This is an operator/qualification surface, not a claim that every connector
+  is production-qualified.
 - The first non-repository reference workflow is now implemented as a
   fake-first incident path. It durably captures typed incident delivery,
   duplicate/conflict semantics, runbook and diagnostic steps, model/tool
@@ -221,6 +228,11 @@ contains the current/planned domain matrix and the precise category boundary.
   external connectors, link authorization, signed callbacks, host-independent
   egress controls, secret-manager resolution, and non-repository production
   execution remain outside this qualification.
+- The generic operation HTTP/CLI surface is intentionally narrow: it does not
+  expose a universal operation list endpoint, connector-specific payload
+  submission, external credential resolution, or a background operation
+  worker. Those concerns remain in the connector, workflow, policy, and Issue
+  #40 qualification layers.
 - The Issue #43 connector slice now provides a fake-first HTTP/API adapter
   (`read`, `list`, and approval-gated `submit_idempotent`) and a read-only SQL
   adapter (`describe`, `query_readonly`, and `explain_readonly`). Both enforce
@@ -270,6 +282,7 @@ make smoke-ingestion
 make smoke-changes
 make smoke-policy
 make smoke-package
+make smoke-universal-operation
 ```
 
 For release output produced by GoReleaser, run:

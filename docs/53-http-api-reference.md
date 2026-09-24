@@ -104,6 +104,53 @@ fail, and cancel requests must carry the current ownership identity and fence;
 stale workers fail closed. Postgres is the authority for task state and
 append-only lifecycle events.
 
+## Generic operations
+
+Generic operations are the domain-neutral control-plane surface. They identify
+typed capabilities and resources by workspace-scoped references and hashes;
+they do not accept executable code, shell fragments, credentials, prompts, or
+connector payloads. A connector adapter is responsible for validating its
+input and producing the input/schema hashes before admission.
+
+| Method | Route | Purpose | Required capability |
+| --- | --- | --- | --- |
+| `POST` | `/v1/operations` | Register one typed, idempotent operation intent | `operation:create` |
+| `GET` | `/v1/operations/{id}` | Read the operation projection and hashes | `operation:read` |
+| `POST` | `/v1/operations/{id}/lease` | Acquire or take over the operation lease | `operation:execute` |
+| `POST` | `/v1/operations/{id}/renew` | Renew the current operation lease | `operation:execute` |
+| `POST` | `/v1/operations/{id}/release` | Release the current operation lease | `operation:execute` |
+| `POST` | `/v1/operations/{id}/transition` | Advance one legal state transition | `operation:execute` |
+| `POST` | `/v1/operations/{id}/replay` | Verify the durable transition/event hash chain | `operation:read` |
+
+The create body contains a `request` object and may contain a normalized
+`plan`, bounded resource references, and provenance links. The authenticated
+principal supplies the actor; caller-supplied actor fields are overwritten.
+Task-bound requests must include the current task fence and are subsequently
+checked against the live task lease inside the same Postgres transaction.
+
+Lease acquisition returns a positive monotonic `fence`. Transition requests
+must send it as `X-Operation-Fence`; missing, expired, released, or stale
+fences fail closed. The operation lease is separate from the task lease, so a
+task-bound worker must hold both authorities. Reusing a command idempotency
+key with the same canonical request returns the existing result; changing the
+logical request or plan under that key is a conflict.
+
+The CLI maps this surface without adding a second authority:
+
+```sh
+fornix operation create --request-file operation-request.json [--plan-file operation-plan.json]
+fornix operation get --id op-123
+fornix operation lease --id op-123
+fornix operation transition --id op-123 --fence 1 --to-status planned
+fornix operation replay --id op-123
+```
+
+Replay is read-only. It validates the initial state anchor, contiguous
+versions, previous-state hashes, legal status transitions, linked event rows,
+and the current projection hash. It never calls a model, tool, connector, or
+external system. A committed external effect remains explicitly at-least-once
+and is represented as uncertain when delivery cannot be reconciled.
+
 ## Retrieval, evidence, and artifacts
 
 | Method | Route | Purpose |

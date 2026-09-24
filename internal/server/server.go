@@ -2795,6 +2795,14 @@ func (s *server) routes() http.Handler {
 		}
 		writeErr(w, http.StatusNotFound, "unknown incident workflow operation")
 	})
+	mux.HandleFunc("/v1/operations/", s.handleOperation)
+	mux.HandleFunc("/v1/operations", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleOperationCreate(w, r)
+	})
 	mux.HandleFunc("/v1/agent/runs", s.handleAgentRunList)
 	mux.HandleFunc("/v1/agent/run/", func(w http.ResponseWriter, r *http.Request) {
 		rest := strings.TrimPrefix(r.URL.Path, "/v1/agent/run/")

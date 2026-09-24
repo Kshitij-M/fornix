@@ -66,6 +66,14 @@ const (
 	PermissionPolicyRetire    Permission = "policy:retire"
 	PermissionPolicyResolve   Permission = "policy:resolve"
 	PermissionPolicyCompare   Permission = "policy:compare"
+	// PermissionOperationRead permits reading a workspace-scoped generic
+	// operation and verifying its append-only replay history.
+	PermissionOperationRead Permission = "operation:read"
+	// PermissionOperationCreate permits registering a typed operation intent.
+	PermissionOperationCreate Permission = "operation:create"
+	// PermissionOperationExecute permits leasing and advancing a generic
+	// operation. It never grants access to a connector or credential by itself.
+	PermissionOperationExecute Permission = "operation:execute"
 )
 
 // AdminWildcard is written with no whitespace on the wire. The named
@@ -79,7 +87,7 @@ var knownPermissions = map[Permission]struct{}{
 	PermissionEvidenceRead: {}, PermissionEvidenceWrite: {},
 	PermissionAgentRun: {}, PermissionAgentRead: {}, PermissionSchedulerRun: {},
 	PermissionWorkspaceRead: {}, PermissionWorkspaceWrite: {},
-	PermissionIdentityAdmin: {}, PermissionCredentialUse: {}, PermissionEvaluationRead: {}, PermissionEvaluationRun: {}, PermissionEvaluationWrite: {}, PermissionReceiptRead: {}, PermissionReceiptWrite: {}, PermissionChangeRead: {}, PermissionChangePropose: {}, PermissionChangeApprove: {}, PermissionChangeApply: {}, PermissionChangeValidate: {}, PermissionChangeDisclose: {}, PermissionPolicyRead: {}, PermissionPolicyCreate: {}, PermissionPolicyActivate: {}, PermissionPolicyRetire: {}, PermissionPolicyResolve: {}, PermissionPolicyCompare: {}, AdminWildcard: {},
+	PermissionIdentityAdmin: {}, PermissionCredentialUse: {}, PermissionEvaluationRead: {}, PermissionEvaluationRun: {}, PermissionEvaluationWrite: {}, PermissionReceiptRead: {}, PermissionReceiptWrite: {}, PermissionChangeRead: {}, PermissionChangePropose: {}, PermissionChangeApprove: {}, PermissionChangeApply: {}, PermissionChangeValidate: {}, PermissionChangeDisclose: {}, PermissionPolicyRead: {}, PermissionPolicyCreate: {}, PermissionPolicyActivate: {}, PermissionPolicyRetire: {}, PermissionPolicyResolve: {}, PermissionPolicyCompare: {}, PermissionOperationRead: {}, PermissionOperationCreate: {}, PermissionOperationExecute: {}, AdminWildcard: {},
 }
 
 // Principal is the authenticated caller presented to authorization checks.

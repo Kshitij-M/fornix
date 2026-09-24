@@ -24,7 +24,7 @@ FORNIX_REFERENCE_WORKDIR ?= /workspace/fixtures/reference-repo
 PROJECTION_PG_DSN ?= postgres://fornix:fornix-dev-only@host.docker.internal:55433/fornix?sslmode=disable
 FORNIX_TEST_PG_DSN ?=
 
-.PHONY: fmt fmt-check test test-race vet build package-check release-check smoke-package python-install python-check docs-check check verify hooks-install install-hooks hooks-uninstall uninstall-hooks hooks-check test-connectors smoke smoke-local-cli smoke-local-runtime smoke-events smoke-projection smoke-leases smoke-tasks smoke-retrieval smoke-provenance smoke-model smoke-tools smoke-agent smoke-scheduler smoke-identity smoke-artifacts smoke-artifact-output smoke-observability smoke-retrieval-quality smoke-retrieval-evaluation smoke-reference-workflow smoke-reference-openai smoke-ingestion smoke-work-receipts smoke-changes smoke-validation smoke-policy smoke-operation-admission smoke-reference-connectors smoke-workflow smoke-multidomain operator-reference dev-up dev-up-ai dev-up-watcher dev-run dev-logs dev-down
+.PHONY: fmt fmt-check test test-race vet build package-check release-check smoke-package python-install python-check docs-check check verify hooks-install install-hooks hooks-uninstall uninstall-hooks hooks-check test-connectors smoke smoke-local-cli smoke-local-runtime smoke-events smoke-projection smoke-leases smoke-tasks smoke-retrieval smoke-provenance smoke-model smoke-tools smoke-agent smoke-scheduler smoke-identity smoke-artifacts smoke-artifact-output smoke-observability smoke-retrieval-quality smoke-retrieval-evaluation smoke-reference-workflow smoke-reference-openai smoke-ingestion smoke-work-receipts smoke-changes smoke-validation smoke-policy smoke-operation-admission smoke-universal-operation smoke-reference-connectors smoke-workflow smoke-multidomain operator-reference dev-up dev-up-ai dev-up-watcher dev-run dev-logs dev-down
 
 fmt:
 	$(GOFMT_CMD) -w $(GO_FILES)
@@ -59,9 +59,11 @@ package-check:
 	sh -n scripts/install.sh
 	sh -n scripts/release/verify-artifacts.sh
 	sh -n scripts/test/v0.36-package-smokes.sh
+	sh -n scripts/test/v0.39-universal-operation-smokes.sh
 	@test -x scripts/install.sh
 	@test -x scripts/release/verify-artifacts.sh
 	@test -x scripts/test/v0.36-package-smokes.sh
+	@test -x scripts/test/v0.39-universal-operation-smokes.sh
 	$(GO_CMD) test ./cmd/fornix ./internal/credentials ./internal/profile ./internal/runtime -count=1
 
 release-check:
@@ -154,6 +156,10 @@ smoke-policy:
 smoke-operation-admission:
 	FORNIX_TEST_PG_DSN=$(PROJECTION_PG_DSN) $(GO_CMD) test ./internal/contracts ./internal/policy ./internal/store -run 'TestAdmission|TestOperation' -count=1 -v
 
+smoke-universal-operation:
+	FORNIX_TEST_PG_DSN=$(PROJECTION_PG_DSN) $(GO_CMD) test ./internal/server -run 'Test(GenericOperationHTTP|SecurityMiddleware.*GenericOperation)' -count=1 -v
+	FORNIX_URL=$(FORNIX_URL) FORNIX_KEY=$(FORNIX_KEY) FORNIX_WORKSPACE_ID=$${FORNIX_WORKSPACE_ID:-universal-operation-smoke} scripts/test/v0.39-universal-operation-smokes.sh
+
 smoke-reference-connectors:
 	FORNIX_TEST_PG_DSN=$(PROJECTION_PG_DSN) $(GO_CMD) test ./internal/connector ./internal/adapters/httpapi ./internal/adapters/sqlreadonly -count=1 -v
 	FORNIX_TEST_PG_DSN=$(PROJECTION_PG_DSN) $(GO_CMD) test ./internal/store -run 'TestConnectorBinding' -count=1 -v
@@ -196,6 +202,7 @@ smoke:
 	$(MAKE) smoke-reference-connectors
 	$(MAKE) smoke-workflow
 	$(MAKE) smoke-multidomain
+	$(MAKE) smoke-universal-operation
 	$(MAKE) smoke-local-cli
 
 check: fmt-check test vet python-check docs-check package-check

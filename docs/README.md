@@ -54,7 +54,7 @@ engineering history:
   summaries. A completion note is the more reliable source when a historical
   foundation intention differs from the current implementation.
 
-The project has 28 numbered repository/control-plane and universal-operation
+The project has 29 numbered repository/control-plane and universal-operation
 implementation loops plus the packaging and transformation delivery records
 below. Those loops build the control-plane substrate and reference adapters;
 they are not a claim that the complete production-system operations product is
@@ -77,7 +77,7 @@ the implementation sequence is tracked by [Issue #38](https://github.com/Kshitij
 | [#43](https://github.com/Kshitij-M/fornix/issues/43) | HTTP/API and read-only SQL connectors | Alpha bounded reference adapters: HTTP read/list/idempotent-submit and SQL describe/query/explain; production qualification remains |
 | [#44](https://github.com/Kshitij-M/fornix/issues/44) | Durable multi-step workflow runtime | Alpha foundation implemented; generic durable steps, waits, fences, replay, and bounded read-only fan-out |
 | [#42](https://github.com/Kshitij-M/fornix/issues/42) | Multi-domain reference workflow | Fake-first incident workflow implemented; live connector and production qualification remain |
-| [#40](https://github.com/Kshitij-M/fornix/issues/40) | Universal production qualification | Planned security, scale, recovery, backup/restore, and operational evidence |
+| [#40](https://github.com/Kshitij-M/fornix/issues/40) | Universal production qualification | In progress: authority/API qualification slice; security, scale, recovery, backup/restore, and operational evidence remain |
 
 These issues are a dependency-ordered roadmap, not a claim that all listed
 connectors or workflows are available in the alpha. Supporting issues
@@ -119,6 +119,7 @@ and [`71-loop-25-completion.md`](71-loop-25-completion.md).
 | 26 | Bounded universal reference connectors | [`72-reference-connectors-foundation.md`](72-reference-connectors-foundation.md) | [`73-loop-26-completion.md`](73-loop-26-completion.md) |
 | 27 | Durable multi-step workflow runtime | [`74-workflow-runtime-foundation.md`](74-workflow-runtime-foundation.md) | [`75-loop-27-completion.md`](75-loop-27-completion.md) |
 | 28 | Multi-domain incident reference workflow | [`76-multi-domain-reference-workflow-foundation.md`](76-multi-domain-reference-workflow-foundation.md) | [`77-loop-28-completion.md`](77-loop-28-completion.md) |
+| 29 | Universal production qualification: operation authority and API surface | [`78-universal-production-qualification-foundation.md`](78-universal-production-qualification-foundation.md) | [`79-loop-29-completion.md`](79-loop-29-completion.md) |
 
 ## Local package and managed runtime
 

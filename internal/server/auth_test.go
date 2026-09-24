@@ -51,6 +51,15 @@ func newServerAuthTest(t *testing.T, permissions []contracts.Permission) (*serve
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cleanupCancel()
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.operation_leases WHERE workspace_id=$1`, workspaceID)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.operation_transitions WHERE workspace_id=$1`, workspaceID)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.operation_links WHERE workspace_id=$1`, workspaceID)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.operation_resources WHERE workspace_id=$1`, workspaceID)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.operation_callbacks WHERE workspace_id=$1`, workspaceID)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.operation_effects WHERE workspace_id=$1`, workspaceID)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.operation_attempts WHERE workspace_id=$1`, workspaceID)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.operation_idempotency WHERE workspace_id=$1`, workspaceID)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.operations WHERE workspace_id=$1`, workspaceID)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.authorization_audit WHERE workspace_id=$1`, workspaceID)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.api_keys WHERE workspace_id=$1`, workspaceID)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.identity_role_bindings WHERE workspace_id=$1`, workspaceID)
@@ -58,7 +67,8 @@ func newServerAuthTest(t *testing.T, permissions []contracts.Permission) (*serve
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.identities WHERE workspace_id=$1`, workspaceID)
 		pool.Close()
 	})
-	return &server{pool: pool, auth: auth, authMode: "workspace"}, pool, workspaceID, token
+	events := store.NewEventStore(pool)
+	return &server{pool: pool, events: events, operations: store.NewOperationStore(pool, events), auth: auth, authMode: "workspace"}, pool, workspaceID, token
 }
 
 func TestSecurityMiddlewareEnforcesWorkspaceAndAuthenticatedActor(t *testing.T) {
@@ -146,6 +156,51 @@ func TestSecurityMiddlewareAuthorizesEvaluationOperatorSurface(t *testing.T) {
 		if response.Code != http.StatusNoContent {
 			t.Fatalf("authorized %s %s response=%d body=%s", item.method, item.path, response.Code, response.Body.String())
 		}
+	}
+}
+
+func TestSecurityMiddlewareAuthorizesGenericOperationSurface(t *testing.T) {
+	srv, _, workspaceID, token := newServerAuthTest(t, []contracts.Permission{
+		contracts.PermissionOperationRead,
+		contracts.PermissionOperationCreate,
+		contracts.PermissionOperationExecute,
+	})
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	handler := withRequestMiddleware(srv.securityMiddleware(next), 1<<20)
+	cases := []struct {
+		method string
+		path   string
+		body   string
+	}{
+		{http.MethodPost, "/v1/operations", `{"workspace_id":"` + workspaceID + `"}`},
+		{http.MethodGet, "/v1/operations/op-1?workspace_id=" + workspaceID, ""},
+		{http.MethodPost, "/v1/operations/op-1/lease?workspace_id=" + workspaceID, `{}`},
+		{http.MethodPost, "/v1/operations/op-1/transition?workspace_id=" + workspaceID, `{"to_status":"planned","idempotency_key":"operation-auth"}`},
+		{http.MethodPost, "/v1/operations/op-1/replay?workspace_id=" + workspaceID, `{}`},
+	}
+	for _, item := range cases {
+		request := httptest.NewRequest(item.method, item.path, strings.NewReader(item.body))
+		request.Header.Set("Authorization", "Bearer "+token)
+		request.Header.Set("X-Request-ID", "operation-auth-"+item.method+"-"+item.path)
+		response := httptest.NewRecorder()
+		handler.ServeHTTP(response, request)
+		if response.Code != http.StatusNoContent {
+			t.Fatalf("authorized %s %s response=%d body=%s", item.method, item.path, response.Code, response.Body.String())
+		}
+	}
+}
+
+func TestSecurityMiddlewareDeniesGenericOperationWithoutExecutionCapability(t *testing.T) {
+	srv, _, workspaceID, token := newServerAuthTest(t, []contracts.Permission{contracts.PermissionOperationRead})
+	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { t.Fatal("denied operation mutation reached handler") })
+	handler := withRequestMiddleware(srv.securityMiddleware(next), 1<<20)
+	request := httptest.NewRequest(http.MethodPost, "/v1/operations/op-1/lease?workspace_id="+workspaceID, strings.NewReader(`{}`))
+	request.Header.Set("Authorization", "Bearer "+token)
+	request.Header.Set("X-Request-ID", "operation-auth-deny")
+	response := httptest.NewRecorder()
+	handler.ServeHTTP(response, request)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("operation mutation response=%d body=%s", response.Code, response.Body.String())
 	}
 }
 
