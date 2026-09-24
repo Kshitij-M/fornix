@@ -179,7 +179,7 @@ Work:
   change      Propose, approve, apply, and disclose repository changes
   validation  Run and inspect post-change validation
   policy      Inspect and resolve validation policy packs
-	 operation   Create, execute, lease, renew, release, effect recovery, and replay operations
+	 operation   Create, claim, execute, lease, renew, release, effect recovery, and replay operations
   incident    Run the bounded multi-domain incident workflow
 
 Identity and diagnostics:
@@ -450,7 +450,7 @@ func (c *operatorCLI) runCommand(args []string) error {
 // lifecycle commands use the same authenticated HTTP authority.
 func (c *operatorCLI) operationCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("operation requires create, execute, get, lease, renew, release, effect-reserve, effect-get, effect-state, effect-lease, effect-renew, effect-release, effect-recovery, transition, or replay")
+		return errors.New("operation requires create, claim, execute, get, lease, renew, release, effect-reserve, effect-get, effect-state, effect-lease, effect-renew, effect-release, effect-recovery, transition, or replay")
 	}
 	switch args[0] {
 	case "create":
@@ -476,6 +476,10 @@ func (c *operatorCLI) operationCommand(args []string) error {
 		}
 		body["idempotency_key"] = idempotencyKey
 		return c.requestPrint(http.MethodPost, "/v1/operations", body, false)
+	case "claim":
+		path := "/v1/operations/claims?workspace_id=" + url.QueryEscape(c.workspace)
+		body := map[string]any{"limit": intValue(args[1:], "limit", 64), "ttl_ms": int64Value(args[1:], "ttl-ms", 90000)}
+		return c.requestPrint(http.MethodPost, path, body, false)
 	case "execute":
 		id := valueArg(args[1:], "id", "")
 		if id == "" {

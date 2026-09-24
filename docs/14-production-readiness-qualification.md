@@ -146,6 +146,10 @@ contains the current/planned domain matrix and the precise category boundary.
   operation store, and rejects stale fences and cross-workspace requests.
   This is an operator/qualification surface, not a claim that every connector
   is production-qualified.
+- Generic operations now have a bounded Postgres queue-claim API and CLI
+  command. Claims are ordered deterministically, workspace-scoped, fenced,
+  expiry-recoverable, and exclude uncertain external-effect work. This is a
+  worker-claim primitive, not a background scheduler or provider dispatcher.
 - Built-in connector capabilities are now admitted through explicit,
   workspace-scoped trust snapshots that pin connector identity and definition
   hashes. Credential-bearing HTTP adapters can use a bounded lease resolver;

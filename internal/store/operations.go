@@ -238,6 +238,14 @@ type OperationLeaseResult struct {
 	Takeover bool
 }
 
+// OperationClaim is one atomically selected operation and its fenced worker
+// lease. The operation remains authoritative in Postgres; the claim is only
+// permission for a worker to perform the next bounded step.
+type OperationClaim struct {
+	Operation Operation
+	Lease     OperationLease
+}
+
 type OperationAttemptInput struct {
 	WorkspaceID    string
 	OperationID    string
@@ -815,6 +823,84 @@ func (s *OperationStore) AcquireLeaseTx(ctx context.Context, tx pgx.Tx, workspac
 		return OperationLeaseResult{}, errors.New("operation lease takeover did not produce a higher active fence")
 	}
 	return OperationLeaseResult{Lease: updated, Acquired: true, Takeover: true}, nil
+}
+
+// ClaimReady selects a bounded deterministic batch of due operations and
+// acquires their operation leases in the same transaction. The operation row
+// lock serializes a queue claim with a direct lease acquisition; the monotonic
+// lease fence remains the authority for every later mutation.
+//
+// Generic queue selection intentionally excludes awaiting_external. An
+// uncertain provider effect must be handled through the independent effect
+// recovery lease and reconciliation API, never by silently redispatching it.
+func (s *OperationStore) ClaimReady(ctx context.Context, workspaceID, ownerID string, limit int, ttl time.Duration) ([]OperationClaim, error) {
+	if s == nil || s.pool == nil {
+		return nil, errors.New("operation store is not configured")
+	}
+	workspaceID, ownerID = strings.TrimSpace(workspaceID), strings.TrimSpace(ownerID)
+	if workspaceID == "" || ownerID == "" {
+		return nil, errors.New("workspace_id and owner_id are required")
+	}
+	if limit <= 0 || limit > 64 {
+		limit = 64
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin operation queue claim: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := setWorkspaceContext(ctx, tx, workspaceID); err != nil {
+		return nil, err
+	}
+	rows, err := tx.Query(ctx, `
+		SELECT o.id
+		FROM fornix.operations o
+		LEFT JOIN fornix.operation_leases l
+		  ON l.workspace_id=o.workspace_id AND l.operation_id=o.id
+		WHERE o.workspace_id=$1
+		  AND o.status IN ('created','planned','admitted','awaiting_retry','verifying','recovery_required')
+		  AND (o.next_retry_at IS NULL OR o.next_retry_at <= clock_timestamp())
+		  AND (l.operation_id IS NULL OR l.released_at IS NOT NULL OR l.lease_until <= clock_timestamp())
+		ORDER BY COALESCE(o.next_retry_at, o.created_at), o.created_at, o.id
+		FOR UPDATE OF o SKIP LOCKED
+		LIMIT $2`, workspaceID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("select ready operations: %w", err)
+	}
+	defer rows.Close()
+	operationIDs := make([]string, 0, limit)
+	for rows.Next() {
+		var operationID string
+		if err := rows.Scan(&operationID); err != nil {
+			return nil, fmt.Errorf("scan ready operation: %w", err)
+		}
+		operationIDs = append(operationIDs, operationID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate ready operations: %w", err)
+	}
+	claims := make([]OperationClaim, 0, len(operationIDs))
+	for _, operationID := range operationIDs {
+		lease, err := s.AcquireLeaseTx(ctx, tx, workspaceID, operationID, ownerID, ttl)
+		if errors.Is(err, ErrOperationLeaseHeld) {
+			// A direct claimant may have committed between candidate selection
+			// and this row's lock acquisition. It is safe to omit this item;
+			// the next poll will see its active lease.
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("claim operation %s: %w", operationID, err)
+		}
+		operation, err := readOperationByID(ctx, tx, workspaceID, operationID)
+		if err != nil {
+			return nil, fmt.Errorf("read claimed operation %s: %w", operationID, err)
+		}
+		claims = append(claims, OperationClaim{Operation: operation, Lease: lease.Lease})
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit operation queue claim: %w", err)
+	}
+	return claims, nil
 }
 
 func (s *OperationStore) RenewLease(ctx context.Context, lease OperationLease, ttl time.Duration) (OperationLease, error) {

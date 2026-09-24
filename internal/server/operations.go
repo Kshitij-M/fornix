@@ -33,6 +33,11 @@ type operationLeaseRequest struct {
 	TTLMS int64 `json:"ttl_ms,omitempty"`
 }
 
+type operationClaimRequest struct {
+	Limit int   `json:"limit,omitempty"`
+	TTLMS int64 `json:"ttl_ms,omitempty"`
+}
+
 type operationEffectLeaseRequest struct {
 	TTLMS int64 `json:"ttl_ms,omitempty"`
 }
@@ -141,6 +146,46 @@ func (s *server) handleOperationCreate(w http.ResponseWriter, r *http.Request) {
 		"event":     result.Event,
 		"duplicate": result.Duplicate,
 	})
+}
+
+// handleOperationClaims claims due, non-effect-dispatch operation work for
+// the authenticated workspace worker. The response contains only typed
+// operation and lease metadata; an adapter still owns execution and external
+// effect reconciliation.
+func (s *server) handleOperationClaims(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuth(r) {
+		writeErr(w, http.StatusUnauthorized, "unauthorised")
+		return
+	}
+	principal, ok := principalFromRequest(r)
+	if !ok || !principal.Authenticated {
+		writeErr(w, http.StatusUnauthorized, "unauthorised")
+		return
+	}
+	var input operationClaimRequest
+	if r.Body != nil {
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&input); err != nil && !errors.Is(err, io.EOF) {
+			writeErr(w, http.StatusBadRequest, "invalid operation claim request")
+			return
+		}
+	}
+	workspaceID := requestWorkspace(r, r.URL.Query().Get("workspace_id"))
+	if workspaceID != principal.WorkspaceID {
+		writeOperationErr(w, store.ErrOperationWorkspace)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	claims, err := s.operations.ClaimReady(ctx, workspaceID, principal.ID, input.Limit, boundedOperationLeaseTTL(input.TTLMS))
+	if err != nil {
+		writeOperationErr(w, err)
+		return
+	}
+	items := make([]map[string]any, 0, len(claims))
+	for _, claim := range claims {
+		items = append(items, map[string]any{"operation": publicOperation(claim.Operation), "lease": publicOperationLease(claim.Lease)})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"claims": items, "count": len(items)})
 }
 
 func (s *server) handleOperation(w http.ResponseWriter, r *http.Request) {
@@ -609,6 +654,17 @@ func effectFenceHeader(r *http.Request) uint64 {
 }
 
 func boundedEffectLeaseTTL(milliseconds int64) time.Duration {
+	if milliseconds <= 0 {
+		return 90 * time.Second
+	}
+	maxMilliseconds := int64((24 * time.Hour) / time.Millisecond)
+	if milliseconds > maxMilliseconds {
+		milliseconds = maxMilliseconds
+	}
+	return time.Duration(milliseconds) * time.Millisecond
+}
+
+func boundedOperationLeaseTTL(milliseconds int64) time.Duration {
 	if milliseconds <= 0 {
 		return 90 * time.Second
 	}

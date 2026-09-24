@@ -120,6 +120,53 @@ func TestGenericOperationHTTPIsIdempotentFencedReplayableAndWorkspaceScoped(t *t
 	}
 }
 
+func TestGenericOperationHTTPClaimsReadyWorkWithWorkspaceFence(t *testing.T) {
+	srv, _, workspaceID, token := newServerAuthTest(t, []contracts.Permission{contracts.PermissionOperationCreate, contracts.PermissionOperationExecute})
+	handler := withRequestMiddleware(srv.securityMiddleware(srv.routes()), 2<<20)
+	for index := 0; index < 2; index++ {
+		request := genericOperationRequest(workspaceID)
+		request.ID = "operation-claim-http-" + strconv.Itoa(index)
+		request.RequestID = "request-claim-http-" + strconv.Itoa(index)
+		request.IdempotencyKey = "operation-claim-http-" + strconv.Itoa(index)
+		body, err := json.Marshal(operationCreateRequest{Request: request, Idempotency: request.IdempotencyKey})
+		if err != nil {
+			t.Fatal(err)
+		}
+		response := performOperationRequest(handler, token, workspaceID, http.MethodPost, "/v1/operations", body, nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("create status=%d body=%s", response.Code, response.Body.String())
+		}
+	}
+	claimPath := "/v1/operations/claims?workspace_id=" + workspaceID
+	claimed := performOperationRequest(handler, token, workspaceID, http.MethodPost, claimPath, []byte(`{"limit":2,"ttl_ms":30000}`), nil)
+	if claimed.Code != http.StatusOK {
+		t.Fatalf("claim status=%d body=%s", claimed.Code, claimed.Body.String())
+	}
+	claimJSON := decodeOperationJSON(t, claimed)
+	claimItems, ok := claimJSON["claims"].([]any)
+	if !ok || len(claimItems) != 2 {
+		t.Fatalf("claims=%s, want two", responseJSON(claimJSON))
+	}
+	for _, raw := range claimItems {
+		item, ok := raw.(map[string]any)
+		if !ok {
+			t.Fatalf("claim item is not an object: %#v", raw)
+		}
+		lease := objectValue(t, item, "lease")
+		if stringValue(t, lease, "workspace_id") != workspaceID || stringValue(t, lease, "owner_id") == "" || stringValue(t, lease, "fence") != "1" {
+			t.Fatalf("invalid claim lease=%s", responseJSON(lease))
+		}
+	}
+	duplicate := performOperationRequest(handler, token, workspaceID, http.MethodPost, claimPath, []byte(`{"limit":2,"ttl_ms":30000}`), nil)
+	if duplicate.Code != http.StatusOK || stringValue(t, decodeOperationJSON(t, duplicate), "count") != "0" {
+		t.Fatalf("active leases were claimed again status=%d body=%s", duplicate.Code, duplicate.Body.String())
+	}
+	foreign := performOperationRequest(handler, token, "foreign-workspace", http.MethodPost, "/v1/operations/claims?workspace_id=foreign-workspace", []byte(`{"limit":1}`), nil)
+	if foreign.Code != http.StatusForbidden {
+		t.Fatalf("cross-workspace claim status=%d body=%s", foreign.Code, foreign.Body.String())
+	}
+}
+
 func TestGenericOperationHTTPQualificationLatency(t *testing.T) {
 	srv, _, workspaceID, token := newServerAuthTest(t, []contracts.Permission{contracts.PermissionOperationCreate})
 	handler := withRequestMiddleware(srv.securityMiddleware(srv.routes()), 2<<20)

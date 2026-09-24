@@ -115,6 +115,7 @@ input and producing the input/schema hashes before admission.
 | Method | Route | Purpose | Required capability |
 | --- | --- | --- | --- |
 | `POST` | `/v1/operations` | Register one typed, idempotent operation intent | `operation:create` |
+| `POST` | `/v1/operations/claims` | Claim a bounded deterministic batch of due non-effect-dispatch work | `operation:execute` |
 | `GET` | `/v1/operations/{id}` | Read the operation projection and hashes | `operation:read` |
 | `POST` | `/v1/operations/{id}/lease` | Acquire or take over the operation lease | `operation:execute` |
 | `POST` | `/v1/operations/{id}/renew` | Renew the current operation lease | `operation:execute` |
@@ -155,10 +156,25 @@ execution delivery returns the committed result without requiring a second
 connector call. Raw output, credentials, and provider diagnostics remain in
 their domain authorities and are not included in the operation result.
 
+Workers can claim due generic work in one workspace-scoped transaction:
+
+```sh
+fornix operation claim --limit 16 --ttl-ms 90000
+```
+
+The equivalent HTTP call is `POST /v1/operations/claims?workspace_id=...`
+with `{ "limit": 16, "ttl_ms": 90000 }`. The authenticated principal becomes
+the lease owner. Selection is bounded and ordered by due time, creation time,
+and operation ID; active leases are skipped and expired leases are taken over
+with a higher fence. `awaiting_external` is intentionally excluded: uncertain
+provider outcomes require the separate effect-recovery lease. Claiming work
+does not execute a connector or external effect.
+
 The CLI maps this surface without adding a second authority:
 
 ```sh
 fornix operation create --request-file operation-request.json [--plan-file operation-plan.json]
+fornix operation claim --limit 16 --ttl-ms 90000
 fornix operation get --id op-123
 fornix operation lease --id op-123
 fornix operation execute --id op-123

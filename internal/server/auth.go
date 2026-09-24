@@ -252,6 +252,8 @@ func permissionForRequest(r *http.Request) contracts.Permission {
 			return contracts.PermissionOperationRead
 		}
 		return contracts.PermissionOperationCreate
+	case path == "/v1/operations/claims":
+		return contracts.PermissionOperationExecute
 	case strings.HasPrefix(path, "/v1/operations/"):
 		if r.Method == http.MethodGet || strings.HasSuffix(path, "/replay") {
 			return contracts.PermissionOperationRead
