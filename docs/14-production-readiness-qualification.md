@@ -56,6 +56,10 @@ contains the current/planned domain matrix and the precise category boundary.
   Compose role remains a table-owning compatibility role; production cannot
   claim database-enforced tenant isolation until role separation is deployed
   and the qualification smoke passes.
+- An opt-in bounded generic-operation capacity harness that measures concurrent
+  idempotent create/replay and fenced lease work, p50/p95/max latency,
+  Postgres counters, and relation growth. This is local qualification
+  evidence, not an HA, soak, or production SLO claim.
 - Liveness/readiness endpoints, request IDs, body limits, timeouts, and
   graceful shutdown.
 - Concurrent task claiming and completion.

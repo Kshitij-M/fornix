@@ -12,6 +12,7 @@ database version, duration, and result.
 | Postgres integration | `FORNIX_TEST_PG_DSN=... make check` | Disposable PostgreSQL/pgvector; migrations applied by tests | No remote provider | Yes, in the test database; use a disposable workspace/database |
 | Universal effect slice | `PROJECTION_PG_DSN=... make smoke-universal-effects` | Disposable Postgres | No provider call | Yes, test operation/effect rows |
 | PostgreSQL workspace isolation | `FORNIX_RLS_TEST_DSN=... make qualification-workspace-isolation` | Disposable database cloned from a migrated authority; dedicated non-owner `NOBYPASSRLS` role | No provider call | Rolled-back qualification transaction only |
+| Generic operation capacity | `FORNIX_CAPACITY_PG_DSN=... make qualification-capacity` | Dedicated disposable Postgres database | No provider call | Own workspace rows plus retained append-only events |
 | HTTP service smoke | `make smoke-universal-operation`, `make smoke-reference-connectors` | Running Fornix HTTP server and Postgres | Reference HTTP/SQL adapters only when configured by the smoke | Yes, scoped test workspace |
 | Managed Docker runtime | `make smoke-local-runtime` | Docker Desktop/Engine and Compose v2 | Fake provider by default | Yes, local runtime volume |
 | Full repository smoke | `make smoke` | Running service, Postgres, Python helpers, Docker for local runtime | Fake-first; optional adapters are explicit | Yes, disposable smoke workspaces |
@@ -85,6 +86,25 @@ writes succeed, foreign reads are invisible, and foreign writes fail. It uses
 an explicit rollback and creates no durable qualification fixture. The
 production role-transfer and privilege-grant procedure remains deployment
 specific and must be reviewed by the database owner.
+
+## Generic operation capacity qualification
+
+Run the bounded capacity harness only against a disposable database:
+
+```sh
+FORNIX_CAPACITY_PG_DSN='postgres://USER:PASSWORD@HOST:PORT/DISPOSABLE_DATABASE?sslmode=disable' \
+FORNIX_CAPACITY_OPERATIONS=128 FORNIX_CAPACITY_WORKERS=4 \
+  make qualification-capacity
+```
+
+The harness clamps operations to 2,048 and workers to 32. It reports create
+and lease p50/p95/max latency, duplicate-hit and authoritative row counts,
+Postgres transaction/buffer deltas, and relation-size growth. Set
+`FORNIX_CAPACITY_MAX_P95_MS` to make the run fail when either measured p95
+exceeds an explicitly chosen local budget. The reported counters are local
+observations and must not be promoted to a service SLO without repeating the
+run on the target Postgres topology, network, storage class, pool size, and
+retention policy.
 
 ## Current production gates still open
 
