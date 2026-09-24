@@ -54,7 +54,7 @@ engineering history:
   summaries. A completion note is the more reliable source when a historical
   foundation intention differs from the current implementation.
 
-The project has 29 numbered repository/control-plane and universal-operation
+The project has 30 numbered repository/control-plane and universal-operation
 implementation loops plus the packaging and transformation delivery records
 below. Those loops build the control-plane substrate and reference adapters;
 they are not a claim that the complete production-system operations product is
@@ -120,6 +120,7 @@ and [`71-loop-25-completion.md`](71-loop-25-completion.md).
 | 27 | Durable multi-step workflow runtime | [`74-workflow-runtime-foundation.md`](74-workflow-runtime-foundation.md) | [`75-loop-27-completion.md`](75-loop-27-completion.md) |
 | 28 | Multi-domain incident reference workflow | [`76-multi-domain-reference-workflow-foundation.md`](76-multi-domain-reference-workflow-foundation.md) | [`77-loop-28-completion.md`](77-loop-28-completion.md) |
 | 29 | Universal production qualification: operation authority and API surface | [`78-universal-production-qualification-foundation.md`](78-universal-production-qualification-foundation.md) | [`79-loop-29-completion.md`](79-loop-29-completion.md) |
+| 30 | Universal credential leases and capability trust admission | [`80-credential-egress-trust-foundation.md`](80-credential-egress-trust-foundation.md) | [`81-loop-30-completion.md`](81-loop-30-completion.md) |
 
 ## Local package and managed runtime
 

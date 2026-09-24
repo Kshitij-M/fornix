@@ -92,18 +92,31 @@ type Connector struct {
 	definitionRef      contracts.ConnectorRef
 	resolver           connector.PayloadResolver
 	credentialResolver CredentialResolver
+	credentialLease    credentials.LeaseResolver
 	client             *http.Client
 	definitions        map[string]contracts.CapabilityDefinition
 }
 
 func NewConnector(binding Binding, resolver connector.PayloadResolver, credentialResolver CredentialResolver, client *http.Client) (*Connector, error) {
+	return newConnector(binding, resolver, credentialResolver, nil, client)
+}
+
+// NewConnectorWithLeaseResolver configures the preferred secret-manager seam.
+// The legacy CredentialResolver remains available for development adapters,
+// but a lease resolver supplies expiry and revocation semantics at the
+// outbound request boundary.
+func NewConnectorWithLeaseResolver(binding Binding, resolver connector.PayloadResolver, credentialLease credentials.LeaseResolver, client *http.Client) (*Connector, error) {
+	return newConnector(binding, resolver, nil, credentialLease, client)
+}
+
+func newConnector(binding Binding, resolver connector.PayloadResolver, credentialResolver CredentialResolver, credentialLease credentials.LeaseResolver, client *http.Client) (*Connector, error) {
 	if err := binding.Normalize(); err != nil {
 		return nil, err
 	}
 	if resolver == nil {
 		return nil, fmt.Errorf("http payload resolver is required")
 	}
-	if binding.CredentialRef != "" && credentialResolver == nil {
+	if binding.CredentialRef != "" && credentialResolver == nil && credentialLease == nil {
 		return nil, fmt.Errorf("http credential resolver is required for configured credential reference")
 	}
 	ref := contracts.ConnectorRef{WorkspaceID: binding.WorkspaceID, Name: ConnectorName, Version: ConnectorVersion}
@@ -146,7 +159,7 @@ func NewConnector(binding Binding, resolver connector.PayloadResolver, credentia
 		}
 		definitions[spec.name] = definition
 	}
-	return &Connector{binding: binding, definitionRef: ref, resolver: resolver, credentialResolver: credentialResolver, client: transportClient, definitions: definitions}, nil
+	return &Connector{binding: binding, definitionRef: ref, resolver: resolver, credentialResolver: credentialResolver, credentialLease: credentialLease, client: transportClient, definitions: definitions}, nil
 }
 
 func (b *Binding) Normalize() error {
@@ -247,7 +260,7 @@ func (c *Connector) Capabilities() []connector.Capability {
 }
 
 func (c *Connector) Health(ctx context.Context) connector.HealthStatus {
-	if c == nil || c.client == nil || c.resolver == nil || c.binding.CredentialRef != "" && c.credentialResolver == nil {
+	if c == nil || c.client == nil || c.resolver == nil || c.binding.CredentialRef != "" && c.credentialResolver == nil && c.credentialLease == nil {
 		return connector.HealthStatus{Status: connector.HealthUnavailable, Reason: "http connector is not configured"}
 	}
 	if err := ctx.Err(); err != nil {
@@ -341,16 +354,35 @@ func (c *capability) Execute(ctx context.Context, request contracts.OperationReq
 	if len(body) > 0 && req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	if c.parent.credentialResolver != nil && c.parent.binding.CredentialRef != "" {
-		secret, resolveErr := c.parent.credentialResolver(runCtx, request.WorkspaceID, c.parent.binding.CredentialRef)
-		if resolveErr != nil {
-			return contracts.OperationResult{}, &connector.FailureError{Code: "credential_unavailable", Retryable: false, Err: resolveErr}
+	if c.parent.binding.CredentialRef != "" {
+		var secret credentials.Secret
+		var release func()
+		if c.parent.credentialLease != nil {
+			purpose := "http:" + c.parent.binding.ID
+			lease, resolveErr := c.parent.credentialLease.Acquire(runCtx, request.WorkspaceID, c.parent.binding.CredentialRef, purpose, credentials.DefaultLeaseTTL)
+			if resolveErr != nil {
+				return contracts.OperationResult{}, &connector.FailureError{Code: "credential_unavailable", Retryable: false, Err: resolveErr}
+			}
+			if validateErr := lease.Validate(request.WorkspaceID, c.parent.binding.CredentialRef, purpose, time.Now().UTC()); validateErr != nil {
+				return contracts.OperationResult{}, &connector.FailureError{Code: "credential_unavailable", Retryable: false, Err: validateErr}
+			}
+			secret = lease.Secret
+			release = func() { _ = c.parent.credentialLease.Release(context.Background(), lease) }
+		} else {
+			resolved, resolveErr := c.parent.credentialResolver(runCtx, request.WorkspaceID, c.parent.binding.CredentialRef)
+			if resolveErr != nil {
+				return contracts.OperationResult{}, &connector.FailureError{Code: "credential_unavailable", Retryable: false, Err: resolveErr}
+			}
+			secret = resolved
 		}
 		secretBytes := secret.Bytes()
 		req.Header.Set("Authorization", "Bearer "+string(secretBytes))
 		secret.Clear()
 		for index := range secretBytes {
 			secretBytes[index] = 0
+		}
+		if release != nil {
+			defer release()
 		}
 	}
 	if c.name == SubmitCapabilityName {

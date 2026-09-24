@@ -49,3 +49,18 @@ func TestOperationCLICompletionIncludesGenericSurface(t *testing.T) {
 		}
 	}
 }
+
+func TestOperationCreateUsesRequestIdempotencyByDefault(t *testing.T) {
+	key, err := operationCreateIdempotencyKey([]byte(`{"idempotency_key":"request-key"}`), nil, "workspace-a")
+	if err != nil || key != "request-key" {
+		t.Fatalf("request idempotency key=%q err=%v", key, err)
+	}
+	key, err = operationCreateIdempotencyKey([]byte(`{"idempotency_key":"request-key"}`), []string{"--idempotency", "explicit-key"}, "workspace-a")
+	if err != nil || key != "explicit-key" {
+		t.Fatalf("explicit idempotency key=%q err=%v", key, err)
+	}
+	key, err = operationCreateIdempotencyKey([]byte(`{"request_id":"request-only"}`), nil, "workspace-a")
+	if err != nil || !strings.HasPrefix(key, "operation:create:workspace-a:") {
+		t.Fatalf("generated idempotency key=%q err=%v", key, err)
+	}
+}

@@ -33,6 +33,10 @@ func (s *server) handleIncidentWorkflowStart(w http.ResponseWriter, r *http.Requ
 		writeErr(w, http.StatusServiceUnavailable, "incident connector unavailable")
 		return
 	}
+	if err := s.connectorRegistry.TrustWorkspace(request.Event.WorkspaceID, "workspace-builtins-v1"); err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "incident connector trust unavailable")
+		return
+	}
 	result, err := s.incidentWorkflows.Start(r.Context(), request)
 	if err != nil {
 		writeIncidentError(w, err)

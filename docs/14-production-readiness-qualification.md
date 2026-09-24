@@ -129,6 +129,12 @@ contains the current/planned domain matrix and the precise category boundary.
   operation store, and rejects stale fences and cross-workspace requests.
   This is an operator/qualification surface, not a claim that every connector
   is production-qualified.
+- Built-in connector capabilities are now admitted through explicit,
+  workspace-scoped trust snapshots that pin connector identity and definition
+  hashes. Credential-bearing HTTP adapters can use a bounded lease resolver;
+  lease values remain outside durable state. These are fail-closed seams, not
+  a claim that the local profile is an external secret manager or signed
+  supply-chain catalog.
 - The first non-repository reference workflow is now implemented as a
   fake-first incident path. It durably captures typed incident delivery,
   duplicate/conflict semantics, runbook and diagnostic steps, model/tool
@@ -283,6 +289,7 @@ make smoke-changes
 make smoke-policy
 make smoke-package
 make smoke-universal-operation
+make smoke-universal-trust
 ```
 
 For release output produced by GoReleaser, run:

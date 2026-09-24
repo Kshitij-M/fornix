@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/omaveda/fornix/internal/adapters/httpapi"
 	"github.com/omaveda/fornix/internal/connector"
@@ -181,6 +182,75 @@ func TestHTTPCredentialReferenceFailsClosedWithoutResolver(t *testing.T) {
 	_, err := httpapi.NewConnector(httpapi.Binding{ID: "billing-api", WorkspaceID: "workspace-a", BaseURL: "https://api.example.com", CredentialRef: "provider/api"}, resolver.Resolve, nil, nil)
 	if err == nil {
 		t.Fatal("credential-bearing HTTP connector was configured without a resolver")
+	}
+}
+
+func TestHTTPUsesExpiringCredentialLeaseAndReleasesIt(t *testing.T) {
+	var calls, acquired, released atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		calls.Add(1)
+		if request.Header.Get("Authorization") != "Bearer leased-secret" {
+			t.Fatalf("lease credential was not injected at request boundary")
+		}
+		_, _ = writer.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	resolver := connector.NewStaticPayloadResolver()
+	binding := httpapi.Binding{ID: "leased-api", WorkspaceID: "workspace-a", BaseURL: server.URL, CredentialRef: "provider/api", AllowPrivateNetworks: true}
+	payload := httpapi.Payload{Method: http.MethodGet, Path: "/v1/items"}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputHash := hash(payloadBytes)
+	if err := resolver.Put(binding.WorkspaceID, inputHash, payloadBytes); err != nil {
+		t.Fatal(err)
+	}
+	ref, err := credentials.ParseRef(binding.CredentialRef)
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaseResolver := credentials.LeaseResolverFunc{
+		AcquireFunc: func(_ context.Context, workspace, reference, purpose string, ttl time.Duration) (credentials.Lease, error) {
+			acquired.Add(1)
+			if workspace != binding.WorkspaceID || reference != binding.CredentialRef || purpose != "http:"+binding.ID || ttl != credentials.DefaultLeaseTTL {
+				t.Fatalf("unexpected lease request workspace=%s reference=%s purpose=%s ttl=%s", workspace, reference, purpose, ttl)
+			}
+			secret, secretErr := credentials.NewSecret([]byte("leased-secret"))
+			if secretErr != nil {
+				return credentials.Lease{}, secretErr
+			}
+			return credentials.Lease{Reference: ref, WorkspaceID: workspace, LeaseID: "lease-1", Purpose: purpose, ExpiresAt: time.Now().UTC().Add(time.Minute), Secret: secret}, nil
+		},
+		ReleaseFunc: func(_ context.Context, lease credentials.Lease) error {
+			released.Add(1)
+			if lease.LeaseID != "lease-1" {
+				t.Fatalf("unexpected released lease=%s", lease.LeaseID)
+			}
+			return nil
+		},
+	}
+	adapter, err := httpapi.NewConnectorWithLeaseResolver(binding, resolver.Resolve, leaseResolver, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definition := adapter.Capabilities()[0].Definition()
+	request := contracts.OperationRequest{ID: "leased-operation", RequestID: "leased-request", IdempotencyKey: "leased-idempotency", WorkspaceID: binding.WorkspaceID, Actor: contracts.ActorRef{ID: "operator", Kind: "human", WorkspaceID: binding.WorkspaceID}, Capability: definition.Ref, Target: contracts.ResourceRef{WorkspaceID: binding.WorkspaceID, System: contracts.SystemRef{WorkspaceID: binding.WorkspaceID, Type: "http", ID: binding.ID, Version: "1"}, Kind: httpapi.ResourceKind, ID: binding.ID, Version: "1"}, InputType: httpapi.InputType, InputSchemaVersion: definition.InputSchemaVersion, InputSchemaHash: definition.InputSchemaHash, InputHash: inputHash, Profile: definition.Profile}
+	registry := connector.NewRegistry()
+	if err := registry.Register(adapter); err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := (&connector.Executor{Registry: registry}).Execute(context.Background(), request, connector.AdmissionOptions{Credentials: map[string]bool{binding.CredentialRef: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome.Result.OutputHash == "" || calls.Load() != 1 || acquired.Load() != 1 || released.Load() != 1 {
+		t.Fatalf("unexpected lease execution calls=%d acquired=%d released=%d outcome=%+v", calls.Load(), acquired.Load(), released.Load(), outcome)
+	}
+	raw, _ := json.Marshal(outcome.Result)
+	if strings.Contains(string(raw), "leased-secret") {
+		t.Fatal("lease secret appeared in operation result")
 	}
 }
 

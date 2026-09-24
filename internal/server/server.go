@@ -193,6 +193,11 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 		pool.Close()
 		return nil, fmt.Errorf("register incident connector: %w", err)
 	}
+	if err := connectorRegistry.TrustWorkspace(contracts.DefaultWorkspaceID, "builtin-v1"); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("trust built-in connectors: %w", err)
+	}
+	connectorRegistry.RequireTrustPolicy(true)
 	toolPolicy, err := tool.NewPolicy([]contracts.ToolPolicyRule{{
 		ID: "builtin-default-echo", Priority: 100, WorkspaceID: contracts.DefaultWorkspaceID,
 		ToolID: "fornix.echo", Capability: "process.echo", Mode: contracts.ToolModeAutomatic,
@@ -296,6 +301,7 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 	if page, listErr := operatorStore.ListWorkspaces(ctx, 100, ""); listErr == nil {
 		for _, workspace := range page.Items {
 			_ = registerRepositoryConnector(connectorRegistry, workspace.ID)
+			_ = connectorRegistry.TrustWorkspace(workspace.ID, "workspace-builtins-v1")
 			root := workspace.ToolRoot
 			if root == "" {
 				continue

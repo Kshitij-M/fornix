@@ -33,6 +33,8 @@ jobs:
         run: go test ./internal/contracts -run '^TestDomainNeutral' -count=1 -v
       - name: Run connector registry conformance tests
         run: make test-connectors
+      - name: Run credential lease and capability trust tests
+        run: make smoke-universal-trust
       - name: Run race tests
         run: make test-race
       - name: Run vet

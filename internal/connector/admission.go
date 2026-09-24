@@ -60,6 +60,13 @@ func (r *Registry) Admit(ctx context.Context, request contracts.OperationRequest
 	if !definition.Enabled {
 		return Admission{}, ErrCapabilityDisabled
 	}
+	if policy, trusted := r.TrustPolicy(request.WorkspaceID); trusted {
+		if err := policy.Authorize(definition); err != nil {
+			return Admission{}, fmt.Errorf("%w: %v", ErrCapabilityUntrusted, err)
+		}
+	} else if r.isTrustRequired() {
+		return Admission{}, ErrTrustPolicyMissing
+	}
 	health := r.Health(ctx, request.Capability.Connector)
 	if health.Status != HealthReady {
 		reason := strings.TrimSpace(health.Reason)

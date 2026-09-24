@@ -79,6 +79,8 @@ type Registry struct {
 	connectors           map[string]connectorEntry
 	capabilities         map[string]capabilityEntry
 	capabilityIdentities map[string]capabilityEntry
+	trustPolicies        map[string]TrustPolicy
+	trustRequired        bool
 }
 
 // NewRegistry creates an empty connector registry.
@@ -87,7 +89,84 @@ func NewRegistry() *Registry {
 		connectors:           make(map[string]connectorEntry),
 		capabilities:         make(map[string]capabilityEntry),
 		capabilityIdentities: make(map[string]capabilityEntry),
+		trustPolicies:        make(map[string]TrustPolicy),
 	}
+}
+
+// SetTrustPolicy installs an explicit immutable trust snapshot for one
+// workspace. It does not modify registrations and it never expands a policy
+// implicitly. A defensive copy prevents callers from mutating admission
+// behavior after installation.
+func (r *Registry) SetTrustPolicy(policy TrustPolicy) error {
+	if r == nil {
+		return ErrRegistryNil
+	}
+	if strings.TrimSpace(policy.WorkspaceID) == "" || strings.TrimSpace(policy.Revision) == "" {
+		return fmt.Errorf("trust policy workspace_id and revision are required")
+	}
+	if err := normalizeTrustEntries(policy.Entries); err != nil {
+		return err
+	}
+	expectedHash := trustPolicyHash(policy)
+	if policy.PolicyHash != "" && policy.PolicyHash != expectedHash {
+		return fmt.Errorf("trust policy hash does not match normalized entries")
+	}
+	policy.PolicyHash = expectedHash
+	policy.Entries = append([]TrustEntry(nil), policy.Entries...)
+	r.mu.Lock()
+	r.trustPolicies[policy.WorkspaceID] = policy
+	r.mu.Unlock()
+	return nil
+}
+
+// TrustWorkspace creates a snapshot from the definitions currently registered
+// for a workspace. Callers should invoke this only as an explicit composition
+// step after registering the intended built-ins; later registrations remain
+// untrusted until the snapshot is replaced deliberately.
+func (r *Registry) TrustWorkspace(workspaceID, revision string) error {
+	definitions := r.Capabilities(workspaceID)
+	policy, err := NewTrustPolicy(workspaceID, revision, definitions)
+	if err != nil {
+		return err
+	}
+	return r.SetTrustPolicy(policy)
+}
+
+// TrustPolicy returns the installed snapshot for a workspace. The boolean is
+// false when the registry is operating in compatibility mode without an
+// explicit policy.
+func (r *Registry) TrustPolicy(workspaceID string) (TrustPolicy, bool) {
+	if r == nil {
+		return TrustPolicy{}, false
+	}
+	r.mu.RLock()
+	policy, ok := r.trustPolicies[strings.TrimSpace(workspaceID)]
+	r.mu.RUnlock()
+	policy.Entries = append([]TrustEntry(nil), policy.Entries...)
+	return policy, ok
+}
+
+// RequireTrustPolicy switches the registry into production composition mode:
+// an unconfigured workspace is rejected at admission instead of using the
+// compatibility behavior intended for isolated unit tests and development
+// adapters.
+func (r *Registry) RequireTrustPolicy(required bool) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.trustRequired = required
+	r.mu.Unlock()
+}
+
+func (r *Registry) isTrustRequired() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.RLock()
+	required := r.trustRequired
+	r.mu.RUnlock()
+	return required
 }
 
 // Register validates and atomically adds a connector and all of its

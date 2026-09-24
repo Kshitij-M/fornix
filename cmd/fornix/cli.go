@@ -470,7 +470,11 @@ func (c *operatorCLI) operationCommand(args []string) error {
 			}
 			body["plan"] = json.RawMessage(planJSON)
 		}
-		body["idempotency_key"] = valueArg(args[1:], "idempotency", "operation:create:"+c.workspace+":"+sha256String(string(requestJSON)))
+		idempotencyKey, keyErr := operationCreateIdempotencyKey(requestJSON, args[1:], c.workspace)
+		if keyErr != nil {
+			return keyErr
+		}
+		body["idempotency_key"] = idempotencyKey
 		return c.requestPrint(http.MethodPost, "/v1/operations", body, false)
 	case "get":
 		return c.requestPrint(http.MethodGet, "/v1/operations/"+url.PathEscape(valueArg(args[1:], "id", ""))+"?workspace_id="+url.QueryEscape(c.workspace), nil, false)
@@ -497,6 +501,20 @@ func (c *operatorCLI) operationCommand(args []string) error {
 	default:
 		return fmt.Errorf("unknown operation command %q", args[0])
 	}
+}
+
+func operationCreateIdempotencyKey(requestJSON []byte, args []string, workspace string) (string, error) {
+	if explicit := strings.TrimSpace(valueArg(args, "idempotency", "")); explicit != "" {
+		return explicit, nil
+	}
+	var request contracts.OperationRequest
+	if err := json.Unmarshal(requestJSON, &request); err != nil {
+		return "", fmt.Errorf("decode operation request identity: %w", err)
+	}
+	if key := strings.TrimSpace(request.IdempotencyKey); key != "" {
+		return key, nil
+	}
+	return "operation:create:" + workspace + ":" + sha256String(string(requestJSON)), nil
 }
 
 func (c *operatorCLI) retrieveCommand(args []string) error {
