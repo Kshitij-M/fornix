@@ -118,7 +118,19 @@ func (s *AdmissionStore) GetDecision(ctx context.Context, workspaceID, decisionI
 	if s == nil || s.pool == nil {
 		return contracts.AdmissionDecision{}, fmt.Errorf("admission store is not configured")
 	}
-	return readAdmissionDecision(ctx, s.pool, workspaceID, decisionID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return contracts.AdmissionDecision{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := setWorkspaceContext(ctx, tx, workspaceID); err != nil {
+		return contracts.AdmissionDecision{}, err
+	}
+	value, err := readAdmissionDecision(ctx, tx, workspaceID, decisionID)
+	if err == nil {
+		err = tx.Commit(ctx)
+	}
+	return value, err
 }
 
 // GetApproval reads the exact workspace-scoped approval binding.
@@ -126,7 +138,19 @@ func (s *AdmissionStore) GetApproval(ctx context.Context, workspaceID, approvalI
 	if s == nil || s.pool == nil {
 		return contracts.OperationApprovalRequest{}, fmt.Errorf("admission store is not configured")
 	}
-	return readOperationApproval(ctx, s.pool, workspaceID, approvalID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return contracts.OperationApprovalRequest{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := setWorkspaceContext(ctx, tx, workspaceID); err != nil {
+		return contracts.OperationApprovalRequest{}, err
+	}
+	value, err := readOperationApproval(ctx, tx, workspaceID, approvalID)
+	if err == nil {
+		err = tx.Commit(ctx)
+	}
+	return value, err
 }
 
 // GetEffectState reads the current projection of an append-only effect
@@ -135,7 +159,19 @@ func (s *AdmissionStore) GetEffectState(ctx context.Context, workspaceID, effect
 	if s == nil || s.pool == nil {
 		return EffectState{}, fmt.Errorf("admission store is not configured")
 	}
-	return readEffectState(ctx, s.pool, workspaceID, effectID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return EffectState{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := setWorkspaceContext(ctx, tx, workspaceID); err != nil {
+		return EffectState{}, err
+	}
+	value, err := readEffectState(ctx, tx, workspaceID, effectID)
+	if err == nil {
+		err = tx.Commit(ctx)
+	}
+	return value, err
 }
 
 // ListRecoverableEffects returns a deterministic, bounded page of non-terminal
@@ -152,7 +188,15 @@ func (s *AdmissionStore) ListRecoverableEffects(ctx context.Context, workspaceID
 	if limit <= 0 || limit > 128 {
 		limit = 128
 	}
-	rows, err := s.pool.Query(ctx, `
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("begin recoverable effect listing: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := setWorkspaceContext(ctx, tx, workspaceID); err != nil {
+		return nil, err
+	}
+	rows, err := tx.Query(ctx, `
 		SELECT e.workspace_id,e.operation_id,e.step_id,e.attempt_id,e.effect_id,
 		       e.effect_class,e.boundary,e.idempotency_key,e.provider_request_id,
 		       e.provider_idempotency_supported,e.delivery_semantics,e.verification_required,
@@ -194,6 +238,9 @@ func (s *AdmissionStore) ListRecoverableEffects(ctx context.Context, workspaceID
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate recoverable effects: %w", err)
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit recoverable effect listing: %w", err)
+	}
 	return items, nil
 }
 
@@ -223,6 +270,9 @@ func (s *AdmissionStore) AcquireEffectLeaseTx(ctx context.Context, tx pgx.Tx, wo
 	workspaceID, operationID, effectID, ownerID = strings.TrimSpace(workspaceID), strings.TrimSpace(operationID), strings.TrimSpace(effectID), strings.TrimSpace(ownerID)
 	if tx == nil || workspaceID == "" || operationID == "" || effectID == "" || ownerID == "" {
 		return EffectLeaseResult{}, ErrEffectLeaseMissing
+	}
+	if err := setWorkspaceContext(ctx, tx, workspaceID); err != nil {
+		return EffectLeaseResult{}, err
 	}
 	if _, err := readOperationByID(ctx, tx, workspaceID, operationID, true); errors.Is(err, pgx.ErrNoRows) {
 		return EffectLeaseResult{}, ErrOperationNotFound
@@ -290,6 +340,9 @@ func (s *AdmissionStore) RenewEffectLease(ctx context.Context, lease EffectLease
 		return EffectLease{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := setWorkspaceContext(ctx, tx, lease.WorkspaceID); err != nil {
+		return EffectLease{}, err
+	}
 	if _, err := validateEffectLease(ctx, tx, lease); err != nil {
 		return EffectLease{}, err
 	}
@@ -319,6 +372,9 @@ func (s *AdmissionStore) ReleaseEffectLease(ctx context.Context, lease EffectLea
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := setWorkspaceContext(ctx, tx, lease.WorkspaceID); err != nil {
+		return err
+	}
 	if _, err := validateEffectLease(ctx, tx, lease); err != nil {
 		return err
 	}
@@ -360,6 +416,9 @@ func (s *AdmissionStore) Admit(ctx context.Context, input contracts.AdmissionInp
 		return AdmissionResult{}, fmt.Errorf("begin operation admission: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := setWorkspaceContext(ctx, tx, input.WorkspaceID); err != nil {
+		return AdmissionResult{}, err
+	}
 	operation, err := readOperationByID(ctx, tx, input.WorkspaceID, input.OperationID, true)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return AdmissionResult{}, ErrOperationNotFound
@@ -540,6 +599,9 @@ func (s *AdmissionStore) DecideApproval(ctx context.Context, command contracts.O
 		return contracts.OperationApprovalRequest{}, false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := setWorkspaceContext(ctx, tx, command.WorkspaceID); err != nil {
+		return contracts.OperationApprovalRequest{}, false, err
+	}
 	approval, err := readOperationApproval(ctx, tx, command.WorkspaceID, command.ApprovalID, true)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return contracts.OperationApprovalRequest{}, false, ErrAdmissionNotFound
@@ -623,6 +685,9 @@ func (s *AdmissionStore) UpdateEffect(ctx context.Context, update contracts.Exte
 		return EffectStateResult{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := setWorkspaceContext(ctx, tx, update.WorkspaceID); err != nil {
+		return EffectStateResult{}, err
+	}
 	var operationID string
 	if err := tx.QueryRow(ctx, `SELECT operation_id FROM fornix.operation_effects WHERE workspace_id=$1 AND effect_id=$2 FOR SHARE`, update.WorkspaceID, update.EffectID).Scan(&operationID); errors.Is(err, pgx.ErrNoRows) {
 		return EffectStateResult{}, ErrAdmissionNotFound

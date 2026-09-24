@@ -50,6 +50,12 @@ contains the current/planned domain matrix and the precise category boundary.
 ## Verified capabilities
 
 - Numbered, embedded, checksum-validated migrations.
+- A Postgres row-level-security foundation for the generic operation/admission
+  authority with transaction-local workspace context, fail-closed policies,
+  and an opt-in non-owner/NOBYPASSRLS qualification smoke. The development
+  Compose role remains a table-owning compatibility role; production cannot
+  claim database-enforced tenant isolation until role separation is deployed
+  and the qualification smoke passes.
 - Liveness/readiness endpoints, request IDs, body limits, timeouts, and
   graceful shutdown.
 - Concurrent task claiming and completion.

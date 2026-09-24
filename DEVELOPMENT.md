@@ -115,6 +115,7 @@ make smoke-local-cli
 make smoke-local-runtime
 make smoke-package
 make release-check
+FORNIX_RLS_TEST_DSN='postgres://APP_ROLE:APP_PASSWORD@HOST:PORT/RLS_DATABASE?sslmode=disable' make qualification-workspace-isolation
 make operator-reference
 make dev-up
 make dev-run

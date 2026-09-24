@@ -393,6 +393,9 @@ func (s *OperationStore) CreateTx(ctx context.Context, tx pgx.Tx, input Operatio
 	if err := request.Normalize(); err != nil {
 		return OperationCreateResult{}, fmt.Errorf("normalize operation request: %w", err)
 	}
+	if err := setWorkspaceContext(ctx, tx, request.WorkspaceID); err != nil {
+		return OperationCreateResult{}, err
+	}
 	requestHash, err := request.CanonicalHash()
 	if err != nil {
 		return OperationCreateResult{}, err
@@ -484,9 +487,21 @@ func (s *OperationStore) Get(ctx context.Context, workspaceID, operationID strin
 	if s == nil || s.pool == nil {
 		return Operation{}, errors.New("operation store is not configured")
 	}
-	value, err := readOperationByID(ctx, s.pool, strings.TrimSpace(workspaceID), strings.TrimSpace(operationID))
+	workspaceID, operationID = strings.TrimSpace(workspaceID), strings.TrimSpace(operationID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return Operation{}, fmt.Errorf("begin operation read: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := setWorkspaceContext(ctx, tx, workspaceID); err != nil {
+		return Operation{}, err
+	}
+	value, err := readOperationByID(ctx, tx, workspaceID, operationID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Operation{}, ErrOperationNotFound
+	}
+	if err == nil {
+		err = tx.Commit(ctx)
 	}
 	return value, err
 }
@@ -516,6 +531,9 @@ func (s *OperationStore) AttachPlan(ctx context.Context, input OperationPlanInpu
 func (s *OperationStore) attachPlanTx(ctx context.Context, tx pgx.Tx, input OperationPlanInput) (OperationPlanResult, error) {
 	input.WorkspaceID, input.OperationID, input.OwnerID = strings.TrimSpace(input.WorkspaceID), strings.TrimSpace(input.OperationID), strings.TrimSpace(input.OwnerID)
 	input.IdempotencyKey = strings.TrimSpace(input.IdempotencyKey)
+	if err := setWorkspaceContext(ctx, tx, input.WorkspaceID); err != nil {
+		return OperationPlanResult{}, err
+	}
 	if input.WorkspaceID == "" || input.OperationID == "" || input.OwnerID == "" || input.Fence == 0 || input.Fence > maxOperationFence || input.IdempotencyKey == "" {
 		return OperationPlanResult{}, ErrOperationLeaseFenced
 	}
@@ -580,9 +598,21 @@ func (s *OperationStore) GetResult(ctx context.Context, workspaceID, operationID
 	if s == nil || s.pool == nil {
 		return OperationResultRecord{}, errors.New("operation store is not configured")
 	}
-	record, err := readOperationResult(ctx, s.pool, strings.TrimSpace(workspaceID), strings.TrimSpace(operationID))
+	workspaceID, operationID = strings.TrimSpace(workspaceID), strings.TrimSpace(operationID)
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return OperationResultRecord{}, fmt.Errorf("begin operation result read: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := setWorkspaceContext(ctx, tx, workspaceID); err != nil {
+		return OperationResultRecord{}, err
+	}
+	record, err := readOperationResult(ctx, tx, workspaceID, operationID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return OperationResultRecord{}, ErrOperationResultNotFound
+	}
+	if err == nil {
+		err = tx.Commit(ctx)
 	}
 	return record, err
 }
@@ -620,6 +650,9 @@ func (s *OperationStore) RecordResult(ctx context.Context, input OperationResult
 }
 
 func (s *OperationStore) recordResultTx(ctx context.Context, tx pgx.Tx, input OperationResultInput) (OperationResultWrite, error) {
+	if err := setWorkspaceContext(ctx, tx, input.WorkspaceID); err != nil {
+		return OperationResultWrite{}, err
+	}
 	operation, err := readOperationByID(ctx, tx, input.WorkspaceID, input.OperationID, true)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return OperationResultWrite{}, ErrOperationNotFound
@@ -732,6 +765,9 @@ func (s *OperationStore) AcquireLeaseTx(ctx context.Context, tx pgx.Tx, workspac
 	if workspaceID == "" || operationID == "" || ownerID == "" {
 		return OperationLeaseResult{}, errors.New("workspace_id, operation_id, and owner_id are required")
 	}
+	if err := setWorkspaceContext(ctx, tx, workspaceID); err != nil {
+		return OperationLeaseResult{}, err
+	}
 	operation, err := readOperationByID(ctx, tx, workspaceID, operationID, true)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return OperationLeaseResult{}, ErrOperationNotFound
@@ -801,6 +837,9 @@ func (s *OperationStore) RenewLease(ctx context.Context, lease OperationLease, t
 }
 
 func (s *OperationStore) RenewLeaseTx(ctx context.Context, tx pgx.Tx, lease OperationLease, ttl time.Duration) (OperationLease, error) {
+	if err := setWorkspaceContext(ctx, tx, lease.WorkspaceID); err != nil {
+		return OperationLease{}, err
+	}
 	if _, err := s.validateLease(ctx, tx, lease); err != nil {
 		return OperationLease{}, err
 	}
@@ -837,6 +876,9 @@ func (s *OperationStore) ReleaseLease(ctx context.Context, lease OperationLease)
 }
 
 func (s *OperationStore) ReleaseLeaseTx(ctx context.Context, tx pgx.Tx, lease OperationLease) error {
+	if err := setWorkspaceContext(ctx, tx, lease.WorkspaceID); err != nil {
+		return err
+	}
 	if _, err := s.validateLease(ctx, tx, lease); err != nil {
 		return err
 	}
@@ -870,6 +912,9 @@ func (s *OperationStore) Transition(ctx context.Context, input OperationTransiti
 }
 
 func (s *OperationStore) transitionTx(ctx context.Context, tx pgx.Tx, input OperationTransitionInput) (OperationTransitionResult, error) {
+	if err := setWorkspaceContext(ctx, tx, input.WorkspaceID); err != nil {
+		return OperationTransitionResult{}, err
+	}
 	operation, err := readOperationByID(ctx, tx, input.WorkspaceID, input.OperationID, true)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return OperationTransitionResult{}, ErrOperationNotFound
@@ -986,6 +1031,9 @@ func (s *OperationStore) ReserveAttempt(ctx context.Context, input OperationAtte
 		return OperationAttempt{}, false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := setWorkspaceContext(ctx, tx, input.WorkspaceID); err != nil {
+		return OperationAttempt{}, false, err
+	}
 	operation, err := readOperationByID(ctx, tx, input.WorkspaceID, input.OperationID, true)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return OperationAttempt{}, false, ErrOperationNotFound
@@ -1076,6 +1124,9 @@ func (s *OperationStore) ReserveEffect(ctx context.Context, input OperationEffec
 		return OperationEffect{}, false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := setWorkspaceContext(ctx, tx, input.WorkspaceID); err != nil {
+		return OperationEffect{}, false, err
+	}
 	operation, err := readOperationByID(ctx, tx, input.WorkspaceID, input.OperationID, true)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return OperationEffect{}, false, ErrOperationNotFound
@@ -1167,6 +1218,9 @@ func (s *OperationStore) RecordCallback(ctx context.Context, input OperationCall
 		return OperationCallback{}, false, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := setWorkspaceContext(ctx, tx, input.WorkspaceID); err != nil {
+		return OperationCallback{}, false, err
+	}
 	if stored, err := readCallback(ctx, tx, input.WorkspaceID, input.CallbackID); err == nil {
 		if stored.RequestHash != input.RequestHash || stored.OperationID != input.OperationID {
 			return OperationCallback{}, false, ErrOperationIdempotency
@@ -1236,6 +1290,9 @@ func (s *OperationStore) Replay(ctx context.Context, workspaceID, operationID st
 		return OperationReplayResult{}, fmt.Errorf("begin operation replay: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if err := setWorkspaceContext(ctx, tx, workspaceID); err != nil {
+		return OperationReplayResult{}, err
+	}
 	operation, err := readOperationByID(ctx, tx, workspaceID, operationID, false)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return OperationReplayResult{}, ErrOperationNotFound

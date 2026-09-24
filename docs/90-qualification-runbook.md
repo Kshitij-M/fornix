@@ -11,6 +11,7 @@ database version, duration, and result.
 | Offline unit/contract | `make test`, `make vet`, `make fmt-check` | Go toolchain | No | No external system; tests may use in-memory fixtures |
 | Postgres integration | `FORNIX_TEST_PG_DSN=... make check` | Disposable PostgreSQL/pgvector; migrations applied by tests | No remote provider | Yes, in the test database; use a disposable workspace/database |
 | Universal effect slice | `PROJECTION_PG_DSN=... make smoke-universal-effects` | Disposable Postgres | No provider call | Yes, test operation/effect rows |
+| PostgreSQL workspace isolation | `FORNIX_RLS_TEST_DSN=... make qualification-workspace-isolation` | Disposable database cloned from a migrated authority; dedicated non-owner `NOBYPASSRLS` role | No provider call | Rolled-back qualification transaction only |
 | HTTP service smoke | `make smoke-universal-operation`, `make smoke-reference-connectors` | Running Fornix HTTP server and Postgres | Reference HTTP/SQL adapters only when configured by the smoke | Yes, scoped test workspace |
 | Managed Docker runtime | `make smoke-local-runtime` | Docker Desktop/Engine and Compose v2 | Fake provider by default | Yes, local runtime volume |
 | Full repository smoke | `make smoke` | Running service, Postgres, Python helpers, Docker for local runtime | Fake-first; optional adapters are explicit | Yes, disposable smoke workspaces |
@@ -66,10 +67,30 @@ has become terminal. Never send raw provider payloads through this API. A
 domain adapter remains responsible for its own bounded dispatch, provider
 idempotency, verification, compensation, credentials, and egress policy.
 
+## Database workspace-isolation qualification
+
+The normal development database user is a superuser/table owner for
+compatibility, so it cannot prove row-level-security enforcement. Before a
+deployment claims database-enforced tenant isolation, create a disposable
+database from the migrated schema, run the service role as a non-owner with
+`NOBYPASSRLS`, grant only the runtime privileges, and run:
+
+```sh
+FORNIX_RLS_TEST_DSN='postgres://APP_ROLE:APP_PASSWORD@HOST:PORT/RLS_DATABASE?sslmode=disable' \
+  make qualification-workspace-isolation
+```
+
+The smoke verifies that unset context exposes no protected rows, same-workspace
+writes succeed, foreign reads are invisible, and foreign writes fail. It uses
+an explicit rollback and creates no durable qualification fixture. The
+production role-transfer and privilege-grant procedure remains deployment
+specific and must be reviewed by the database owner.
+
 ## Current production gates still open
 
 Fornix is not production-ready for unattended, high-impact operations. The
-remaining gates include database-enforced tenant defense in depth, external
+remaining gates include production role separation and complete coverage of
+all legacy tables for database-enforced tenant defense in depth, external
 secret management, signed capability/policy catalogs, generic background
 dispatch and verification workers, backup/restore drills, HA/failover,
 quota/backpressure/fairness qualification, adversarial confused-deputy and

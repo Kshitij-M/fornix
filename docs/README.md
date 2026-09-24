@@ -135,6 +135,7 @@ and [`71-loop-25-completion.md`](71-loop-25-completion.md).
 | 37 | Snapshot and cursor-based operation replay | [`97-snapshot-replay-foundation.md`](97-snapshot-replay-foundation.md) | [`98-loop-37-completion.md`](98-loop-37-completion.md) |
 | 38 | Backup and restore qualification harness | [`99-backup-restore-qualification-foundation.md`](99-backup-restore-qualification-foundation.md) | [`100-loop-38-completion.md`](100-loop-38-completion.md) |
 | 39 | Independent external-effect recovery ownership | [`101-external-effect-recovery-foundation.md`](101-external-effect-recovery-foundation.md) | [`102-loop-39-completion.md`](102-loop-39-completion.md) |
+| 40 | Postgres workspace-isolation foundation | [`103-postgres-workspace-isolation-foundation.md`](103-postgres-workspace-isolation-foundation.md) | [`104-loop-40-completion.md`](104-loop-40-completion.md) |
 
 ## Local package and managed runtime
 
