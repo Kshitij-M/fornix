@@ -42,6 +42,7 @@ var (
 	ErrOperationPlanConflict   = errors.New("operation plan conflicts with existing state")
 	ErrOperationResultNotFound = errors.New("operation result not found")
 	ErrOperationResultConflict = errors.New("operation result conflicts with existing state")
+	ErrOperationTerminal       = errors.New("operation is terminal")
 )
 
 // Operation is the current projection of one generic operation. Raw inputs and
@@ -725,6 +726,9 @@ func (s *OperationStore) AcquireLeaseTx(ctx context.Context, tx pgx.Tx, workspac
 	if err != nil {
 		return OperationLeaseResult{}, fmt.Errorf("check operation for lease: %w", err)
 	}
+	if contracts.IsTerminalOperationStatus(operation.Status) {
+		return OperationLeaseResult{}, ErrOperationTerminal
+	}
 	if operation.Request.Task != nil {
 		if ownerID != operation.TaskOwnerID || operation.TaskFence == 0 {
 			return OperationLeaseResult{}, ErrOperationTaskFence
@@ -987,6 +991,9 @@ func (s *OperationStore) ReserveAttempt(ctx context.Context, input OperationAtte
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return OperationAttempt{}, false, err
 	}
+	if contracts.IsTerminalOperationStatus(operation.Status) {
+		return OperationAttempt{}, false, ErrOperationTerminal
+	}
 	if operation.Request.Task != nil {
 		if input.OwnerID != operation.TaskOwnerID || operation.TaskFence == 0 {
 			return OperationAttempt{}, false, ErrOperationTaskFence
@@ -1074,6 +1081,9 @@ func (s *OperationStore) ReserveEffect(ctx context.Context, input OperationEffec
 	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return OperationEffect{}, false, err
 	}
+	if contracts.IsTerminalOperationStatus(operation.Status) {
+		return OperationEffect{}, false, ErrOperationTerminal
+	}
 	if operation.Request.Task != nil {
 		if input.OwnerID != operation.TaskOwnerID || operation.TaskFence == 0 {
 			return OperationEffect{}, false, ErrOperationTaskFence
@@ -1154,6 +1164,9 @@ func (s *OperationStore) RecordCallback(ctx context.Context, input OperationCall
 	}
 	if err != nil {
 		return OperationCallback{}, false, err
+	}
+	if contracts.IsTerminalOperationStatus(operation.Status) {
+		return OperationCallback{}, false, ErrOperationTerminal
 	}
 	if operation.Request.Task != nil {
 		if input.OwnerID != operation.TaskOwnerID || operation.TaskFence == 0 {

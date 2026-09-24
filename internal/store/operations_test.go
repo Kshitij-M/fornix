@@ -194,6 +194,72 @@ func TestOperationPlanAndResultAreAtomicFencedAndIdempotent(t *testing.T) {
 	}
 }
 
+func TestTerminalOperationRejectsNewLeasesAndAdmissions(t *testing.T) {
+	operationStore, _, workspace := newOperationTestStore(t)
+	request := operationTestRequest(t, workspace, "terminal-admission-key")
+	plan := operationTestPlan(t, request)
+	created, err := operationStore.Create(context.Background(), OperationCreateInput{Request: request, Plan: &plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := operationStore.AcquireLease(context.Background(), workspace, created.Operation.ID, "terminal-worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := operationStore.AttachPlan(context.Background(), OperationPlanInput{
+		WorkspaceID: workspace, OperationID: created.Operation.ID, OwnerID: lease.Lease.OwnerID,
+		Fence: lease.Lease.Fence, Actor: request.Actor, IdempotencyKey: "terminal-plan", Plan: plan,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []string{contracts.OperationStatusAdmitted, contracts.OperationStatusRunning} {
+		if _, err := operationStore.Transition(context.Background(), OperationTransitionInput{
+			WorkspaceID: workspace, OperationID: created.Operation.ID, OwnerID: lease.Lease.OwnerID,
+			Fence: lease.Lease.Fence, Actor: request.Actor, IdempotencyKey: "terminal-" + status, ToStatus: status,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result := contracts.OperationResult{
+		ID: "terminal-result", OperationID: created.Operation.ID, OperationHash: created.Operation.OperationHash,
+		RequestID: request.RequestID, WorkspaceID: workspace, Actor: request.Actor, Status: contracts.OperationStatusSucceeded,
+		OutputSchemaVersion: 1, OutputSchemaHash: testHash("terminal-output-schema"), OutputHash: testHash("terminal-output"),
+		Steps: []contracts.OperationStepResult{{StepID: plan.Steps[0].ID, Status: contracts.OperationStatusSucceeded, OutputSchemaVersion: 1, OutputSchemaHash: testHash("terminal-step-schema"), OutputHash: testHash("terminal-step")}},
+	}
+	if _, err := operationStore.RecordResult(context.Background(), OperationResultInput{
+		WorkspaceID: workspace, OperationID: created.Operation.ID, OwnerID: lease.Lease.OwnerID, Fence: lease.Lease.Fence,
+		Actor: request.Actor, IdempotencyKey: "terminal-result-write", Result: result,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := operationStore.AcquireLease(context.Background(), workspace, created.Operation.ID, "new-worker", time.Minute); !errors.Is(err, ErrOperationTerminal) {
+		t.Fatalf("terminal lease error=%v, want ErrOperationTerminal", err)
+	}
+	if _, _, err := operationStore.ReserveAttempt(context.Background(), OperationAttemptInput{
+		WorkspaceID: workspace, OperationID: created.Operation.ID, StepID: plan.Steps[0].ID, Attempt: 1,
+		AttemptID: "terminal-attempt", OwnerID: lease.Lease.OwnerID, Fence: lease.Lease.Fence,
+		RequestHash: testHash("terminal-attempt"), IdempotencyKey: "terminal-attempt-key",
+	}); !errors.Is(err, ErrOperationTerminal) {
+		t.Fatalf("terminal attempt error=%v, want ErrOperationTerminal", err)
+	}
+	if _, _, err := operationStore.ReserveEffect(context.Background(), OperationEffectInput{
+		WorkspaceID: workspace, OperationID: created.Operation.ID, StepID: plan.Steps[0].ID, AttemptID: "terminal-attempt",
+		OwnerID: lease.Lease.OwnerID, Fence: lease.Lease.Fence, RequestHash: testHash("terminal-effect"),
+		Effect: contracts.ExternalEffect{WorkspaceID: workspace, Boundary: "terminal-test", Class: contracts.EffectClassReversibleWrite,
+			DeliveryGuarantee: contracts.ExternalDeliveryAtLeastOnce, VerificationStatus: contracts.ExternalVerificationPending,
+			CompensationStatus: contracts.ExternalCompensationAvailable},
+	}); !errors.Is(err, ErrOperationTerminal) {
+		t.Fatalf("terminal effect error=%v, want ErrOperationTerminal", err)
+	}
+	if _, _, err := operationStore.RecordCallback(context.Background(), OperationCallbackInput{
+		WorkspaceID: workspace, OperationID: created.Operation.ID, CallbackID: "terminal-callback", CallbackKind: "terminal-test",
+		OwnerID: lease.Lease.OwnerID, Fence: lease.Lease.Fence, RequestHash: testHash("terminal-callback"), Status: "verified",
+	}); !errors.Is(err, ErrOperationTerminal) {
+		t.Fatalf("terminal callback error=%v, want ErrOperationTerminal", err)
+	}
+}
+
 func TestOperationResultCrashBeforeCommitLeavesNoResult(t *testing.T) {
 	operationStore, _, workspace := newOperationTestStore(t)
 	request := operationTestRequest(t, workspace, "execute-result-crash-key")

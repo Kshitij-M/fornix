@@ -365,6 +365,10 @@ func (s *server) handleOperationExecute(w http.ResponseWriter, r *http.Request, 
 		writeOperationErr(w, resultErr)
 		return
 	}
+	if contracts.IsTerminalOperationStatus(operation.Status) {
+		writeOperationErr(w, store.ErrOperationTerminal)
+		return
+	}
 	capability, found := s.connectorRegistry.Lookup(operation.Request.Capability)
 	if !found {
 		writeErr(w, http.StatusConflict, "capability is not available")
@@ -706,7 +710,7 @@ func writeOperationErr(w http.ResponseWriter, err error) {
 		status = http.StatusNotFound
 	case errors.Is(err, store.ErrOperationWorkspace), errors.Is(err, store.ErrOperationTaskFence):
 		status = http.StatusForbidden
-	case errors.Is(err, store.ErrOperationIdempotency), errors.Is(err, store.ErrOperationPlanConflict), errors.Is(err, store.ErrOperationResultConflict), errors.Is(err, store.ErrOperationTransition), errors.Is(err, store.ErrOperationLeaseMissing), errors.Is(err, store.ErrOperationLeaseHeld), errors.Is(err, store.ErrOperationLeaseOwned), errors.Is(err, store.ErrOperationLeaseFenced), errors.Is(err, store.ErrOperationLeaseExpired), errors.Is(err, store.ErrOperationLeaseReleased):
+	case errors.Is(err, store.ErrOperationIdempotency), errors.Is(err, store.ErrOperationPlanConflict), errors.Is(err, store.ErrOperationResultConflict), errors.Is(err, store.ErrOperationTransition), errors.Is(err, store.ErrOperationTerminal), errors.Is(err, store.ErrOperationLeaseMissing), errors.Is(err, store.ErrOperationLeaseHeld), errors.Is(err, store.ErrOperationLeaseOwned), errors.Is(err, store.ErrOperationLeaseFenced), errors.Is(err, store.ErrOperationLeaseExpired), errors.Is(err, store.ErrOperationLeaseReleased):
 		status = http.StatusConflict
 	case errors.Is(err, store.ErrOperationReplay):
 		status = http.StatusUnprocessableEntity

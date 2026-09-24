@@ -59,7 +59,7 @@ engineering history:
   summaries. A completion note is the more reliable source when a historical
   foundation intention differs from the current implementation.
 
-The project has 33 numbered repository/control-plane and universal-operation
+The project has 35 numbered repository/control-plane and universal-operation
 implementation loops plus the packaging and transformation delivery records
 below. Those loops build the control-plane substrate and reference adapters;
 they are not a claim that the complete production-system operations product is
@@ -130,6 +130,7 @@ and [`71-loop-25-completion.md`](71-loop-25-completion.md).
 | 32 | Durable generic connector execution | [`84-generic-execution-foundation.md`](84-generic-execution-foundation.md) | [`85-loop-32-completion.md`](85-loop-32-completion.md) |
 | 33 | External-effect reservation and reconciliation API | [`86-external-effect-reconciliation-foundation.md`](86-external-effect-reconciliation-foundation.md) | [`87-loop-33-completion.md`](87-loop-33-completion.md) |
 | 34 | Legacy global surface containment | [`91-legacy-global-surface-containment-foundation.md`](91-legacy-global-surface-containment-foundation.md) | [`92-loop-34-completion.md`](92-loop-34-completion.md) |
+| 35 | Terminal operation admission hardening | [`93-terminal-operation-admission-foundation.md`](93-terminal-operation-admission-foundation.md) | [`94-loop-35-completion.md`](94-loop-35-completion.md) |
 
 ## Local package and managed runtime
 
