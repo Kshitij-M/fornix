@@ -33,6 +33,7 @@ const (
 	CredentialStateUnknown = "unknown"
 
 	ExternalEffectReserved            = "reserved"
+	ExternalEffectDispatching         = "dispatching"
 	ExternalEffectDispatched          = "dispatched"
 	ExternalEffectAcknowledged        = "acknowledged"
 	ExternalEffectVerificationPending = "verification_pending"
@@ -469,6 +470,10 @@ type ExternalEffectUpdate struct {
 	VerificationHash  string `json:"verification_hash,omitempty"`
 	CompensationHash  string `json:"compensation_hash,omitempty"`
 	FailureCode       string `json:"failure_code,omitempty"`
+	// LeaseKind is an internal authority selector. Empty means the original
+	// operation lease path; "effect" selects the independent recovery lease.
+	// It is never accepted from or serialized into a public request body.
+	LeaseKind string `json:"-"`
 }
 
 func (u *ExternalEffectUpdate) Normalize() error {
@@ -497,8 +502,11 @@ func (u *ExternalEffectUpdate) Normalize() error {
 	if u.Fence == 0 {
 		return fmt.Errorf("effect update fence is required")
 	}
+	if u.LeaseKind != "" && u.LeaseKind != "effect" {
+		return fmt.Errorf("unsupported effect update lease kind %q", u.LeaseKind)
+	}
 	switch u.State {
-	case ExternalEffectDispatched, ExternalEffectAcknowledged, ExternalEffectVerificationPending, ExternalEffectVerified, ExternalEffectVerificationFailed, ExternalEffectCompensationPending, ExternalEffectCompensated, ExternalEffectRecoveryRequired:
+	case ExternalEffectDispatching, ExternalEffectDispatched, ExternalEffectAcknowledged, ExternalEffectVerificationPending, ExternalEffectVerified, ExternalEffectVerificationFailed, ExternalEffectCompensationPending, ExternalEffectCompensated, ExternalEffectRecoveryRequired:
 	default:
 		return fmt.Errorf("unsupported external effect state %q", u.State)
 	}

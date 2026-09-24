@@ -550,6 +550,12 @@ func TestOperationIntegrationAttemptsEffectsAndCallbacksAreFencedAndIdempotent(t
 		t.Fatalf("unexpected effect reservation: %+v created=%v", effect, createdEffect)
 	}
 	effectInput.Effect.ID = effect.EffectID
+	conflictingEffect := effectInput
+	conflictingEffect.Effect = effectInput.Effect
+	conflictingEffect.Effect.Boundary = "different-fixture-api"
+	if _, _, err := store.ReserveEffect(context.Background(), conflictingEffect); !errors.Is(err, ErrOperationIdempotency) {
+		t.Fatalf("conflicting duplicate effect identity error=%v, want ErrOperationIdempotency", err)
+	}
 	duplicateEffect, createdDuplicateEffect, err := store.ReserveEffect(context.Background(), effectInput)
 	if err != nil {
 		t.Fatal(err)
@@ -577,6 +583,13 @@ func TestOperationIntegrationAttemptsEffectsAndCallbacksAreFencedAndIdempotent(t
 	if createdDuplicateCallback || duplicateCallback.CallbackID != callback.CallbackID {
 		t.Fatalf("duplicate callback was not stable: %+v created=%v", duplicateCallback, createdDuplicateCallback)
 	}
+	if _, inserted, err := store.ReserveAttempt(context.Background(), OperationAttemptInput{
+		WorkspaceID: workspace, OperationID: created.Operation.ID, StepID: "step-1", Attempt: 2,
+		AttemptID: "attempt-bound", OwnerID: firstLease.Lease.OwnerID, Fence: firstLease.Lease.Fence,
+		RequestHash: testHash("attempt-bound-request"), IdempotencyKey: "attempt-bound-key",
+	}); err != nil || !inserted {
+		t.Fatalf("attempt binding fixture inserted=%v err=%v", inserted, err)
+	}
 
 	time.Sleep(50 * time.Millisecond)
 	secondLease, err := store.AcquireLease(context.Background(), workspace, created.Operation.ID, "worker-b", time.Minute)
@@ -592,6 +605,15 @@ func TestOperationIntegrationAttemptsEffectsAndCallbacksAreFencedAndIdempotent(t
 	}
 	if secondLease.Lease.Fence <= firstLease.Lease.Fence {
 		t.Fatalf("takeover did not advance fence: first=%+v second=%+v", firstLease.Lease, secondLease.Lease)
+	}
+	if _, _, err := store.ReserveEffect(context.Background(), OperationEffectInput{
+		WorkspaceID: workspace, OperationID: created.Operation.ID, StepID: "step-1", AttemptID: "attempt-bound",
+		OwnerID: secondLease.Lease.OwnerID, Fence: secondLease.Lease.Fence, RequestHash: testHash("new-effect-request"),
+		Effect: contracts.ExternalEffect{WorkspaceID: workspace, Boundary: "fixture-api", Class: contracts.EffectClassReversibleWrite,
+			DeliveryGuarantee: contracts.ExternalDeliveryAtLeastOnce, VerificationRequired: true,
+			VerificationStatus: contracts.ExternalVerificationPending, CompensationStatus: contracts.ExternalCompensationAvailable},
+	}); !errors.Is(err, ErrOperationLeaseFenced) {
+		t.Fatalf("effect attached to stale attempt error=%v, want ErrOperationLeaseFenced", err)
 	}
 }
 

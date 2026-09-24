@@ -125,7 +125,11 @@ input and producing the input/schema hashes before admission.
 | `POST` | `/v1/operations/{id}/effects/reserve` | Reserve an external effect before connector dispatch | `operation:execute` |
 | `POST` | `/v1/operations/{id}/effects/{effect_id}` | Reserve an external effect with a caller-selected identity | `operation:execute` |
 | `GET` | `/v1/operations/{id}/effects/{effect_id}` | Read the current effect recovery state | `operation:read` |
+| `POST` | `/v1/operations/{id}/effects/{effect_id}/lease` | Acquire or take over the workspace-scoped recovery lease | `operation:execute` |
+| `POST` | `/v1/operations/{id}/effects/{effect_id}/renew` | Renew the current recovery lease | `operation:execute` |
+| `POST` | `/v1/operations/{id}/effects/{effect_id}/release` | Release the current recovery lease | `operation:execute` |
 | `POST` | `/v1/operations/{id}/effects/{effect_id}/state` | Append a fenced dispatch, acknowledgement, verification, compensation, or recovery transition | `operation:execute` |
+| `GET` | `/v1/operation-effects/recovery` | List bounded, hash-only non-terminal recovery candidates | `operation:read` |
 
 The create body contains a `request` object and may contain a normalized
 `plan`, bounded resource references, and provenance links. The authenticated
@@ -163,6 +167,11 @@ fornix operation replay --id op-123
 fornix operation effect-reserve --id op-123 --effect-file effect.json --step-id step-1 --attempt-id attempt-1 --request-hash HASH --fence 1
 fornix operation effect-get --id op-123 --effect-id effect-123
 fornix operation effect-state --id op-123 --effect-id effect-123 --state recovery_required --idempotency recovery-1 --fence 1
+fornix operation effect-recovery --limit 64
+fornix operation effect-lease --id op-123 --effect-id effect-123
+fornix operation effect-state --id op-123 --effect-id effect-123 --state verification_pending --idempotency verify-1 --effect-fence 1
+fornix operation effect-renew --id op-123 --effect-id effect-123 --effect-fence 1
+fornix operation effect-release --id op-123 --effect-id effect-123 --effect-fence 1
 ```
 
 Replay is read-only. It validates the initial state anchor, contiguous
@@ -181,13 +190,21 @@ payload, secret, credential, header, or arbitrary diagnostic text. The caller
 must hold the current `X-Operation-Fence` returned by the operation lease.
 
 The state route accepts only typed provider request identifiers, SHA-256
-response/verification/compensation references, and a bounded failure code. It
-uses the authenticated operation actor as the lease owner. Valid transitions
-are enforced by `AdmissionStore`; repeated idempotency keys return the
-committed state, while a different command under the same key is a conflict.
-A provider timeout or process crash must be reconciled explicitly. Fornix
-never silently repeats an external call and never claims exactly-once remote
-execution.
+response/verification/compensation references, and a bounded failure code. The
+operation lease can record dispatch intent and the `dispatching` state before a
+provider call. A recovery worker must first acquire the separate effect lease;
+it may reconcile an already-dispatching or later state, but cannot turn an
+untouched `reserved` effect into a dispatch. The effect fence is sent as
+`X-Effect-Fence` and is independent from `X-Operation-Fence`.
+
+Recovery lease acquisition, takeover, renewal, and release are transactional
+and workspace-scoped. Only one owner can hold an active lease; takeover
+increments the fence, and a stale or expired fence fails closed. Recovery
+listing is bounded and hash-only. Valid transitions are enforced by
+`AdmissionStore`; repeated idempotency keys return the committed state, while
+a different command under the same key is a conflict. A provider timeout or
+process crash must be reconciled explicitly. Fornix never silently repeats an
+external call and never claims exactly-once remote execution.
 
 ## Retrieval, evidence, and artifacts
 

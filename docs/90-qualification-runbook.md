@@ -46,6 +46,26 @@ backup duration, restore duration, source/restore fingerprint, measured
 deployment RPO, and measured deployment RTO. Never retain DSNs or secret
 values in the qualification record.
 
+## Recover an uncertain external effect
+
+The recovery surface is a durable ownership boundary, not a provider
+dispatcher. Discover bounded candidates and claim one with a separate effect
+fence:
+
+```sh
+fornix operation effect-recovery --limit 32
+fornix operation effect-lease --id OPERATION_ID --effect-id EFFECT_ID
+fornix operation effect-state --id OPERATION_ID --effect-id EFFECT_ID \
+  --state recovery_required --idempotency recovery-1 --effect-fence EFFECT_FENCE
+fornix operation effect-release --id OPERATION_ID --effect-id EFFECT_ID \
+  --effect-fence EFFECT_FENCE
+```
+
+Use the effect fence for verification or compensation after a parent operation
+has become terminal. Never send raw provider payloads through this API. A
+domain adapter remains responsible for its own bounded dispatch, provider
+idempotency, verification, compensation, credentials, and egress policy.
+
 ## Current production gates still open
 
 Fornix is not production-ready for unattended, high-impact operations. The

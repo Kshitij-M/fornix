@@ -8,6 +8,6 @@ if [[ -z "${dsn}" ]]; then
 fi
 
 FORNIX_TEST_PG_DSN="${dsn}" go test ./internal/store ./internal/server \
-  -run 'Test(AdmissionStoreEffectRecoveryIsFencedAndReplayable|GenericOperationHTTPReservesAndReconcilesExternalEffect)' \
+  -run 'Test(AdmissionStore(EffectRecoveryIsFencedAndReplayable|IndependentEffectLeaseRecoversAfterTerminalOperation)|GenericOperationHTTPReservesAndReconcilesExternalEffect)' \
   -count=1 -v
-echo "universal effect smoke: reservation, duplicate reconciliation, stale-fence rejection, and workspace isolation passed"
+echo "universal effect smoke: dispatch intent, reservation, recovery fencing, duplicate reconciliation, and workspace isolation passed"

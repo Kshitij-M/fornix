@@ -257,10 +257,14 @@ func permissionForRequest(r *http.Request) contracts.Permission {
 			return contracts.PermissionOperationRead
 		}
 		return contracts.PermissionOperationExecute
-	case path == "/v1/retrieve" || path == "/v1/rag" || path == "/v1/memo/search" || path == "/v1/symbol/search" || path == "/v1/router/recommend":
+	case path == "/v1/operation-effects/recovery":
+		return contracts.PermissionOperationRead
+	case path == "/v1/retrieve" || path == "/v1/rag" || path == "/v1/memo/search" || path == "/v1/symbol/search":
 		return contracts.PermissionRetrievalRead
-	case path == "/v1/router/observation":
-		return contracts.PermissionRetrievalWrite
+	case path == "/v1/router/recommend" || path == "/v1/router/observation":
+		// These routes are legacy/global and are gated before authorization. The
+		// explicit workspace permission keeps the migration-only opt-in narrow.
+		return contracts.PermissionWorkspaceRead
 	case strings.HasPrefix(path, "/v1/federation/"):
 		if r.Method == http.MethodGet {
 			return contracts.PermissionWorkspaceRead

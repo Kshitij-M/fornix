@@ -2,6 +2,10 @@
 
 Status: current alpha operator reference.
 
+Important: this runbook demonstrates durable reservation and reconciliation
+records only. Fornix does not dispatch generic provider effects; the current
+execute route supports trusted read-only and observation capabilities.
+
 This runbook demonstrates the domain-neutral operation lifecycle. It uses
 hashes and references rather than raw provider payloads. Replace the example
 IDs and hashes with values returned by the preceding command.
@@ -74,6 +78,9 @@ After a provider response, record only bounded identifiers and hashes:
 
 ```sh
 fornix operation effect-state --id OPERATION_ID --effect-id EFFECT_ID \
+  --state dispatching --idempotency dispatch-intent-1 --fence FENCE
+
+fornix operation effect-state --id OPERATION_ID --effect-id EFFECT_ID \
   --state dispatched --provider-request-id PROVIDER_REQUEST_ID \
   --idempotency dispatch-1 --fence FENCE
 
@@ -94,6 +101,16 @@ investigate the provider by its idempotency key. Never treat a lost response
 as proof that the request was not accepted. A stale worker cannot append a
 transition after lease takeover. Repeating a committed idempotency command is
 read-only; changing its logical state is a conflict.
+
+For recovery after the original operation lease expires, discover and claim
+the effect with the separate effect fence:
+
+```sh
+fornix operation effect-recovery --limit 32
+fornix operation effect-lease --id OPERATION_ID --effect-id EFFECT_ID
+fornix operation effect-state --id OPERATION_ID --effect-id EFFECT_ID \
+  --state recovery_required --idempotency recovery-1 --effect-fence EFFECT_FENCE
+```
 
 ## What this runbook does not do
 

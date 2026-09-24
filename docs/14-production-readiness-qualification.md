@@ -12,7 +12,8 @@ task coordination, retrieval, and code indexing.
 The product direction is **verifiable AI work infrastructure for long-running
 production-system operations**. The goal is to let teams delegate serious
 work to AI without losing control of scope, cost, evidence, approval, or
-recovery. Repository maintenance is the first qualified adapter. The current
+recovery. Repository maintenance is the first alpha-qualified local adapter.
+The current
 qualification proves the substrate behind that goal; it does not qualify
 unattended changes to important production systems.
 
@@ -24,7 +25,7 @@ still requires safe patch application and reviewer-facing change validation.
 
 ## Universal transformation status
 
-The repository-first alpha is the first qualified adapter for a broader
+The repository-first alpha is the first alpha-qualified local adapter for a broader
 product: a control plane for verifiable AI work against production systems.
 The universal contracts, process-local connector registry, and first generic
 operation authority establish the adapter boundary, but the alpha is not yet
@@ -210,10 +211,10 @@ contains the current/planned domain matrix and the precise category boundary.
   response evidence now has a transactional artifact reference. Tool/agent
   output migration, object-backed cold tiers, and a retention compactor remain
   follow-up work.
-- No backup/restore drill, high-availability plan, capacity benchmark, metric
-  exporter/collector, metric retention compactor, or operational backpressure
-  policy. The Task 15 endpoint is a bounded Postgres snapshot, not a
-  Prometheus/OTel replacement.
+- A destructive logical backup/restore drill exists, but production backup
+  scheduling, WAL/PITR, HA/failover, restore-owner procedures, deployment-
+  specific RPO/RTO evidence, and capacity benchmarks remain open. The Task 15
+  endpoint is a bounded Postgres snapshot, not a Prometheus/OTel replacement.
 - No background evaluation scheduler, general historical import pipeline, or
   full multi-tenant administration UX. Recorded surfaces require binary gold
   evidence labels and the current CLI/API intentionally uses redacted hashes

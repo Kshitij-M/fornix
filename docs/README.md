@@ -59,7 +59,7 @@ engineering history:
   summaries. A completion note is the more reliable source when a historical
   foundation intention differs from the current implementation.
 
-The project has 38 numbered repository/control-plane and universal-operation
+The project has 39 numbered repository/control-plane and universal-operation
 implementation loops plus the packaging and transformation delivery records
 below. Those loops build the control-plane substrate and reference adapters;
 they are not a claim that the complete production-system operations product is
@@ -134,6 +134,7 @@ and [`71-loop-25-completion.md`](71-loop-25-completion.md).
 | 36 | Operation result authority binding | [`95-operation-result-authority-foundation.md`](95-operation-result-authority-foundation.md) | [`96-loop-36-completion.md`](96-loop-36-completion.md) |
 | 37 | Snapshot and cursor-based operation replay | [`97-snapshot-replay-foundation.md`](97-snapshot-replay-foundation.md) | [`98-loop-37-completion.md`](98-loop-37-completion.md) |
 | 38 | Backup and restore qualification harness | [`99-backup-restore-qualification-foundation.md`](99-backup-restore-qualification-foundation.md) | [`100-loop-38-completion.md`](100-loop-38-completion.md) |
+| 39 | Independent external-effect recovery ownership | [`101-external-effect-recovery-foundation.md`](101-external-effect-recovery-foundation.md) | [`102-loop-39-completion.md`](102-loop-39-completion.md) |
 
 ## Local package and managed runtime
 

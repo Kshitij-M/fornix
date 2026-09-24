@@ -78,7 +78,7 @@ Migration `036_operation_admission_effects.sql` adds:
   identity, redacted input hashes, decision status, reason, actor, and quota
   reservation;
 - current approval state plus append-only approval history;
-- append-only external-effect state transitions for reserved, dispatched,
+- append-only external-effect state transitions for reserved, dispatching, dispatched,
   acknowledged, verification, compensation, and recovery outcomes;
 - current effect state for bounded lookup and crash recovery.
 

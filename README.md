@@ -449,8 +449,10 @@ Repository maintenance is the first adapter and qualification path. The
 current alpha still lacks a fully automated agent-to-change workflow, OAuth/SSO,
 external KMS or secret-manager integration, PostgreSQL row-level security,
 general background evaluation and ingestion scheduling, multi-agent execution
-graphs, a general sandbox provider, external artifact storage, backup/restore
-drills, capacity benchmarks, and high-availability operations.
+graphs, a general sandbox provider, external artifact storage, deployment-
+specific backup/PITR/HA operations, and capacity benchmarks. A destructive
+logical backup/restore qualification drill exists, but it is not a production
+RPO/RTO or failover guarantee.
 
 The roadmap is expressed as architecture and completion records rather than
 an implied promise that every planned feature is production-ready. If you are

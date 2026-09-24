@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -243,6 +244,10 @@ func TestAdmissionStoreEffectRecoveryIsFencedAndReplayable(t *testing.T) {
 	if err != nil || !inserted {
 		t.Fatalf("effect = %+v inserted=%v err=%v", effect, inserted, err)
 	}
+	dispatching, err := admissionStore.UpdateEffect(context.Background(), contracts.ExternalEffectUpdate{WorkspaceID: workspace, OperationID: created.Operation.ID, EffectID: effect.EffectID, OwnerID: "worker-a", Fence: lease.Lease.Fence, RequestID: "dispatch-intent", IdempotencyKey: "dispatch-intent", State: contracts.ExternalEffectDispatching})
+	if err != nil || dispatching.State.State != contracts.ExternalEffectDispatching {
+		t.Fatalf("dispatch intent = %+v err=%v", dispatching, err)
+	}
 	dispatched, err := admissionStore.UpdateEffect(context.Background(), contracts.ExternalEffectUpdate{WorkspaceID: workspace, OperationID: created.Operation.ID, EffectID: effect.EffectID, OwnerID: "worker-a", Fence: lease.Lease.Fence, RequestID: "dispatch-request", IdempotencyKey: "dispatch-effect", State: contracts.ExternalEffectDispatched, ProviderRequestID: "provider-request"})
 	if err != nil || dispatched.State.State != contracts.ExternalEffectDispatched {
 		t.Fatalf("dispatch = %+v err=%v", dispatched, err)
@@ -267,8 +272,123 @@ func TestAdmissionStoreEffectRecoveryIsFencedAndReplayable(t *testing.T) {
 	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM fornix.operation_effect_transitions WHERE workspace_id=$1 AND effect_id=$2`, workspace, effect.EffectID).Scan(&history); err != nil {
 		t.Fatal(err)
 	}
-	if history != 3 {
-		t.Fatalf("effect history rows=%d, want initial+dispatch+ack", history)
+	if history != 4 {
+		t.Fatalf("effect history rows=%d, want initial+dispatching+dispatch+ack", history)
+	}
+}
+
+func TestAdmissionStoreIndependentEffectLeaseRecoversAfterTerminalOperation(t *testing.T) {
+	operationStore, pool, workspace := newOperationTestStore(t)
+	admissionStore := NewAdmissionStore(pool, NewEventStore(pool))
+	definition := admissionDefinition(t, workspace, contracts.EffectClassReversibleWrite, false)
+	request := operationTestRequest(t, workspace, "effect-independent-lease")
+	request.Capability = definition.Ref
+	if err := request.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	plan := operationTestPlan(t, request)
+	created, err := operationStore.Create(context.Background(), OperationCreateInput{Request: request, Plan: &plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	operationLease, err := operationStore.AcquireLease(context.Background(), workspace, created.Operation.ID, "operation-worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := testHash("effect-independent-request")
+	attempt, inserted, err := operationStore.ReserveAttempt(context.Background(), OperationAttemptInput{WorkspaceID: workspace, OperationID: created.Operation.ID, StepID: "step-1", Attempt: 1, AttemptID: "attempt-independent-lease", OwnerID: "operation-worker", Fence: operationLease.Lease.Fence, RequestHash: hash, IdempotencyKey: "attempt-independent-lease"})
+	if err != nil || !inserted {
+		t.Fatalf("reserve attempt inserted=%v err=%v", inserted, err)
+	}
+	effect, inserted, err := operationStore.ReserveEffect(context.Background(), OperationEffectInput{WorkspaceID: workspace, OperationID: created.Operation.ID, StepID: "step-1", AttemptID: attempt.AttemptID, OwnerID: "operation-worker", Fence: operationLease.Lease.Fence, RequestHash: hash, Effect: contracts.ExternalEffect{WorkspaceID: workspace, Boundary: "fixture", Class: contracts.EffectClassReversibleWrite, DeliveryGuarantee: contracts.ExternalDeliveryAtLeastOnce, IdempotencyKey: "provider-independent-lease", VerificationRequired: true, VerificationStatus: contracts.ExternalVerificationPending, CompensationStatus: contracts.ExternalCompensationAvailable}})
+	if err != nil || !inserted {
+		t.Fatalf("reserve effect inserted=%v err=%v", inserted, err)
+	}
+	if _, err := admissionStore.AcquireEffectLease(context.Background(), workspace, created.Operation.ID+"-wrong", effect.EffectID, "wrong-operation", time.Minute); !errors.Is(err, ErrOperationNotFound) {
+		t.Fatalf("wrong operation lease error=%v, want operation not found", err)
+	}
+	premature, err := admissionStore.AcquireEffectLease(context.Background(), workspace, created.Operation.ID, effect.EffectID, "premature-recovery", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admissionStore.UpdateEffect(context.Background(), contracts.ExternalEffectUpdate{WorkspaceID: workspace, OperationID: created.Operation.ID, EffectID: effect.EffectID, OwnerID: "premature-recovery", Fence: premature.Lease.Fence, LeaseKind: "effect", RequestID: "premature-dispatch", IdempotencyKey: "premature-dispatch", State: contracts.ExternalEffectDispatched}); !errors.Is(err, ErrAdmissionEffect) {
+		t.Fatalf("effect lease dispatch error=%v, want admission rejection", err)
+	}
+	if err := admissionStore.ReleaseEffectLease(context.Background(), premature.Lease); err != nil {
+		t.Fatal(err)
+	}
+	expiring, err := admissionStore.AcquireEffectLease(context.Background(), workspace, created.Operation.ID, effect.EffectID, "expiring-recovery", 10*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(25 * time.Millisecond)
+	takeover, err := admissionStore.AcquireEffectLease(context.Background(), workspace, created.Operation.ID, effect.EffectID, "takeover-recovery", time.Minute)
+	if err != nil || !takeover.Takeover || takeover.Lease.Fence <= expiring.Lease.Fence {
+		t.Fatalf("effect lease takeover=%+v err=%v", takeover, err)
+	}
+	if _, err := admissionStore.UpdateEffect(context.Background(), contracts.ExternalEffectUpdate{WorkspaceID: workspace, OperationID: created.Operation.ID, EffectID: effect.EffectID, OwnerID: "expiring-recovery", Fence: expiring.Lease.Fence, LeaseKind: "effect", RequestID: "expired-recovery", IdempotencyKey: "expired-recovery", State: contracts.ExternalEffectDispatching}); !errors.Is(err, ErrEffectLeaseFenced) && !errors.Is(err, ErrEffectLeaseExpired) {
+		t.Fatalf("expired effect lease error=%v, want fenced or expired", err)
+	}
+	if err := admissionStore.ReleaseEffectLease(context.Background(), takeover.Lease); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admissionStore.UpdateEffect(context.Background(), contracts.ExternalEffectUpdate{WorkspaceID: workspace, OperationID: created.Operation.ID, EffectID: effect.EffectID, OwnerID: "operation-worker", Fence: operationLease.Lease.Fence, RequestID: "dispatching-independent", IdempotencyKey: "dispatching-independent", State: contracts.ExternalEffectDispatching}); err != nil {
+		t.Fatalf("record dispatch intent: %v", err)
+	}
+	if _, err := admissionStore.UpdateEffect(context.Background(), contracts.ExternalEffectUpdate{WorkspaceID: workspace, OperationID: created.Operation.ID, EffectID: effect.EffectID, OwnerID: "operation-worker", Fence: operationLease.Lease.Fence, RequestID: "dispatched-independent", IdempotencyKey: "dispatched-independent", State: contracts.ExternalEffectDispatched, ProviderRequestID: "provider-independent"}); err != nil {
+		t.Fatalf("record dispatched effect: %v", err)
+	}
+	for _, status := range []string{contracts.OperationStatusPlanned, contracts.OperationStatusAdmitted, contracts.OperationStatusRunning, contracts.OperationStatusAwaitingExternal, contracts.OperationStatusVerifying, contracts.OperationStatusSucceeded} {
+		if _, err := operationStore.Transition(context.Background(), OperationTransitionInput{WorkspaceID: workspace, OperationID: created.Operation.ID, OwnerID: "operation-worker", Fence: operationLease.Lease.Fence, Actor: request.Actor, RequestID: "terminal-" + status, IdempotencyKey: "terminal-" + status, ToStatus: status, ReasonCode: "qualification"}); err != nil {
+			t.Fatalf("transition %s: %v", status, err)
+		}
+	}
+	recovery, err := admissionStore.AcquireEffectLease(context.Background(), workspace, created.Operation.ID, effect.EffectID, "recovery-worker-a", time.Minute)
+	if err != nil || recovery.Lease.Fence == 0 {
+		t.Fatalf("acquire recovery lease=%+v err=%v", recovery, err)
+	}
+	var contenders sync.WaitGroup
+	contenders.Add(1)
+	var heldErr error
+	go func() {
+		defer contenders.Done()
+		_, heldErr = admissionStore.AcquireEffectLease(context.Background(), workspace, created.Operation.ID, effect.EffectID, "recovery-worker-b", time.Minute)
+	}()
+	contenders.Wait()
+	if !errors.Is(heldErr, ErrEffectLeaseHeld) {
+		t.Fatalf("concurrent recovery owner error=%v, want held", heldErr)
+	}
+	if _, err := admissionStore.UpdateEffect(context.Background(), contracts.ExternalEffectUpdate{WorkspaceID: workspace, OperationID: created.Operation.ID, EffectID: effect.EffectID, OwnerID: "recovery-worker-b", Fence: recovery.Lease.Fence, LeaseKind: "effect", RequestID: "stale-recovery", IdempotencyKey: "stale-recovery", State: contracts.ExternalEffectAcknowledged}); !errors.Is(err, ErrEffectLeaseOwned) {
+		t.Fatalf("wrong recovery owner error=%v, want owned", err)
+	}
+	updates := make([]EffectStateResult, 2)
+	updateErrors := make([]error, 2)
+	var updatesGroup sync.WaitGroup
+	for index := range updates {
+		updatesGroup.Add(1)
+		go func(index int) {
+			defer updatesGroup.Done()
+			updates[index], updateErrors[index] = admissionStore.UpdateEffect(context.Background(), contracts.ExternalEffectUpdate{WorkspaceID: workspace, OperationID: created.Operation.ID, EffectID: effect.EffectID, OwnerID: "recovery-worker-a", Fence: recovery.Lease.Fence, LeaseKind: "effect", RequestID: "recovery-ack-" + strconv.Itoa(index), IdempotencyKey: "recovery-ack", State: contracts.ExternalEffectAcknowledged, ResponseHash: testHash("provider-recovered")})
+		}(index)
+	}
+	updatesGroup.Wait()
+	duplicates := 0
+	for index := range updates {
+		if updateErrors[index] != nil || updates[index].State.State != contracts.ExternalEffectAcknowledged {
+			t.Fatalf("terminal-operation recovery update[%d]=%+v err=%v", index, updates[index], updateErrors[index])
+		}
+		if updates[index].Duplicate {
+			duplicates++
+		}
+	}
+	if duplicates != 1 {
+		t.Fatalf("concurrent duplicate recovery commands=%d, want one duplicate", duplicates)
+	}
+	if err := admissionStore.ReleaseEffectLease(context.Background(), recovery.Lease); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := admissionStore.UpdateEffect(context.Background(), contracts.ExternalEffectUpdate{WorkspaceID: workspace, OperationID: created.Operation.ID, EffectID: effect.EffectID, OwnerID: "recovery-worker-a", Fence: recovery.Lease.Fence, LeaseKind: "effect", RequestID: "released-recovery", IdempotencyKey: "released-recovery", State: contracts.ExternalEffectAcknowledged}); !errors.Is(err, ErrEffectLeaseReleased) {
+		t.Fatalf("released recovery lease error=%v, want released", err)
 	}
 }
 

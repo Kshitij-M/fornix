@@ -450,7 +450,7 @@ func (c *operatorCLI) runCommand(args []string) error {
 // lifecycle commands use the same authenticated HTTP authority.
 func (c *operatorCLI) operationCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("operation requires create, execute, get, lease, renew, release, effect-reserve, effect-get, effect-state, transition, or replay")
+		return errors.New("operation requires create, execute, get, lease, renew, release, effect-reserve, effect-get, effect-state, effect-lease, effect-renew, effect-release, effect-recovery, transition, or replay")
 	}
 	switch args[0] {
 	case "create":
@@ -528,7 +528,39 @@ func (c *operatorCLI) operationCommand(args []string) error {
 		}
 		path := "/v1/operations/" + url.PathEscape(id) + "/effects/" + url.PathEscape(effectID) + "/state?workspace_id=" + url.QueryEscape(c.workspace)
 		body := map[string]any{"request_id": valueArg(args[1:], "request-id", ""), "idempotency_key": valueArg(args[1:], "idempotency", ""), "state": valueArg(args[1:], "state", ""), "provider_request_id": valueArg(args[1:], "provider-request-id", ""), "response_hash": valueArg(args[1:], "response-hash", ""), "verification_hash": valueArg(args[1:], "verification-hash", ""), "compensation_hash": valueArg(args[1:], "compensation-hash", ""), "failure_code": valueArg(args[1:], "failure-code", "")}
-		return c.requestPrintWithHeaders(http.MethodPost, path, body, false, map[string]string{"X-Operation-Fence": strconv.FormatUint(uint64Value(args[1:], "fence", 0), 10)})
+		headers := map[string]string{"X-Operation-Fence": strconv.FormatUint(uint64Value(args[1:], "fence", 0), 10)}
+		if effectFence := uint64Value(args[1:], "effect-fence", 0); effectFence != 0 {
+			delete(headers, "X-Operation-Fence")
+			headers["X-Effect-Fence"] = strconv.FormatUint(effectFence, 10)
+		}
+		return c.requestPrintWithHeaders(http.MethodPost, path, body, false, headers)
+	case "effect-lease":
+		id := valueArg(args[1:], "id", "")
+		effectID := valueArg(args[1:], "effect-id", "")
+		if id == "" || effectID == "" {
+			return errors.New("operation effect-lease requires --id ID and --effect-id ID")
+		}
+		path := "/v1/operations/" + url.PathEscape(id) + "/effects/" + url.PathEscape(effectID) + "/lease?workspace_id=" + url.QueryEscape(c.workspace)
+		return c.requestPrint(http.MethodPost, path, map[string]any{"ttl_ms": int64Value(args[1:], "ttl-ms", 90000)}, false)
+	case "effect-renew":
+		id := valueArg(args[1:], "id", "")
+		effectID := valueArg(args[1:], "effect-id", "")
+		if id == "" || effectID == "" {
+			return errors.New("operation effect-renew requires --id ID and --effect-id ID")
+		}
+		path := "/v1/operations/" + url.PathEscape(id) + "/effects/" + url.PathEscape(effectID) + "/renew?workspace_id=" + url.QueryEscape(c.workspace)
+		return c.requestPrintWithHeaders(http.MethodPost, path, map[string]any{"ttl_ms": int64Value(args[1:], "ttl-ms", 90000)}, false, map[string]string{"X-Effect-Fence": strconv.FormatUint(uint64Value(args[1:], "effect-fence", 0), 10)})
+	case "effect-release":
+		id := valueArg(args[1:], "id", "")
+		effectID := valueArg(args[1:], "effect-id", "")
+		if id == "" || effectID == "" {
+			return errors.New("operation effect-release requires --id ID and --effect-id ID")
+		}
+		path := "/v1/operations/" + url.PathEscape(id) + "/effects/" + url.PathEscape(effectID) + "/release?workspace_id=" + url.QueryEscape(c.workspace)
+		return c.requestPrintWithHeaders(http.MethodPost, path, nil, false, map[string]string{"X-Effect-Fence": strconv.FormatUint(uint64Value(args[1:], "effect-fence", 0), 10)})
+	case "effect-recovery":
+		path := "/v1/operation-effects/recovery?workspace_id=" + url.QueryEscape(c.workspace) + "&limit=" + strconv.Itoa(intValue(args[1:], "limit", 64))
+		return c.requestPrint(http.MethodGet, path, nil, false)
 	case "get":
 		return c.requestPrint(http.MethodGet, "/v1/operations/"+url.PathEscape(valueArg(args[1:], "id", ""))+"?workspace_id="+url.QueryEscape(c.workspace), nil, false)
 	case "lease":

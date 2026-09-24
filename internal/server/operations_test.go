@@ -295,13 +295,39 @@ func TestGenericOperationHTTPReservesAndReconcilesExternalEffect(t *testing.T) {
 		t.Fatalf("get reserved status=%d body=%s", got.Code, got.Body.String())
 	}
 	statePath := "/v1/operations/" + created.Operation.ID + "/effects/" + effectID + "/state?workspace_id=" + workspaceID
-	stateBody := []byte(`{"idempotency_key":"effect-dispatch-http","state":"dispatched","provider_request_id":"provider-request-http"}`)
+	stateBody := []byte(`{"idempotency_key":"effect-dispatch-intent-http","state":"dispatching"}`)
+	dispatching := performOperationRequest(handler, token, workspaceID, http.MethodPost, statePath, stateBody, fenceHeaders)
+	if dispatching.Code != http.StatusOK {
+		t.Fatalf("dispatch intent status=%d body=%s", dispatching.Code, dispatching.Body.String())
+	}
+	stateBody = []byte(`{"idempotency_key":"effect-dispatch-http","state":"dispatched","provider_request_id":"provider-request-http"}`)
 	dispatched := performOperationRequest(handler, token, workspaceID, http.MethodPost, statePath, stateBody, fenceHeaders)
-	if dispatched.Code != http.StatusOK {
+	if dispatched.Code != http.StatusOK || stringValue(t, objectValue(t, decodeOperationJSON(t, dispatched), "effect"), "state") != contracts.ExternalEffectDispatched {
 		t.Fatalf("dispatch status=%d body=%s", dispatched.Code, dispatched.Body.String())
 	}
-	if stringValue(t, objectValue(t, decodeOperationJSON(t, dispatched), "effect"), "state") != contracts.ExternalEffectDispatched {
-		t.Fatalf("dispatch response=%s", dispatched.Body.String())
+	recoveryList := performOperationRequest(handler, token, workspaceID, http.MethodGet, "/v1/operation-effects/recovery?workspace_id="+workspaceID+"&limit=8", nil, nil)
+	if recoveryList.Code != http.StatusOK || len(objectSliceValue(t, decodeOperationJSON(t, recoveryList), "effects")) != 1 {
+		t.Fatalf("recovery list status=%d body=%s", recoveryList.Code, recoveryList.Body.String())
+	}
+	effectLeasePath := "/v1/operations/" + created.Operation.ID + "/effects/" + effectID + "/lease?workspace_id=" + workspaceID
+	recoveryLease := performOperationRequest(handler, token, workspaceID, http.MethodPost, effectLeasePath, []byte(`{"ttl_ms":30000}`), nil)
+	if recoveryLease.Code != http.StatusOK {
+		t.Fatalf("recovery lease status=%d body=%s", recoveryLease.Code, recoveryLease.Body.String())
+	}
+	recoveryLeaseJSON := decodeOperationJSON(t, recoveryLease)
+	effectFence := stringValue(t, objectValue(t, recoveryLeaseJSON, "lease"), "fence")
+	if effectFence == "" || effectFence == "0" {
+		t.Fatalf("invalid effect fence=%s", effectFence)
+	}
+	effectAckPath := "/v1/operations/" + created.Operation.ID + "/effects/" + effectID + "/state?workspace_id=" + workspaceID
+	effectAck := performOperationRequest(handler, token, workspaceID, http.MethodPost, effectAckPath, []byte(`{"idempotency_key":"effect-ack-recovery-http","state":"acknowledged","response_hash":"`+hash+`"}`), map[string]string{"X-Effect-Fence": effectFence})
+	if effectAck.Code != http.StatusOK || stringValue(t, objectValue(t, decodeOperationJSON(t, effectAck), "effect"), "state") != contracts.ExternalEffectAcknowledged {
+		t.Fatalf("effect recovery ack status=%d body=%s", effectAck.Code, effectAck.Body.String())
+	}
+	effectReleasePath := "/v1/operations/" + created.Operation.ID + "/effects/" + effectID + "/release?workspace_id=" + workspaceID
+	effectRelease := performOperationRequest(handler, token, workspaceID, http.MethodPost, effectReleasePath, nil, map[string]string{"X-Effect-Fence": effectFence})
+	if effectRelease.Code != http.StatusOK {
+		t.Fatalf("effect release status=%d body=%s", effectRelease.Code, effectRelease.Body.String())
 	}
 	duplicate := performOperationRequest(handler, token, workspaceID, http.MethodPost, statePath, stateBody, fenceHeaders)
 	if duplicate.Code != http.StatusOK || !boolValue(t, decodeOperationJSON(t, duplicate), "duplicate") {
@@ -380,6 +406,15 @@ func objectValue(t *testing.T, value map[string]any, key string) map[string]any 
 		t.Fatalf("response key %q is not an object: %s", key, responseJSON(value))
 	}
 	return object
+}
+
+func objectSliceValue(t *testing.T, value map[string]any, key string) []any {
+	t.Helper()
+	items, ok := value[key].([]any)
+	if !ok {
+		t.Fatalf("%s is not an array in %s", key, responseJSON(value))
+	}
+	return items
 }
 
 func stringValue(t *testing.T, value map[string]any, key string) string {

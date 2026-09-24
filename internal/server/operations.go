@@ -33,6 +33,10 @@ type operationLeaseRequest struct {
 	TTLMS int64 `json:"ttl_ms,omitempty"`
 }
 
+type operationEffectLeaseRequest struct {
+	TTLMS int64 `json:"ttl_ms,omitempty"`
+}
+
 // operationEffectReserveRequest is deliberately reference-only. The effect
 // payload is owned by the connector and must be represented by hashes and
 // provider identifiers, never by credentials or arbitrary request bytes.
@@ -169,6 +173,10 @@ func (s *server) handleOperation(w http.ResponseWriter, r *http.Request) {
 		s.handleOperationEffectState(w, r, operationID, parts[2])
 		return
 	}
+	if len(parts) == 4 && parts[1] == "effects" && r.Method == http.MethodPost {
+		s.handleOperationEffectLeaseCommand(w, r, operationID, parts[2], parts[3])
+		return
+	}
 	if len(parts) != 2 || r.Method != http.MethodPost {
 		writeErr(w, http.StatusNotFound, "unknown operation command")
 		return
@@ -267,6 +275,89 @@ func (s *server) handleOperationEffectGet(w http.ResponseWriter, r *http.Request
 	writeJSON(w, http.StatusOK, map[string]any{"effect": publicEffectState(state)})
 }
 
+// handleOperationEffectLeaseCommand owns recovery-worker lease lifecycle. A
+// recovery lease is distinct from the operation lease so terminal parent
+// operations do not strand uncertain external effects.
+func (s *server) handleOperationEffectLeaseCommand(w http.ResponseWriter, r *http.Request, operationID, effectID, command string) {
+	if s.admission == nil {
+		writeErr(w, http.StatusServiceUnavailable, "effect admission unavailable")
+		return
+	}
+	principal, ok := principalFromRequest(r)
+	if !ok || !principal.Authenticated {
+		writeErr(w, http.StatusUnauthorized, "unauthorised")
+		return
+	}
+	workspaceID := requestWorkspace(r, r.URL.Query().Get("workspace_id"))
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	operation, err := s.operations.Get(ctx, workspaceID, operationID)
+	if err != nil {
+		writeOperationErr(w, err)
+		return
+	}
+	if operation.Request.Actor.ID != principal.ID || operation.Request.Actor.WorkspaceID != principal.WorkspaceID {
+		writeOperationErr(w, store.ErrOperationWorkspace)
+		return
+	}
+	switch command {
+	case "lease":
+		var input operationEffectLeaseRequest
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&input); err != nil && !errors.Is(err, io.EOF) {
+			writeErr(w, http.StatusBadRequest, "invalid effect lease request")
+			return
+		}
+		result, err := s.admission.AcquireEffectLease(ctx, workspaceID, operationID, effectID, principal.ID, boundedEffectLeaseTTL(input.TTLMS))
+		if err != nil {
+			writeAdmissionErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"lease": publicEffectLease(result.Lease), "acquired": result.Acquired, "reused": result.Reused, "takeover": result.Takeover})
+	case "renew":
+		var input operationEffectLeaseRequest
+		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&input); err != nil && !errors.Is(err, io.EOF) {
+			writeErr(w, http.StatusBadRequest, "invalid effect lease renewal request")
+			return
+		}
+		result, err := s.admission.RenewEffectLease(ctx, store.EffectLease{WorkspaceID: workspaceID, EffectID: effectID, OwnerID: principal.ID, Fence: effectFenceHeader(r)}, boundedEffectLeaseTTL(input.TTLMS))
+		if err != nil {
+			writeAdmissionErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"lease": publicEffectLease(result)})
+	case "release":
+		err := s.admission.ReleaseEffectLease(ctx, store.EffectLease{WorkspaceID: workspaceID, EffectID: effectID, OwnerID: principal.ID, Fence: effectFenceHeader(r)})
+		if err != nil {
+			writeAdmissionErr(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"released": true, "workspace_id": workspaceID, "effect_id": effectID})
+	default:
+		writeErr(w, http.StatusNotFound, "unknown effect lease command")
+	}
+}
+
+func (s *server) handleRecoverableEffects(w http.ResponseWriter, r *http.Request) {
+	if s.admission == nil {
+		writeErr(w, http.StatusServiceUnavailable, "effect admission unavailable")
+		return
+	}
+	workspaceID := requestWorkspace(r, r.URL.Query().Get("workspace_id"))
+	limit, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("limit")))
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	items, err := s.admission.ListRecoverableEffects(ctx, workspaceID, limit)
+	if err != nil {
+		writeAdmissionErr(w, err)
+		return
+	}
+	result := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		result = append(result, map[string]any{"effect": publicOperationEffect(item.Effect), "state": publicEffectState(item.State)})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"workspace_id": workspaceID, "effects": result, "limit": len(result)})
+}
+
 func (s *server) handleOperationEffectState(w http.ResponseWriter, r *http.Request, operationID, effectID string) {
 	if s.admission == nil {
 		writeErr(w, http.StatusServiceUnavailable, "effect admission unavailable")
@@ -313,9 +404,15 @@ func (s *server) handleOperationEffectState(w http.ResponseWriter, r *http.Reque
 	if requestID == "" {
 		requestID = "effect-state:" + input.IdempotencyKey
 	}
+	leaseKind := ""
+	fence := operationLeaseFence(r)
+	if effectFence := effectFenceHeader(r); effectFence != 0 {
+		leaseKind = "effect"
+		fence = effectFence
+	}
 	result, err := s.admission.UpdateEffect(ctx, contracts.ExternalEffectUpdate{
 		WorkspaceID: workspaceID, OperationID: operationID, EffectID: effectID, OwnerID: principal.ID,
-		Fence: operationLeaseFence(r), RequestID: requestID, IdempotencyKey: input.IdempotencyKey,
+		Fence: fence, LeaseKind: leaseKind, RequestID: requestID, IdempotencyKey: input.IdempotencyKey,
 		State: input.State, ProviderRequestID: input.ProviderRequestID, ResponseHash: input.ResponseHash,
 		VerificationHash: input.VerificationHash, CompensationHash: input.CompensationHash, FailureCode: input.FailureCode,
 	})
@@ -468,6 +565,10 @@ func (s *server) handleOperationExecute(w http.ResponseWriter, r *http.Request, 
 		writeErr(w, http.StatusConflict, "connector plan changed during execution")
 		return
 	}
+	// The connector validates the admitted request hash. The durable operation
+	// authority additionally binds the result to the persisted operation hash,
+	// which includes the normalized plan identity.
+	outcome.Result.OperationHash = operation.OperationHash
 	written, err := s.operations.RecordResult(ctx, store.OperationResultInput{WorkspaceID: workspaceID, OperationID: operationID, OwnerID: ownerID, Fence: lease.Fence, TaskOwnerID: taskOwnerID, TaskFence: taskFence, Actor: principal.Actor(), RequestID: requestIDFromRequest(r), IdempotencyKey: executionKey + ":result", CausationID: operation.Request.CausationID, CorrelationID: operation.Request.CorrelationID, Result: outcome.Result})
 	if err != nil {
 		writeOperationErr(w, err)
@@ -500,6 +601,22 @@ func operationFenceHeader(r *http.Request) uint64 {
 		return 0
 	}
 	return fence
+}
+
+func effectFenceHeader(r *http.Request) uint64 {
+	value, _ := strconv.ParseUint(strings.TrimSpace(r.Header.Get("X-Effect-Fence")), 10, 64)
+	return value
+}
+
+func boundedEffectLeaseTTL(milliseconds int64) time.Duration {
+	if milliseconds <= 0 {
+		return 90 * time.Second
+	}
+	maxMilliseconds := int64((24 * time.Hour) / time.Millisecond)
+	if milliseconds > maxMilliseconds {
+		milliseconds = maxMilliseconds
+	}
+	return time.Duration(milliseconds) * time.Millisecond
 }
 
 func safeConnectorFailure(err error) string {
@@ -694,7 +811,7 @@ func publicOperationEffect(effect store.OperationEffect) map[string]any {
 		"attempt_id": effect.AttemptID, "effect_id": effect.EffectID, "effect_class": effect.EffectClass,
 		"boundary": effect.Boundary, "idempotency_key": effect.IdempotencyKey,
 		"provider_request_id": effect.ProviderRequestID, "provider_idempotency_supported": effect.ProviderIdempotency,
-		"delivery_semantics": effect.DeliverySemantics, "verification_status": effect.VerificationStatus,
+		"delivery_semantics": effect.DeliverySemantics, "verification_required": effect.VerificationRequired, "verification_status": effect.VerificationStatus,
 		"compensation_status": effect.CompensationStatus, "request_hash": effect.RequestHash,
 		"response_hash": effect.ResponseHash, "created_at": effect.CreatedAt, "verified_at": effect.VerifiedAt,
 	}
@@ -707,6 +824,10 @@ func publicEffectState(state store.EffectState) map[string]any {
 		"response_hash": state.ResponseHash, "verification_hash": state.VerificationHash,
 		"compensation_hash": state.CompensationHash, "failure_code": state.FailureCode, "updated_at": state.UpdatedAt,
 	}
+}
+
+func publicEffectLease(lease store.EffectLease) map[string]any {
+	return map[string]any{"workspace_id": lease.WorkspaceID, "effect_id": lease.EffectID, "owner_id": lease.OwnerID, "fence": lease.Fence, "lease_until": lease.LeaseUntil, "acquired_at": lease.AcquiredAt, "renewed_at": lease.RenewedAt, "released_at": lease.ReleasedAt}
 }
 
 func writeOperationErr(w http.ResponseWriter, err error) {
@@ -734,6 +855,8 @@ func writeAdmissionErr(w http.ResponseWriter, err error) {
 	case errors.Is(err, store.ErrAdmissionConflict), errors.Is(err, store.ErrAdmissionEffect), errors.Is(err, store.ErrAdmissionEffectTerminal),
 		errors.Is(err, store.ErrOperationLeaseMissing), errors.Is(err, store.ErrOperationLeaseHeld), errors.Is(err, store.ErrOperationLeaseOwned),
 		errors.Is(err, store.ErrOperationLeaseFenced), errors.Is(err, store.ErrOperationLeaseExpired), errors.Is(err, store.ErrOperationLeaseReleased),
+		errors.Is(err, store.ErrEffectLeaseMissing), errors.Is(err, store.ErrEffectLeaseHeld), errors.Is(err, store.ErrEffectLeaseOwned),
+		errors.Is(err, store.ErrEffectLeaseFenced), errors.Is(err, store.ErrEffectLeaseExpired), errors.Is(err, store.ErrEffectLeaseReleased),
 		errors.Is(err, store.ErrOperationIdempotency):
 		status = http.StatusConflict
 	}

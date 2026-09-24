@@ -2,7 +2,7 @@
 
 Status: canonical product and architecture overview for the universal
 transformation; the current implementation is alpha and the repository
-adapter is the first qualified adapter.
+adapter is the first alpha-qualified local adapter.
 
 ## The category
 
@@ -118,7 +118,7 @@ silently bypass Fornix identity, policy, fencing, evidence, or receipt rules.
 | Typed universal operation vocabulary | Implemented alpha foundation | Contracts for systems, resources, connectors, capabilities, effects, plans, results, evidence, and receipts |
 | Events, checkpoints, leases, fencing, retrieval, evidence, artifacts, model/tool boundaries, and evaluation | Implemented alpha foundation | Postgres-backed control-plane substrate; see qualification limits |
 | Connector and capability registry | Implemented alpha foundation | Process-local, explicit, fail-closed admission; not durable operation authority |
-| Repository ingestion and read-only inspection | First qualified adapter | Explicit local mounts, bounded indexing, evidence, artifacts, and replay |
+| Repository ingestion and read-only inspection | Alpha-qualified local adapter | Explicit local mounts, bounded indexing, evidence, artifacts, and replay; not qualification for unattended production changes |
 | Repository change and validation | First write-boundary vertical slice | Approval-gated local filesystem effects with recovery-required semantics |
 | Durable generic operation authority | Implemented alpha foundation: Issue [#39](https://github.com/Kshitij-M/fornix/issues/39) | One Postgres-backed operation identity, lifecycle, attempts, effects, callbacks, leases, replay, and compatibility links; adapter admission is still separate |
 | Universal policy, approvals, and external effects | Implemented alpha foundation: Issue [#46](https://github.com/Kshitij-M/fornix/issues/46) | Postgres-backed deterministic admission, exact approvals, quota gates, and fenced at-least-once effect recovery; connector qualification remains |

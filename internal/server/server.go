@@ -2811,6 +2811,13 @@ func (s *server) routes() http.Handler {
 		writeErr(w, http.StatusNotFound, "unknown incident workflow operation")
 	})
 	mux.HandleFunc("/v1/operations/", s.handleOperation)
+	mux.HandleFunc("/v1/operation-effects/recovery", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeErr(w, http.StatusMethodNotAllowed, "GET only")
+			return
+		}
+		s.handleRecoverableEffects(w, r)
+	})
 	mux.HandleFunc("/v1/operations", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeErr(w, http.StatusMethodNotAllowed, "POST only")

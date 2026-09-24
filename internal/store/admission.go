@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -22,6 +23,13 @@ var (
 	ErrAdmissionApprover       = errors.New("operation approval requires a distinct authorized actor")
 	ErrAdmissionEffect         = errors.New("external effect state transition is invalid")
 	ErrAdmissionEffectTerminal = errors.New("external effect state is terminal")
+	ErrEffectLeaseMissing      = errors.New("external effect lease not found")
+	ErrEffectLeaseHeld         = errors.New("external effect lease is held by another owner")
+	ErrEffectLeaseOwned        = errors.New("external effect lease is not owned by this worker")
+	ErrEffectLeaseFenced       = errors.New("external effect lease fence is stale")
+	ErrEffectLeaseExpired      = errors.New("external effect lease is expired")
+	ErrEffectLeaseReleased     = errors.New("external effect lease is released")
+	ErrEffectFenceExhausted    = errors.New("external effect lease fence is exhausted")
 )
 
 // AdmissionResult contains the immutable decision and, for write-like
@@ -51,6 +59,34 @@ type EffectState struct {
 type EffectStateResult struct {
 	State     EffectState
 	Duplicate bool
+}
+
+// EffectLease is independent from an operation lease. It permits a recovery
+// worker to reconcile an uncertain external effect after the parent operation
+// has become terminal or its original worker has disappeared.
+type EffectLease struct {
+	WorkspaceID string
+	EffectID    string
+	OwnerID     string
+	Fence       uint64
+	LeaseUntil  time.Time
+	AcquiredAt  time.Time
+	RenewedAt   time.Time
+	ReleasedAt  *time.Time
+}
+
+type EffectLeaseResult struct {
+	Lease    EffectLease
+	Acquired bool
+	Reused   bool
+	Takeover bool
+}
+
+// RecoverableEffect is a bounded, hash-only recovery candidate. Its effect
+// and state fields contain no external payload or credential material.
+type RecoverableEffect struct {
+	Effect OperationEffect
+	State  EffectState
 }
 
 // AdmissionStore is the Postgres authority for generic policy decisions,
@@ -100,6 +136,196 @@ func (s *AdmissionStore) GetEffectState(ctx context.Context, workspaceID, effect
 		return EffectState{}, fmt.Errorf("admission store is not configured")
 	}
 	return readEffectState(ctx, s.pool, workspaceID, effectID)
+}
+
+// ListRecoverableEffects returns a deterministic, bounded page of non-terminal
+// external effects. It is intentionally a read-only discovery operation;
+// callers must acquire an effect lease before attempting reconciliation.
+func (s *AdmissionStore) ListRecoverableEffects(ctx context.Context, workspaceID string, limit int) ([]RecoverableEffect, error) {
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("admission store is not configured")
+	}
+	workspaceID = strings.TrimSpace(workspaceID)
+	if workspaceID == "" {
+		return nil, ErrOperationWorkspace
+	}
+	if limit <= 0 || limit > 128 {
+		limit = 128
+	}
+	rows, err := s.pool.Query(ctx, `
+		SELECT e.workspace_id,e.operation_id,e.step_id,e.attempt_id,e.effect_id,
+		       e.effect_class,e.boundary,e.idempotency_key,e.provider_request_id,
+		       e.provider_idempotency_supported,e.delivery_semantics,e.verification_required,
+		       e.verification_status,e.compensation_status,e.request_hash,e.response_hash,
+		       e.created_at,e.verified_at,
+		       st.state,st.version,st.provider_request_id,st.response_hash,
+		       st.verification_hash,st.compensation_hash,st.failure_code,st.updated_at
+		FROM fornix.operation_effect_state st
+		JOIN fornix.operation_effects e
+		  ON e.workspace_id=st.workspace_id AND e.effect_id=st.effect_id
+		WHERE st.workspace_id=$1
+		  AND st.state NOT IN ('verified','compensated')
+		ORDER BY st.updated_at ASC, st.effect_id ASC
+		LIMIT $2`, workspaceID, limit)
+	if err != nil {
+		return nil, fmt.Errorf("list recoverable effects: %w", err)
+	}
+	defer rows.Close()
+	items := make([]RecoverableEffect, 0, limit)
+	for rows.Next() {
+		var item RecoverableEffect
+		if err := rows.Scan(
+			&item.Effect.WorkspaceID, &item.Effect.OperationID, &item.Effect.StepID,
+			&item.Effect.AttemptID, &item.Effect.EffectID, &item.Effect.EffectClass,
+			&item.Effect.Boundary, &item.Effect.IdempotencyKey, &item.Effect.ProviderRequestID,
+			&item.Effect.ProviderIdempotency, &item.Effect.DeliverySemantics, &item.Effect.VerificationRequired,
+			&item.Effect.VerificationStatus, &item.Effect.CompensationStatus,
+			&item.Effect.RequestHash, &item.Effect.ResponseHash, &item.Effect.CreatedAt,
+			&item.Effect.VerifiedAt, &item.State.State, &item.State.Version,
+			&item.State.ProviderRequestID, &item.State.ResponseHash, &item.State.VerificationHash,
+			&item.State.CompensationHash, &item.State.FailureCode, &item.State.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan recoverable effect: %w", err)
+		}
+		item.State.WorkspaceID = item.Effect.WorkspaceID
+		item.State.EffectID = item.Effect.EffectID
+		item.State.OperationID = item.Effect.OperationID
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate recoverable effects: %w", err)
+	}
+	return items, nil
+}
+
+// AcquireEffectLease claims recovery ownership for one non-terminal effect.
+// Takeover increments the fence in the same transaction as the ownership
+// change, so stale workers fail closed at the reconciliation boundary.
+func (s *AdmissionStore) AcquireEffectLease(ctx context.Context, workspaceID, operationID, effectID, ownerID string, ttl time.Duration) (EffectLeaseResult, error) {
+	if s == nil || s.pool == nil {
+		return EffectLeaseResult{}, fmt.Errorf("admission store is not configured")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return EffectLeaseResult{}, fmt.Errorf("begin effect lease acquire: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := s.AcquireEffectLeaseTx(ctx, tx, workspaceID, operationID, effectID, ownerID, ttl)
+	if err != nil {
+		return EffectLeaseResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return EffectLeaseResult{}, fmt.Errorf("commit effect lease acquire: %w", err)
+	}
+	return result, nil
+}
+
+func (s *AdmissionStore) AcquireEffectLeaseTx(ctx context.Context, tx pgx.Tx, workspaceID, operationID, effectID, ownerID string, ttl time.Duration) (EffectLeaseResult, error) {
+	workspaceID, operationID, effectID, ownerID = strings.TrimSpace(workspaceID), strings.TrimSpace(operationID), strings.TrimSpace(effectID), strings.TrimSpace(ownerID)
+	if tx == nil || workspaceID == "" || operationID == "" || effectID == "" || ownerID == "" {
+		return EffectLeaseResult{}, ErrEffectLeaseMissing
+	}
+	if _, err := readOperationByID(ctx, tx, workspaceID, operationID, true); errors.Is(err, pgx.ErrNoRows) {
+		return EffectLeaseResult{}, ErrOperationNotFound
+	} else if err != nil {
+		return EffectLeaseResult{}, err
+	}
+	state, err := readEffectState(ctx, tx, workspaceID, effectID, true)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return EffectLeaseResult{}, ErrAdmissionNotFound
+	}
+	if err != nil {
+		return EffectLeaseResult{}, err
+	}
+	if state.OperationID != operationID {
+		return EffectLeaseResult{}, ErrOperationWorkspace
+	}
+	if isTerminalEffectState(state.State) {
+		return EffectLeaseResult{}, ErrAdmissionEffectTerminal
+	}
+	ttl = boundedLeaseTTL(ttl)
+	inserted, err := tx.Exec(ctx, `
+		INSERT INTO fornix.operation_effect_leases(workspace_id,effect_id,owner_id,fence,lease_until)
+		VALUES($1,$2,$3,1,clock_timestamp()+($4::double precision * interval '1 millisecond'))
+		ON CONFLICT (workspace_id,effect_id) DO NOTHING`, workspaceID, effectID, ownerID, ttl.Milliseconds())
+	if err != nil {
+		return EffectLeaseResult{}, fmt.Errorf("insert effect lease: %w", err)
+	}
+	lease, active, err := readEffectLease(ctx, tx, workspaceID, effectID, true)
+	if err != nil {
+		return EffectLeaseResult{}, err
+	}
+	if active {
+		if lease.OwnerID != ownerID {
+			return EffectLeaseResult{}, ErrEffectLeaseHeld
+		}
+		return EffectLeaseResult{Lease: lease, Acquired: inserted.RowsAffected() == 1, Reused: inserted.RowsAffected() == 0}, nil
+	}
+	if lease.Fence >= maxOperationFence {
+		return EffectLeaseResult{}, ErrEffectFenceExhausted
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE fornix.operation_effect_leases
+		SET owner_id=$3,fence=fence+1,
+		    lease_until=clock_timestamp()+($4::double precision * interval '1 millisecond'),
+		    acquired_at=clock_timestamp(),renewed_at=clock_timestamp(),released_at=NULL
+		WHERE workspace_id=$1 AND effect_id=$2 AND fence=$5`, workspaceID, effectID, ownerID, ttl.Milliseconds(), int64(lease.Fence)); err != nil {
+		return EffectLeaseResult{}, fmt.Errorf("take over effect lease: %w", err)
+	}
+	updated, updatedActive, err := readEffectLease(ctx, tx, workspaceID, effectID, true)
+	if err != nil {
+		return EffectLeaseResult{}, err
+	}
+	if !updatedActive || updated.OwnerID != ownerID || updated.Fence <= lease.Fence {
+		return EffectLeaseResult{}, ErrEffectLeaseFenced
+	}
+	return EffectLeaseResult{Lease: updated, Acquired: true, Takeover: true}, nil
+}
+
+func (s *AdmissionStore) RenewEffectLease(ctx context.Context, lease EffectLease, ttl time.Duration) (EffectLease, error) {
+	if s == nil || s.pool == nil {
+		return EffectLease{}, fmt.Errorf("admission store is not configured")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return EffectLease{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := validateEffectLease(ctx, tx, lease); err != nil {
+		return EffectLease{}, err
+	}
+	ttl = boundedLeaseTTL(ttl)
+	if _, err := tx.Exec(ctx, `UPDATE fornix.operation_effect_leases SET lease_until=clock_timestamp()+($3::double precision * interval '1 millisecond'),renewed_at=clock_timestamp() WHERE workspace_id=$1 AND effect_id=$2 AND owner_id=$4 AND fence=$5`, lease.WorkspaceID, lease.EffectID, ttl.Milliseconds(), lease.OwnerID, int64(lease.Fence)); err != nil {
+		return EffectLease{}, err
+	}
+	updated, active, err := readEffectLease(ctx, tx, lease.WorkspaceID, lease.EffectID, true)
+	if err != nil {
+		return EffectLease{}, err
+	}
+	if !active {
+		return EffectLease{}, ErrEffectLeaseExpired
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return EffectLease{}, err
+	}
+	return updated, nil
+}
+
+func (s *AdmissionStore) ReleaseEffectLease(ctx context.Context, lease EffectLease) error {
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("admission store is not configured")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if _, err := validateEffectLease(ctx, tx, lease); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE fornix.operation_effect_leases SET released_at=clock_timestamp(),lease_until=clock_timestamp() WHERE workspace_id=$1 AND effect_id=$2 AND owner_id=$3 AND fence=$4`, lease.WorkspaceID, lease.EffectID, lease.OwnerID, int64(lease.Fence)); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (s *AdmissionStore) fail(stage string) error {
@@ -435,10 +661,14 @@ func (s *AdmissionStore) UpdateEffect(ctx context.Context, update contracts.Exte
 	if err != nil {
 		return EffectStateResult{}, err
 	}
-	if _, err := (&OperationStore{pool: s.pool}).validateLease(ctx, tx, OperationLease{WorkspaceID: update.WorkspaceID, OperationID: update.OperationID, OwnerID: update.OwnerID, Fence: update.Fence}); err != nil {
+	if update.LeaseKind == "effect" {
+		if _, err := validateEffectLease(ctx, tx, EffectLease{WorkspaceID: update.WorkspaceID, EffectID: update.EffectID, OwnerID: update.OwnerID, Fence: update.Fence}); err != nil {
+			return EffectStateResult{}, err
+		}
+	} else if _, err := (&OperationStore{pool: s.pool}).validateLease(ctx, tx, OperationLease{WorkspaceID: update.WorkspaceID, OperationID: update.OperationID, OwnerID: update.OwnerID, Fence: update.Fence}); err != nil {
 		return EffectStateResult{}, err
 	}
-	if operation.Request.Task != nil {
+	if update.LeaseKind != "effect" && operation.Request.Task != nil {
 		if err := validateTaskFenceForOperationTx(ctx, tx, operation.Request.Task, operation.TaskOwnerID, operation.TaskFence); err != nil {
 			return EffectStateResult{}, err
 		}
@@ -447,6 +677,16 @@ func (s *AdmissionStore) UpdateEffect(ctx context.Context, update contracts.Exte
 	if err != nil {
 		return EffectStateResult{}, err
 	}
+	state, err = readEffectState(ctx, tx, update.WorkspaceID, update.EffectID, true)
+	if err != nil {
+		return EffectStateResult{}, err
+	}
+	// An effect lease is a reconciliation authority. It cannot turn an
+	// untouched reservation into a dispatch claim; only the operation lease may
+	// record dispatch intent.
+	if update.LeaseKind == "effect" && (state.State == contracts.ExternalEffectReserved || update.State == contracts.ExternalEffectDispatching) {
+		return EffectStateResult{}, fmt.Errorf("%w: effect recovery lease cannot authorize dispatch", ErrAdmissionEffect)
+	}
 	if !validEffectTransition(state.State, update.State) {
 		if isTerminalEffectState(state.State) {
 			return EffectStateResult{}, ErrAdmissionEffectTerminal
@@ -454,12 +694,34 @@ func (s *AdmissionStore) UpdateEffect(ctx context.Context, update contracts.Exte
 		return EffectStateResult{}, fmt.Errorf("%w: %s -> %s", ErrAdmissionEffect, state.State, update.State)
 	}
 	nextVersion := state.Version + 1
-	if _, err := tx.Exec(ctx, `
+	leaseKind := update.LeaseKind
+	if leaseKind == "" {
+		leaseKind = "operation"
+	}
+	inserted, err := tx.Exec(ctx, `
 		INSERT INTO fornix.operation_effect_transitions(
-		 workspace_id,effect_id,operation_id,version,from_state,to_state,request_id,idempotency_key,owner_id,fence,command_hash,provider_request_id,response_hash,verification_hash,compensation_hash,failure_code)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
-		update.WorkspaceID, update.EffectID, update.OperationID, nextVersion, state.State, update.State, update.RequestID, update.IdempotencyKey, update.OwnerID, int64(update.Fence), commandHash, update.ProviderRequestID, update.ResponseHash, update.VerificationHash, update.CompensationHash, update.FailureCode); err != nil {
+		 workspace_id,effect_id,operation_id,version,from_state,to_state,request_id,idempotency_key,owner_id,fence,lease_kind,command_hash,provider_request_id,response_hash,verification_hash,compensation_hash,failure_code)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+		ON CONFLICT (workspace_id,effect_id,idempotency_key) DO NOTHING`,
+		update.WorkspaceID, update.EffectID, update.OperationID, nextVersion, state.State, update.State, update.RequestID, update.IdempotencyKey, update.OwnerID, int64(update.Fence), leaseKind, commandHash, update.ProviderRequestID, update.ResponseHash, update.VerificationHash, update.CompensationHash, update.FailureCode)
+	if err != nil {
 		return EffectStateResult{}, err
+	}
+	if inserted.RowsAffected() == 0 {
+		if err := tx.QueryRow(ctx, `SELECT command_hash FROM fornix.operation_effect_transitions WHERE workspace_id=$1 AND effect_id=$2 AND idempotency_key=$3`, update.WorkspaceID, update.EffectID, update.IdempotencyKey).Scan(&priorHash); err != nil {
+			return EffectStateResult{}, err
+		}
+		if priorHash != commandHash {
+			return EffectStateResult{}, ErrAdmissionConflict
+		}
+		state, err := readEffectState(ctx, tx, update.WorkspaceID, update.EffectID)
+		if err != nil {
+			return EffectStateResult{}, err
+		}
+		if err := tx.Commit(ctx); err != nil {
+			return EffectStateResult{}, err
+		}
+		return EffectStateResult{State: state, Duplicate: true}, nil
 	}
 	updated, err := tx.Exec(ctx, `
 		UPDATE fornix.operation_effect_state SET state=$3,version=$4,
@@ -591,12 +853,57 @@ func readOperationApproval(ctx context.Context, queryer interface {
 
 func readEffectState(ctx context.Context, queryer interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
-}, workspaceID, effectID string) (EffectState, error) {
+}, workspaceID, effectID string, lock ...bool) (EffectState, error) {
 	var value EffectState
-	if err := queryer.QueryRow(ctx, `SELECT workspace_id,effect_id,operation_id,state,version,provider_request_id,response_hash,verification_hash,compensation_hash,failure_code,updated_at FROM fornix.operation_effect_state WHERE workspace_id=$1 AND effect_id=$2`, workspaceID, effectID).Scan(&value.WorkspaceID, &value.EffectID, &value.OperationID, &value.State, &value.Version, &value.ProviderRequestID, &value.ResponseHash, &value.VerificationHash, &value.CompensationHash, &value.FailureCode, &value.UpdatedAt); err != nil {
+	query := `SELECT workspace_id,effect_id,operation_id,state,version,provider_request_id,response_hash,verification_hash,compensation_hash,failure_code,updated_at FROM fornix.operation_effect_state WHERE workspace_id=$1 AND effect_id=$2`
+	if len(lock) > 0 && lock[0] {
+		query += " FOR UPDATE"
+	}
+	if err := queryer.QueryRow(ctx, query, workspaceID, effectID).Scan(&value.WorkspaceID, &value.EffectID, &value.OperationID, &value.State, &value.Version, &value.ProviderRequestID, &value.ResponseHash, &value.VerificationHash, &value.CompensationHash, &value.FailureCode, &value.UpdatedAt); err != nil {
 		return EffectState{}, err
 	}
 	return value, nil
+}
+
+func readEffectLease(ctx context.Context, queryer interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, workspaceID, effectID string, lock bool) (EffectLease, bool, error) {
+	query := `SELECT workspace_id,effect_id,owner_id,fence,lease_until,acquired_at,renewed_at,released_at,(released_at IS NULL AND lease_until > clock_timestamp()) FROM fornix.operation_effect_leases WHERE workspace_id=$1 AND effect_id=$2`
+	if lock {
+		query += " FOR UPDATE"
+	}
+	var lease EffectLease
+	var active bool
+	if err := queryer.QueryRow(ctx, query, workspaceID, effectID).Scan(&lease.WorkspaceID, &lease.EffectID, &lease.OwnerID, &lease.Fence, &lease.LeaseUntil, &lease.AcquiredAt, &lease.RenewedAt, &lease.ReleasedAt, &active); err != nil {
+		return EffectLease{}, false, err
+	}
+	return lease, active, nil
+}
+
+func validateEffectLease(ctx context.Context, tx pgx.Tx, lease EffectLease) (EffectLease, error) {
+	if tx == nil || lease.Fence == 0 || lease.Fence > maxOperationFence || strings.TrimSpace(lease.OwnerID) == "" {
+		return EffectLease{}, ErrEffectLeaseFenced
+	}
+	current, active, err := readEffectLease(ctx, tx, lease.WorkspaceID, lease.EffectID, true)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return EffectLease{}, ErrEffectLeaseMissing
+	}
+	if err != nil {
+		return EffectLease{}, err
+	}
+	if current.Fence != lease.Fence {
+		return current, ErrEffectLeaseFenced
+	}
+	if current.OwnerID != lease.OwnerID {
+		return current, ErrEffectLeaseOwned
+	}
+	if current.ReleasedAt != nil {
+		return current, ErrEffectLeaseReleased
+	}
+	if !active {
+		return current, ErrEffectLeaseExpired
+	}
+	return current, nil
 }
 
 func ensureEffectState(ctx context.Context, tx pgx.Tx, workspaceID, effectID, operationID, owner string, fence uint64) (EffectState, error) {
@@ -611,7 +918,7 @@ func ensureEffectState(ctx context.Context, tx pgx.Tx, workspaceID, effectID, op
 		return EffectState{}, err
 	}
 	commandHash := hashString("effect-reserved:" + effectID)
-	if _, err := tx.Exec(ctx, `INSERT INTO fornix.operation_effect_transitions(workspace_id,effect_id,operation_id,version,from_state,to_state,request_id,idempotency_key,owner_id,fence,command_hash) VALUES($1,$2,$3,1,'reserved','reserved',$4,$5,$6,$7,$8) ON CONFLICT DO NOTHING`, workspaceID, effectID, operationID, "effect-reserved:"+effectID, "effect-reserved:"+effectID, owner, int64(fence), commandHash); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO fornix.operation_effect_transitions(workspace_id,effect_id,operation_id,version,from_state,to_state,request_id,idempotency_key,owner_id,fence,lease_kind,command_hash) VALUES($1,$2,$3,1,'reserved','reserved',$4,$5,$6,$7,'operation',$8) ON CONFLICT DO NOTHING`, workspaceID, effectID, operationID, "effect-reserved:"+effectID, "effect-reserved:"+effectID, owner, int64(fence), commandHash); err != nil {
 		return EffectState{}, err
 	}
 	return readEffectState(ctx, tx, workspaceID, effectID)
@@ -635,6 +942,8 @@ func externalEffectCommandHash(update contracts.ExternalEffectUpdate, target *st
 func validEffectTransition(from, to string) bool {
 	switch from {
 	case contracts.ExternalEffectReserved:
+		return to == contracts.ExternalEffectDispatching || to == contracts.ExternalEffectRecoveryRequired
+	case contracts.ExternalEffectDispatching:
 		return to == contracts.ExternalEffectDispatched || to == contracts.ExternalEffectRecoveryRequired
 	case contracts.ExternalEffectDispatched:
 		return to == contracts.ExternalEffectAcknowledged || to == contracts.ExternalEffectRecoveryRequired

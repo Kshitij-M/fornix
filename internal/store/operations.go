@@ -279,23 +279,24 @@ type OperationEffectInput struct {
 }
 
 type OperationEffect struct {
-	WorkspaceID         string
-	OperationID         string
-	StepID              string
-	AttemptID           string
-	EffectID            string
-	EffectClass         string
-	Boundary            string
-	IdempotencyKey      string
-	ProviderRequestID   string
-	ProviderIdempotency bool
-	DeliverySemantics   string
-	VerificationStatus  string
-	CompensationStatus  string
-	RequestHash         string
-	ResponseHash        string
-	CreatedAt           time.Time
-	VerifiedAt          *time.Time
+	WorkspaceID          string
+	OperationID          string
+	StepID               string
+	AttemptID            string
+	EffectID             string
+	EffectClass          string
+	Boundary             string
+	IdempotencyKey       string
+	ProviderRequestID    string
+	ProviderIdempotency  bool
+	DeliverySemantics    string
+	VerificationRequired bool
+	VerificationStatus   string
+	CompensationStatus   string
+	RequestHash          string
+	ResponseHash         string
+	CreatedAt            time.Time
+	VerifiedAt           *time.Time
 }
 
 type OperationCallbackInput struct {
@@ -1083,7 +1084,7 @@ func (s *OperationStore) ReserveEffect(ctx context.Context, input OperationEffec
 		return OperationEffect{}, false, err
 	}
 	if stored, err := readEffect(ctx, tx, input.WorkspaceID, input.AttemptID); err == nil {
-		if stored.RequestHash != input.RequestHash || stored.OperationID != input.OperationID || stored.StepID != input.StepID {
+		if stored.RequestHash != input.RequestHash || stored.OperationID != input.OperationID || stored.StepID != input.StepID || storedEffectIdentityHash(stored) != effect.StableHash() {
 			return OperationEffect{}, false, ErrOperationIdempotency
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -1107,8 +1108,9 @@ func (s *OperationStore) ReserveEffect(ctx context.Context, input OperationEffec
 	if _, err := s.validateLease(ctx, tx, OperationLease{WorkspaceID: input.WorkspaceID, OperationID: input.OperationID, OwnerID: input.OwnerID, Fence: input.Fence}); err != nil {
 		return OperationEffect{}, false, err
 	}
-	var attemptOperation, attemptStep string
-	if err := tx.QueryRow(ctx, `SELECT operation_id,step_id FROM fornix.operation_attempts WHERE workspace_id=$1 AND attempt_id=$2`, input.WorkspaceID, input.AttemptID).Scan(&attemptOperation, &attemptStep); err != nil {
+	var attemptOperation, attemptStep, attemptOwner string
+	var attemptFence int64
+	if err := tx.QueryRow(ctx, `SELECT operation_id,step_id,operation_owner_id,operation_fence FROM fornix.operation_attempts WHERE workspace_id=$1 AND attempt_id=$2 FOR UPDATE`, input.WorkspaceID, input.AttemptID).Scan(&attemptOperation, &attemptStep, &attemptOwner, &attemptFence); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return OperationEffect{}, false, errors.New("operation attempt does not exist")
 		}
@@ -1117,7 +1119,13 @@ func (s *OperationStore) ReserveEffect(ctx context.Context, input OperationEffec
 	if attemptOperation != input.OperationID || attemptStep != input.StepID {
 		return OperationEffect{}, false, ErrOperationWorkspace
 	}
-	inserted, err := tx.Exec(ctx, `INSERT INTO fornix.operation_effects(workspace_id,operation_id,step_id,attempt_id,effect_id,effect_class,boundary,idempotency_key,provider_request_id,provider_idempotency_supported,delivery_semantics,verification_status,compensation_status,request_hash) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) ON CONFLICT DO NOTHING`, input.WorkspaceID, input.OperationID, input.StepID, input.AttemptID, effect.ID, effect.Class, effect.Boundary, effect.IdempotencyKey, effect.ProviderRequestID, effect.ProviderIdempotency, effect.DeliveryGuarantee, effect.VerificationStatus, effect.CompensationStatus, input.RequestHash)
+	// The attempt is an immutable snapshot of the operation lease that created
+	// it. Requiring the same owner and fence prevents a later operation worker
+	// from attaching a new effect to work reserved by a stale worker.
+	if attemptOwner != input.OwnerID || attemptFence <= 0 || uint64(attemptFence) != input.Fence {
+		return OperationEffect{}, false, ErrOperationLeaseFenced
+	}
+	inserted, err := tx.Exec(ctx, `INSERT INTO fornix.operation_effects(workspace_id,operation_id,step_id,attempt_id,effect_id,effect_class,boundary,idempotency_key,provider_request_id,provider_idempotency_supported,delivery_semantics,verification_required,verification_status,compensation_status,request_hash) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT DO NOTHING`, input.WorkspaceID, input.OperationID, input.StepID, input.AttemptID, effect.ID, effect.Class, effect.Boundary, effect.IdempotencyKey, effect.ProviderRequestID, effect.ProviderIdempotency, effect.DeliveryGuarantee, effect.VerificationRequired, effect.VerificationStatus, effect.CompensationStatus, input.RequestHash)
 	if err != nil {
 		return OperationEffect{}, false, err
 	}
@@ -1692,23 +1700,41 @@ func readAttemptByKey(ctx context.Context, queryer interface {
 func readEffect(ctx context.Context, queryer interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }, workspaceID, attemptID string) (OperationEffect, error) {
-	return readEffectQuery(ctx, queryer, `SELECT workspace_id,operation_id,step_id,attempt_id,effect_id,effect_class,boundary,idempotency_key,provider_request_id,provider_idempotency_supported,delivery_semantics,verification_status,compensation_status,request_hash,response_hash,created_at,verified_at FROM fornix.operation_effects WHERE workspace_id=$1 AND attempt_id=$2`, workspaceID, attemptID)
+	return readEffectQuery(ctx, queryer, `SELECT workspace_id,operation_id,step_id,attempt_id,effect_id,effect_class,boundary,idempotency_key,provider_request_id,provider_idempotency_supported,delivery_semantics,verification_required,verification_status,compensation_status,request_hash,response_hash,created_at,verified_at FROM fornix.operation_effects WHERE workspace_id=$1 AND attempt_id=$2`, workspaceID, attemptID)
 }
 
 func readEffectByID(ctx context.Context, queryer interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }, workspaceID, effectID string) (OperationEffect, error) {
-	return readEffectQuery(ctx, queryer, `SELECT workspace_id,operation_id,step_id,attempt_id,effect_id,effect_class,boundary,idempotency_key,provider_request_id,provider_idempotency_supported,delivery_semantics,verification_status,compensation_status,request_hash,response_hash,created_at,verified_at FROM fornix.operation_effects WHERE workspace_id=$1 AND effect_id=$2`, workspaceID, effectID)
+	return readEffectQuery(ctx, queryer, `SELECT workspace_id,operation_id,step_id,attempt_id,effect_id,effect_class,boundary,idempotency_key,provider_request_id,provider_idempotency_supported,delivery_semantics,verification_required,verification_status,compensation_status,request_hash,response_hash,created_at,verified_at FROM fornix.operation_effects WHERE workspace_id=$1 AND effect_id=$2`, workspaceID, effectID)
 }
 
 func readEffectQuery(ctx context.Context, queryer interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }, query string, args ...any) (OperationEffect, error) {
 	var value OperationEffect
-	if err := queryer.QueryRow(ctx, query, args...).Scan(&value.WorkspaceID, &value.OperationID, &value.StepID, &value.AttemptID, &value.EffectID, &value.EffectClass, &value.Boundary, &value.IdempotencyKey, &value.ProviderRequestID, &value.ProviderIdempotency, &value.DeliverySemantics, &value.VerificationStatus, &value.CompensationStatus, &value.RequestHash, &value.ResponseHash, &value.CreatedAt, &value.VerifiedAt); err != nil {
+	if err := queryer.QueryRow(ctx, query, args...).Scan(&value.WorkspaceID, &value.OperationID, &value.StepID, &value.AttemptID, &value.EffectID, &value.EffectClass, &value.Boundary, &value.IdempotencyKey, &value.ProviderRequestID, &value.ProviderIdempotency, &value.DeliverySemantics, &value.VerificationRequired, &value.VerificationStatus, &value.CompensationStatus, &value.RequestHash, &value.ResponseHash, &value.CreatedAt, &value.VerifiedAt); err != nil {
 		return OperationEffect{}, err
 	}
 	return value, nil
+}
+
+func storedEffectIdentityHash(effect OperationEffect) string {
+	value := contracts.ExternalEffect{
+		SchemaVersion:        contracts.DomainNeutralSchemaVersion,
+		ID:                   effect.EffectID,
+		WorkspaceID:          effect.WorkspaceID,
+		Boundary:             effect.Boundary,
+		Class:                contracts.EffectClass(effect.EffectClass),
+		DeliveryGuarantee:    effect.DeliverySemantics,
+		IdempotencyKey:       effect.IdempotencyKey,
+		ProviderRequestID:    effect.ProviderRequestID,
+		ProviderIdempotency:  effect.ProviderIdempotency,
+		VerificationRequired: effect.VerificationRequired,
+		VerificationStatus:   effect.VerificationStatus,
+		CompensationStatus:   effect.CompensationStatus,
+	}
+	return value.StableHash()
 }
 
 func readCallback(ctx context.Context, queryer interface {

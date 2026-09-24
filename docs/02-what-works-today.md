@@ -9,7 +9,7 @@ shortest honest answer to “what can I use right now?”
 | Use case | Status | Safe interpretation |
 | --- | --- | --- |
 | Offline fake-provider workflow | Supported alpha | Deterministic local evaluation with no model key or network requirement |
-| Repository ingestion and read-only analysis | First qualified adapter | Explicit local mounts, bounded indexing, evidence, artifacts, and replay |
+| Repository ingestion and read-only analysis | Alpha-qualified local adapter | Explicit local mounts, bounded indexing, evidence, artifacts, and replay; not qualification for unattended production changes |
 | Approval-gated local repository changes | Experimental alpha | Use only on disposable or operator-controlled workspaces; review the change packet |
 | HTTP/API read and list operations | Bounded reference adapter | Test-system experiments with explicit destination, response, retry, credential, and cost bounds |
 | HTTP/API writes | Reservation/reconciliation foundation | Fornix records the effect boundary but does not provide generic live dispatch, verification, or compensation |
