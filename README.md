@@ -216,6 +216,10 @@ The current implementation includes the following tested slices:
   deterministic claims, heartbeats, cancellation, expiry takeover, and
   fail-closed fencing; it does not dispatch providers or claim exactly-once
   remote execution.
+- an explicit-workspace supervisor with deterministic round-robin turns,
+  bounded concurrency, workspace active-lease quotas, and declared resource
+  serialization; this is a scheduling foundation, not autoscaling or a
+  universal provider dispatcher.
 
 The [HTTP API reference](docs/53-http-api-reference.md) maps the current
 routes. The [production qualification](docs/14-production-readiness-qualification.md)

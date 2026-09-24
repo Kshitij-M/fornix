@@ -79,6 +79,7 @@ type Worker struct {
 	Handler           Handler
 	OwnerID           string
 	Limit             int
+	MaxActive         int
 	LeaseTTL          time.Duration
 	HeartbeatInterval time.Duration
 	PollInterval      time.Duration
@@ -143,7 +144,9 @@ func (w *Worker) RunOnce(ctx context.Context, workspaceID string) (BatchResult, 
 	if workspaceID == "" {
 		return BatchResult{}, fmt.Errorf("%w: workspace_id is required", ErrWorkerNotConfigured)
 	}
-	claims, err := w.Store.ClaimReady(ctx, workspaceID, w.OwnerID, w.limit(), w.leaseTTL())
+	claims, err := w.Store.ClaimReadyWithOptions(ctx, workspaceID, w.OwnerID, store.OperationClaimOptions{
+		Limit: w.limit(), TTL: w.leaseTTL(), MaxActive: w.MaxActive,
+	})
 	if err != nil {
 		return BatchResult{}, fmt.Errorf("claim generic operations: %w", err)
 	}

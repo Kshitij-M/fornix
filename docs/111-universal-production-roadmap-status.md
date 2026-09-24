@@ -37,6 +37,10 @@ turn a process-local callback into a second authority.
 - Claims are bounded, deterministic, workspace-scoped, `SKIP LOCKED`, and
   protected by monotonic operation fencing. Active leases are excluded and
   expired leases are recoverable.
+- Declared operation resources are serialized transactionally with independent
+  monotonic resource fences. Workspace-wide active-operation quotas are
+  available through `ClaimReadyWithOptions`, and the explicit-workspace
+  supervisor provides bounded round-robin turns with cancellation.
 - The adapter-owned worker keeps a lease alive, cancels on lease loss, reports
   failures without hot-looping, releases successful claims, and preserves
   expiry-based takeover.
@@ -73,10 +77,12 @@ deployment evidence, failure-injection coverage, and an operator runbook.
 
 ### P0 — execution correctness and isolation
 
-5. **Worker composition and fairness.** Wire the adapter-owned worker into an
-   explicit supervisor with per-workspace quotas, bounded backpressure,
-   resource-level serialization, starvation-resistant ordering, connection
-   pool budgets, and cancellation propagation. Keep external-effect
+5. **Worker deployment composition and fairness qualification.** The generic
+   supervisor, workspace quota, bounded backpressure primitive, declared
+   resource serialization, starvation-resistant ordering, and cancellation
+   boundary now exist. Remaining work is deployment wiring, explicit durable
+   workspace inventory, weighted priorities/resource budgets, connection-pool
+   qualification, and load/soak evidence. Keep external-effect
    reconciliation separate from ordinary queue claims.
 6. **Complete mutation linkage.** Ensure every adapter operation links actor,
    policy revision, capability hash, operation fence, task/session identity,
@@ -124,9 +130,9 @@ deployment evidence, failure-injection coverage, and an operator runbook.
 
 ## Dependency order
 
-The next implementation slice should be worker composition and fairness
-(item 5), but it must be designed alongside the role-separated database and
-credential boundaries (items 1–2). The sequence is:
+The next implementation slice should be role-separated database enforcement
+and credential authority (items 1–2), while the supervisor primitives are
+qualified against those boundaries. The sequence is:
 
 ```text
 database/credential authority
@@ -145,9 +151,10 @@ claim that every production system is already supported.
 
 ## Current recommended next task
 
-**Task 44 — Build the universal operation supervisor, workspace fairness,
-quota, backpressure, and resource-serialization substrate.** Preserve the
-Loop 43 adapter-owned worker boundary, use Postgres as authority, and qualify
-the supervisor with concurrent workers, stale fences, cancellation, fairness,
-quota rejection, recovery, and replay tests before connecting additional live
-providers.
+**Task 45 — Build production role-separated Postgres isolation and credential
+lease authority.** Run the service with a non-owner `NOBYPASSRLS` role, extend
+workspace enforcement to every historical surface, and add a provider-neutral
+secret-manager/KMS lease boundary with rotation, revocation, audience binding,
+redacted errors, and failure-injection tests. Preserve the Loop 44 supervisor
+and resource-fence contracts while proving that database and credential
+authority fail closed before connecting additional live providers.

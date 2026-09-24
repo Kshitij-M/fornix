@@ -156,6 +156,11 @@ contains the current/planned domain matrix and the precise category boundary.
   a universal provider dispatcher. Adapter handlers must persist their own
   plan/result/transition and use the independent external-effect authority;
   the worker does not claim exactly-once remote execution.
+- Generic operation scheduling now also has explicit workspace round-robin
+  supervision, a durable `MaxActive` workspace lease quota, and declared
+  resource serialization with monotonic resource fences. The supervisor is
+  process-local policy over an explicit workspace set; production fairness,
+  weighted priorities, pool saturation, and load/soak evidence remain open.
 - Built-in connector capabilities are now admitted through explicit,
   workspace-scoped trust snapshots that pin connector identity and definition
   hashes. Credential-bearing HTTP adapters can use a bounded lease resolver;

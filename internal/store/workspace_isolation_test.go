@@ -54,13 +54,14 @@ func TestPostgresWorkspaceIsolationQualification(t *testing.T) {
 			'operation_links', 'operation_results',
 			'operation_admission_decisions', 'operation_approvals',
 			'operation_approval_transitions', 'operation_effect_state',
-			'operation_effect_transitions', 'operation_effect_leases'
+			'operation_effect_transitions', 'operation_effect_leases',
+			'operation_resource_leases', 'operation_resource_lease_history'
 		  )
 		  AND c.relrowsecurity`).Scan(&protected); err != nil {
 		t.Fatalf("inspect RLS policies: %v", err)
 	}
-	if protected != 17 {
-		t.Fatalf("expected RLS on all 17 generic authority tables, got %d", protected)
+	if protected != 19 {
+		t.Fatalf("expected RLS on all 19 generic authority tables, got %d", protected)
 	}
 
 	tx, err := pool.Begin(ctx)

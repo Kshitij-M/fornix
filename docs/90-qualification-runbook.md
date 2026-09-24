@@ -14,6 +14,7 @@ database version, duration, and result.
 | PostgreSQL workspace isolation | `FORNIX_RLS_TEST_DSN=... make qualification-workspace-isolation` | Disposable database cloned from a migrated authority; dedicated non-owner `NOBYPASSRLS` role | No provider call | Rolled-back qualification transaction only |
 | Generic operation capacity | `FORNIX_CAPACITY_PG_DSN=... make qualification-capacity` | Dedicated disposable Postgres database | No provider call | Own workspace rows plus retained append-only events |
 | Generic operation worker | `FORNIX_TEST_PG_DSN=... make test-operation-worker` | Dedicated disposable Postgres database | No provider call; adapter handler is test-owned | Scoped operation rows and append-only events |
+| Operation fairness/resource coordination | `make test-operation-supervisor` plus the Postgres queue tests | Unit tests plus dedicated disposable Postgres database | No provider call | Resource lease/current-history rows and bounded operation leases |
 | HTTP service smoke | `make smoke-universal-operation`, `make smoke-reference-connectors` | Running Fornix HTTP server and Postgres | Reference HTTP/SQL adapters only when configured by the smoke | Yes, scoped test workspace |
 | Managed Docker runtime | `make smoke-local-runtime` | Docker Desktop/Engine and Compose v2 | Fake provider by default | Yes, local runtime volume |
 | Full repository smoke | `make smoke` | Running service, Postgres, Python helpers, Docker for local runtime | Fake-first; optional adapters are explicit | Yes, disposable smoke workspaces |

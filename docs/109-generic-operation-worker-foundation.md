@@ -41,8 +41,10 @@ authority for its domain.
   effect reservation and reconciliation contract. The worker itself performs
   no external call and cannot provide exactly-once semantics.
 - Claims are bounded by a maximum batch size and a bounded lease TTL. Polling
-  is cancellable and deterministic; fairness across workspaces remains an
-  authenticated scheduler policy rather than an implicit global scan.
+  is cancellable and deterministic; fairness across workspaces is supplied by
+  the explicit `internal/operationsupervisor` policy rather than an implicit
+  global scan. Declared operation resources are serialized by the operation
+  store, and `MaxActive` can enforce a durable workspace lease quota.
 
 ## Crash and fencing semantics
 
@@ -93,9 +95,10 @@ measured workload data; this slice does not establish production SLOs.
 
 ## Remaining limitations
 
-There is no generic provider dispatcher, global fairness coordinator, resource
-serialization scheduler, autoscaling, HA/failover controller, or external
-secret manager here. Those remain deployment and adapter-specific work. A
-worker callback that performs a remote effect must use the independent effect
-lease and verification path; this package cannot convert at-least-once remote
-delivery into exactly-once execution.
+There is no generic provider dispatcher, autoscaling, HA/failover controller,
+or external secret manager here. The supervisor and resource serialization
+primitives are bounded policy foundations, not a claim of complete deployment
+fairness, weighted scheduling, or resource discovery. Those remain deployment
+and adapter-specific work. A worker callback that performs a remote effect
+must use the independent effect lease and verification path; this package
+cannot convert at-least-once remote delivery into exactly-once execution.

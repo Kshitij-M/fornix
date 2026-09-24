@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -23,6 +24,7 @@ const (
 	maxOperationFence          = uint64(1<<63 - 1)
 	maxOperationLeaseTTL       = 24 * time.Hour
 	maxOperationReplayLimit    = 4096
+	maxOperationActiveLimit    = 4096
 )
 
 var (
@@ -35,6 +37,7 @@ var (
 	ErrOperationLeaseFenced    = errors.New("operation lease fence is stale")
 	ErrOperationLeaseExpired   = errors.New("operation lease is expired")
 	ErrOperationLeaseReleased  = errors.New("operation lease is released")
+	ErrOperationResourceBusy   = errors.New("operation resource is leased by another operation")
 	ErrOperationFenceExhausted = errors.New("operation lease fence is exhausted")
 	ErrOperationTaskFence      = errors.New("task-bound operation fence is invalid")
 	ErrOperationReplay         = errors.New("operation replay integrity failure")
@@ -242,8 +245,35 @@ type OperationLeaseResult struct {
 // lease. The operation remains authoritative in Postgres; the claim is only
 // permission for a worker to perform the next bounded step.
 type OperationClaim struct {
-	Operation Operation
-	Lease     OperationLease
+	Operation      Operation
+	Lease          OperationLease
+	ResourceLeases []OperationResourceLease
+}
+
+// OperationClaimOptions bounds one queue claim. MaxActive is a durable
+// workspace-wide cap; zero leaves the cap disabled for compatibility with
+// callers that already enforce concurrency elsewhere.
+type OperationClaimOptions struct {
+	Limit     int
+	TTL       time.Duration
+	MaxActive int
+}
+
+// OperationResourceLease serializes one typed resource while an operation
+// claim is active. Its fence is independent from the operation fence; every
+// mutation still requires the operation lease fence as the authoritative
+// operation boundary.
+type OperationResourceLease struct {
+	WorkspaceID    string
+	ResourceKey    string
+	OperationID    string
+	OwnerID        string
+	OperationFence uint64
+	Fence          uint64
+	LeaseUntil     time.Time
+	AcquiredAt     time.Time
+	RenewedAt      time.Time
+	ReleasedAt     *time.Time
 }
 
 type OperationAttemptInput struct {
@@ -807,6 +837,9 @@ func (s *OperationStore) AcquireLeaseTx(ctx context.Context, tx pgx.Tx, workspac
 		if lease.OwnerID != ownerID {
 			return OperationLeaseResult{}, ErrOperationLeaseHeld
 		}
+		if err := s.acquireResourceLeasesTx(ctx, tx, operation, lease, ttl); err != nil {
+			return OperationLeaseResult{}, err
+		}
 		return OperationLeaseResult{Lease: lease, Acquired: inserted.RowsAffected() == 1, Reused: inserted.RowsAffected() == 0}, nil
 	}
 	if lease.Fence >= maxOperationFence {
@@ -822,7 +855,276 @@ func (s *OperationStore) AcquireLeaseTx(ctx context.Context, tx pgx.Tx, workspac
 	if !updatedActive || updated.OwnerID != ownerID || updated.Fence <= lease.Fence {
 		return OperationLeaseResult{}, errors.New("operation lease takeover did not produce a higher active fence")
 	}
+	if err := s.acquireResourceLeasesTx(ctx, tx, operation, updated, ttl); err != nil {
+		return OperationLeaseResult{}, err
+	}
 	return OperationLeaseResult{Lease: updated, Acquired: true, Takeover: true}, nil
+}
+
+// acquireResourceLeasesTx serializes every declared operation resource. The
+// advisory transaction locks prevent two claim transactions from observing the
+// same free resource before either writes its current lease. Resource keys are
+// sorted so multi-resource operations cannot deadlock one another.
+func (s *OperationStore) acquireResourceLeasesTx(ctx context.Context, tx pgx.Tx, operation Operation, lease OperationLease, ttl time.Duration) error {
+	keys, err := operationResourceKeysTx(ctx, tx, operation)
+	if err != nil {
+		return err
+	}
+	for _, resourceKey := range keys {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, operation.WorkspaceID+":resource:"+resourceKey); err != nil {
+			return fmt.Errorf("lock operation resource %s: %w", resourceKey, err)
+		}
+		var current OperationResourceLease
+		var releasedAt *time.Time
+		var active bool
+		err := tx.QueryRow(ctx, `
+			SELECT workspace_id,resource_key,operation_id,owner_id,operation_fence,fence,
+			       lease_until,acquired_at,renewed_at,released_at,
+			       (released_at IS NULL AND lease_until > clock_timestamp())
+			FROM fornix.operation_resource_leases
+			WHERE workspace_id=$1 AND resource_key=$2
+			FOR UPDATE`, operation.WorkspaceID, resourceKey).Scan(
+			&current.WorkspaceID, &current.ResourceKey, &current.OperationID, &current.OwnerID,
+			&current.OperationFence, &current.Fence, &current.LeaseUntil, &current.AcquiredAt,
+			&current.RenewedAt, &releasedAt, &active)
+		if errors.Is(err, pgx.ErrNoRows) {
+			if _, err := tx.Exec(ctx, `
+				INSERT INTO fornix.operation_resource_leases(
+				 workspace_id,resource_key,operation_id,owner_id,operation_fence,fence,lease_until)
+				VALUES($1,$2,$3,$4,$5,1,clock_timestamp()+($6::double precision * interval '1 millisecond'))`,
+				operation.WorkspaceID, resourceKey, operation.ID, lease.OwnerID, int64(lease.Fence), ttl.Milliseconds()); err != nil {
+				return fmt.Errorf("insert operation resource lease: %w", err)
+			}
+			if err := recordResourceLeaseHistoryTx(ctx, tx, operation.WorkspaceID, resourceKey, operation.ID, lease.OwnerID, lease.Fence, 1, "acquired"); err != nil {
+				return err
+			}
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("read operation resource lease: %w", err)
+		}
+		if active && (current.OperationID != operation.ID || current.OwnerID != lease.OwnerID || current.OperationFence == lease.Fence) {
+			if current.OperationID != operation.ID || current.OwnerID != lease.OwnerID {
+				return fmt.Errorf("%w: %s", ErrOperationResourceBusy, resourceKey)
+			}
+			continue
+		}
+		if current.Fence >= maxOperationFence {
+			return ErrOperationFenceExhausted
+		}
+		action := "takeover"
+		if releasedAt != nil {
+			action = "acquired"
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE fornix.operation_resource_leases
+			SET operation_id=$3,owner_id=$4,operation_fence=$5,fence=fence+1,
+			    lease_until=clock_timestamp()+($6::double precision * interval '1 millisecond'),
+			    acquired_at=clock_timestamp(),renewed_at=clock_timestamp(),released_at=NULL
+			WHERE workspace_id=$1 AND resource_key=$2 AND fence=$7`,
+			operation.WorkspaceID, resourceKey, operation.ID, lease.OwnerID, int64(lease.Fence),
+			ttl.Milliseconds(), int64(current.Fence)); err != nil {
+			return fmt.Errorf("take over operation resource lease: %w", err)
+		}
+		if err := recordResourceLeaseHistoryTx(ctx, tx, operation.WorkspaceID, resourceKey, operation.ID, lease.OwnerID, lease.Fence, current.Fence+1, action); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func operationResourceKeysTx(ctx context.Context, tx pgx.Tx, operation Operation) ([]string, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT resource_kind,resource_id
+		FROM fornix.operation_resources
+		WHERE workspace_id=$1 AND operation_id=$2
+		ORDER BY ordinal`, operation.WorkspaceID, operation.ID)
+	if err != nil {
+		return nil, fmt.Errorf("read operation resources: %w", err)
+	}
+	defer rows.Close()
+	seen := make(map[string]struct{})
+	keys := make([]string, 0, 4)
+	for rows.Next() {
+		var kind, id string
+		if err := rows.Scan(&kind, &id); err != nil {
+			return nil, fmt.Errorf("scan operation resource: %w", err)
+		}
+		key := resourceLeaseKey(kind, id)
+		if _, exists := seen[key]; !exists {
+			seen[key] = struct{}{}
+			keys = append(keys, key)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate operation resources: %w", err)
+	}
+	sort.Strings(keys)
+	return keys, nil
+}
+
+func resourceLeaseKey(kind, id string) string {
+	return strings.TrimSpace(kind) + ":" + strings.TrimSpace(id)
+}
+
+func recordResourceLeaseHistoryTx(ctx context.Context, tx pgx.Tx, workspaceID, resourceKey, operationID, ownerID string, operationFence, fence uint64, action string) error {
+	var leaseUntil time.Time
+	if err := tx.QueryRow(ctx, `SELECT lease_until FROM fornix.operation_resource_leases WHERE workspace_id=$1 AND resource_key=$2`, workspaceID, resourceKey).Scan(&leaseUntil); err != nil {
+		return fmt.Errorf("read operation resource lease history deadline: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO fornix.operation_resource_lease_history(
+		 workspace_id,resource_key,operation_id,owner_id,operation_fence,fence,action,lease_until)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8)`,
+		workspaceID, resourceKey, operationID, ownerID, int64(operationFence), int64(fence), action, leaseUntil); err != nil {
+		return fmt.Errorf("append operation resource lease history: %w", err)
+	}
+	return nil
+}
+
+func readResourceLeasesTx(ctx context.Context, tx pgx.Tx, workspaceID, operationID string) ([]OperationResourceLease, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT workspace_id,resource_key,operation_id,owner_id,operation_fence,fence,
+		       lease_until,acquired_at,renewed_at,released_at
+		FROM fornix.operation_resource_leases
+		WHERE workspace_id=$1 AND operation_id=$2
+		ORDER BY resource_key`, workspaceID, operationID)
+	if err != nil {
+		return nil, fmt.Errorf("read operation resource leases: %w", err)
+	}
+	defer rows.Close()
+	leases := make([]OperationResourceLease, 0)
+	for rows.Next() {
+		var lease OperationResourceLease
+		if err := rows.Scan(&lease.WorkspaceID, &lease.ResourceKey, &lease.OperationID, &lease.OwnerID, &lease.OperationFence, &lease.Fence, &lease.LeaseUntil, &lease.AcquiredAt, &lease.RenewedAt, &lease.ReleasedAt); err != nil {
+			return nil, fmt.Errorf("scan operation resource lease: %w", err)
+		}
+		leases = append(leases, lease)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate operation resource leases: %w", err)
+	}
+	return leases, nil
+}
+
+func validateResourceLeasesForRenewalTx(ctx context.Context, tx pgx.Tx, lease OperationLease) error {
+	var expected, total, valid int
+	if err := tx.QueryRow(ctx, `
+		SELECT count(DISTINCT btrim(resource_kind) || ':' || btrim(resource_id))
+		FROM fornix.operation_resources
+		WHERE workspace_id=$1 AND operation_id=$2`, lease.WorkspaceID, lease.OperationID).Scan(&expected); err != nil {
+		return fmt.Errorf("count expected operation resource leases: %w", err)
+	}
+	if err := tx.QueryRow(ctx, `
+		SELECT count(*)::int,
+		       count(*) FILTER (WHERE owner_id=$3 AND operation_fence=$4 AND released_at IS NULL AND lease_until > clock_timestamp())::int
+		FROM fornix.operation_resource_leases
+		WHERE workspace_id=$1 AND operation_id=$2`, lease.WorkspaceID, lease.OperationID, lease.OwnerID, int64(lease.Fence)).Scan(&total, &valid); err != nil {
+		return fmt.Errorf("validate operation resource leases: %w", err)
+	}
+	if expected != total || total != valid {
+		return ErrOperationLeaseFenced
+	}
+	return nil
+}
+
+func lockResourceLeasesTx(ctx context.Context, tx pgx.Tx, lease OperationLease) error {
+	rows, err := tx.Query(ctx, `
+		SELECT resource_key
+		FROM fornix.operation_resource_leases
+		WHERE workspace_id=$1 AND operation_id=$2
+		ORDER BY resource_key`, lease.WorkspaceID, lease.OperationID)
+	if err != nil {
+		return fmt.Errorf("read operation resource keys for lock: %w", err)
+	}
+	keys := make([]string, 0, 4)
+	for rows.Next() {
+		var resourceKey string
+		if err := rows.Scan(&resourceKey); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan operation resource key for lock: %w", err)
+		}
+		keys = append(keys, resourceKey)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate operation resource keys for lock: %w", err)
+	}
+	rows.Close()
+	for _, resourceKey := range keys {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, lease.WorkspaceID+":resource:"+resourceKey); err != nil {
+			return fmt.Errorf("lock operation resource %s: %w", resourceKey, err)
+		}
+	}
+	return nil
+}
+
+func renewResourceLeasesTx(ctx context.Context, tx pgx.Tx, lease OperationLease, ttl time.Duration) error {
+	if err := lockResourceLeasesTx(ctx, tx, lease); err != nil {
+		return err
+	}
+	result, err := tx.Exec(ctx, `
+		UPDATE fornix.operation_resource_leases
+		SET lease_until=clock_timestamp()+($5::double precision * interval '1 millisecond'),renewed_at=clock_timestamp()
+		WHERE workspace_id=$1 AND operation_id=$2 AND owner_id=$3 AND operation_fence=$4 AND released_at IS NULL`,
+		lease.WorkspaceID, lease.OperationID, lease.OwnerID, int64(lease.Fence), ttl.Milliseconds())
+	if err != nil {
+		return fmt.Errorf("renew operation resource leases: %w", err)
+	}
+	var resourceCount int
+	if err := tx.QueryRow(ctx, `
+		SELECT count(*)::int
+		FROM fornix.operation_resource_leases
+		WHERE workspace_id=$1 AND operation_id=$2`, lease.WorkspaceID, lease.OperationID).Scan(&resourceCount); err != nil {
+		return fmt.Errorf("count renewed operation resource leases: %w", err)
+	}
+	if result.RowsAffected() == 0 && resourceCount > 0 {
+		return ErrOperationLeaseFenced
+	}
+	return nil
+}
+
+func releaseResourceLeasesTx(ctx context.Context, tx pgx.Tx, lease OperationLease) error {
+	if err := lockResourceLeasesTx(ctx, tx, lease); err != nil {
+		return err
+	}
+	rows, err := tx.Query(ctx, `
+		UPDATE fornix.operation_resource_leases
+		SET released_at=clock_timestamp(),lease_until=clock_timestamp()
+		WHERE workspace_id=$1 AND operation_id=$2 AND owner_id=$3 AND operation_fence=$4 AND released_at IS NULL
+		RETURNING resource_key,fence`, lease.WorkspaceID, lease.OperationID, lease.OwnerID, int64(lease.Fence))
+	if err != nil {
+		return fmt.Errorf("release operation resource leases: %w", err)
+	}
+	type releasedResource struct {
+		key   string
+		fence int64
+	}
+	released := make([]releasedResource, 0, 4)
+	for rows.Next() {
+		var resourceKey string
+		var fence int64
+		if err := rows.Scan(&resourceKey, &fence); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan released operation resource lease: %w", err)
+		}
+		released = append(released, releasedResource{key: resourceKey, fence: fence})
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return fmt.Errorf("iterate released operation resource leases: %w", err)
+	}
+	rows.Close()
+	for _, resource := range released {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO fornix.operation_resource_lease_history(
+			 workspace_id,resource_key,operation_id,owner_id,operation_fence,fence,action)
+			VALUES($1,$2,$3,$4,$5,$6,'released')`,
+			lease.WorkspaceID, resource.key, lease.OperationID, lease.OwnerID, int64(lease.Fence), resource.fence); err != nil {
+			return fmt.Errorf("append released operation resource lease history: %w", err)
+		}
+	}
+	return nil
 }
 
 // ClaimReady selects a bounded deterministic batch of due operations and
@@ -834,6 +1136,14 @@ func (s *OperationStore) AcquireLeaseTx(ctx context.Context, tx pgx.Tx, workspac
 // uncertain provider effect must be handled through the independent effect
 // recovery lease and reconciliation API, never by silently redispatching it.
 func (s *OperationStore) ClaimReady(ctx context.Context, workspaceID, ownerID string, limit int, ttl time.Duration) ([]OperationClaim, error) {
+	return s.ClaimReadyWithOptions(ctx, workspaceID, ownerID, OperationClaimOptions{Limit: limit, TTL: ttl})
+}
+
+// ClaimReadyWithOptions selects a bounded deterministic batch and optionally
+// enforces a workspace-wide active-lease quota. The quota check is serialized
+// with a transaction advisory lock, so concurrent workers cannot both observe
+// spare capacity and exceed the configured limit.
+func (s *OperationStore) ClaimReadyWithOptions(ctx context.Context, workspaceID, ownerID string, options OperationClaimOptions) ([]OperationClaim, error) {
 	if s == nil || s.pool == nil {
 		return nil, errors.New("operation store is not configured")
 	}
@@ -841,8 +1151,14 @@ func (s *OperationStore) ClaimReady(ctx context.Context, workspaceID, ownerID st
 	if workspaceID == "" || ownerID == "" {
 		return nil, errors.New("workspace_id and owner_id are required")
 	}
+	limit := options.Limit
 	if limit <= 0 || limit > 64 {
 		limit = 64
+	}
+	ttl := options.TTL
+	maxActive := options.MaxActive
+	if maxActive < 0 || maxActive > maxOperationActiveLimit {
+		return nil, fmt.Errorf("max_active must be between 0 and %d", maxOperationActiveLimit)
 	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
@@ -851,6 +1167,28 @@ func (s *OperationStore) ClaimReady(ctx context.Context, workspaceID, ownerID st
 	defer func() { _ = tx.Rollback(ctx) }()
 	if err := setWorkspaceContext(ctx, tx, workspaceID); err != nil {
 		return nil, err
+	}
+	if maxActive > 0 {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, workspaceID+":operation-queue"); err != nil {
+			return nil, fmt.Errorf("lock operation workspace queue: %w", err)
+		}
+		var active int
+		if err := tx.QueryRow(ctx, `
+			SELECT count(*)::int
+			FROM fornix.operation_leases
+			WHERE workspace_id=$1 AND released_at IS NULL AND lease_until > clock_timestamp()`, workspaceID).Scan(&active); err != nil {
+			return nil, fmt.Errorf("count active operation leases: %w", err)
+		}
+		remaining := maxActive - active
+		if remaining <= 0 {
+			if err := tx.Commit(ctx); err != nil {
+				return nil, fmt.Errorf("commit full operation workspace queue: %w", err)
+			}
+			return []OperationClaim{}, nil
+		}
+		if limit > remaining {
+			limit = remaining
+		}
 	}
 	rows, err := tx.Query(ctx, `
 		SELECT o.id
@@ -888,6 +1226,15 @@ func (s *OperationStore) ClaimReady(ctx context.Context, workspaceID, ownerID st
 			// the next poll will see its active lease.
 			continue
 		}
+		if errors.Is(err, ErrOperationResourceBusy) {
+			// AcquireLeaseTx may have advanced this operation's fence before a
+			// resource conflict was discovered. Roll that claim back to released
+			// state inside the same transaction so the next worker can retry it.
+			if current, _, readErr := readLease(ctx, tx, workspaceID, operationID, true); readErr == nil && current.OwnerID == ownerID {
+				_ = s.ReleaseLeaseTx(ctx, tx, current)
+			}
+			continue
+		}
 		if err != nil {
 			return nil, fmt.Errorf("claim operation %s: %w", operationID, err)
 		}
@@ -895,7 +1242,11 @@ func (s *OperationStore) ClaimReady(ctx context.Context, workspaceID, ownerID st
 		if err != nil {
 			return nil, fmt.Errorf("read claimed operation %s: %w", operationID, err)
 		}
-		claims = append(claims, OperationClaim{Operation: operation, Lease: lease.Lease})
+		resourceLeases, err := readResourceLeasesTx(ctx, tx, workspaceID, operationID)
+		if err != nil {
+			return nil, fmt.Errorf("read claimed operation resources %s: %w", operationID, err)
+		}
+		claims = append(claims, OperationClaim{Operation: operation, Lease: lease.Lease, ResourceLeases: resourceLeases})
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("commit operation queue claim: %w", err)
@@ -929,9 +1280,15 @@ func (s *OperationStore) RenewLeaseTx(ctx context.Context, tx pgx.Tx, lease Oper
 	if _, err := s.validateLease(ctx, tx, lease); err != nil {
 		return OperationLease{}, err
 	}
+	if err := validateResourceLeasesForRenewalTx(ctx, tx, lease); err != nil {
+		return OperationLease{}, err
+	}
 	ttl = boundedLeaseTTL(ttl)
 	if _, err := tx.Exec(ctx, `UPDATE fornix.operation_leases SET lease_until=clock_timestamp()+($3::double precision * interval '1 millisecond'),renewed_at=clock_timestamp() WHERE workspace_id=$1 AND operation_id=$2 AND owner_id=$4 AND fence=$5`, lease.WorkspaceID, lease.OperationID, ttl.Milliseconds(), lease.OwnerID, int64(lease.Fence)); err != nil {
 		return OperationLease{}, fmt.Errorf("renew operation lease: %w", err)
+	}
+	if err := renewResourceLeasesTx(ctx, tx, lease, ttl); err != nil {
+		return OperationLease{}, err
 	}
 	updated, active, err := readLease(ctx, tx, lease.WorkspaceID, lease.OperationID, true)
 	if err != nil {
@@ -970,6 +1327,9 @@ func (s *OperationStore) ReleaseLeaseTx(ctx context.Context, tx pgx.Tx, lease Op
 	}
 	if _, err := tx.Exec(ctx, `UPDATE fornix.operation_leases SET released_at=clock_timestamp(),lease_until=clock_timestamp() WHERE workspace_id=$1 AND operation_id=$2 AND owner_id=$3 AND fence=$4`, lease.WorkspaceID, lease.OperationID, lease.OwnerID, int64(lease.Fence)); err != nil {
 		return fmt.Errorf("release operation lease: %w", err)
+	}
+	if err := releaseResourceLeasesTx(ctx, tx, lease); err != nil {
+		return err
 	}
 	return nil
 }

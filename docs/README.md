@@ -139,6 +139,7 @@ and [`71-loop-25-completion.md`](71-loop-25-completion.md).
 | 41 | Generic operation capacity qualification | [`105-capacity-qualification-foundation.md`](105-capacity-qualification-foundation.md) | [`106-loop-41-completion.md`](106-loop-41-completion.md) |
 | 42 | Generic operation queue and worker claims | [`107-generic-operation-queue-foundation.md`](107-generic-operation-queue-foundation.md) | [`108-loop-42-completion.md`](108-loop-42-completion.md) |
 | 43 | Adapter-owned generic operation worker | [`109-generic-operation-worker-foundation.md`](109-generic-operation-worker-foundation.md) | [`110-loop-43-completion.md`](110-loop-43-completion.md) |
+| 44 | Universal operation fairness, quotas, and resource serialization | [`112-operation-supervisor-resource-serialization-foundation.md`](112-operation-supervisor-resource-serialization-foundation.md) | [`113-loop-44-completion.md`](113-loop-44-completion.md) |
 | — | Universal production roadmap status | [`111-universal-production-roadmap-status.md`](111-universal-production-roadmap-status.md) | — |
 
 ## Local package and managed runtime

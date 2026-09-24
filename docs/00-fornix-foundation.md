@@ -218,6 +218,11 @@ authoritative structured state
   semantics are durable and replay-safe. Final connector authorization,
   signed callbacks, secret-manager resolution, and production egress
   enforcement remain qualification work under [Issue #40](https://github.com/Kshitij-M/fornix/issues/40).
+- Generic operation fairness now has an explicit-workspace round-robin
+  supervisor, a durable workspace active-lease quota, and declared resource
+  serialization with independent resource fences. The supervisor is bounded
+  process policy over Postgres authority; weighted scheduling, autoscaling,
+  resource discovery, and production load evidence remain open.
 - The HTTP/API and read-only SQL reference adapters are implemented as an
   alpha qualification slice under [Issue #43](https://github.com/Kshitij-M/fornix/issues/43).
   They are deliberately narrow: configured HTTP targets and read-only,

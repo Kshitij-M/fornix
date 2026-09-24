@@ -368,6 +368,9 @@ jobs:
         env:
           FORNIX_TEST_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
         run: go test ./internal/operationworker ./internal/store -run 'TestWorker|TestOperationQueue' -count=1 -v
+
+      - name: Run universal operation supervisor qualification
+        run: go test ./internal/operationsupervisor -run '^TestSupervisor' -count=1 -v
       - name: Run multi-domain incident workflow integration tests
         env:
           FORNIX_TEST_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
