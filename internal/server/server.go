@@ -48,6 +48,7 @@ type server struct {
 	pool              *pgxpool.Pool
 	events            *store.EventStore
 	operations        *store.OperationStore
+	admission         *store.AdmissionStore
 	workflows         *store.WorkflowStore
 	evidence          *store.EvidenceStore
 	artifacts         *store.ArtifactStore
@@ -111,6 +112,7 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 	}
 	events := store.NewEventStore(pool)
 	operations := store.NewOperationStore(pool, events)
+	admission := store.NewAdmissionStore(pool, events)
 	workflows := store.NewWorkflowStore(pool, events, operations)
 	modelCalls := store.NewModelCallStore(pool)
 	observability := store.NewObservabilityStore(pool)
@@ -223,6 +225,7 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 		pool:              pool,
 		events:            events,
 		operations:        operations,
+		admission:         admission,
 		workflows:         workflows,
 		evidence:          evidenceStore,
 		artifacts:         artifactStore,

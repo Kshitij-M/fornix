@@ -17,6 +17,7 @@ import (
 	"github.com/omaveda/fornix/internal/adapters/fakeincident"
 	connectorruntime "github.com/omaveda/fornix/internal/connector"
 	"github.com/omaveda/fornix/internal/contracts"
+	"github.com/omaveda/fornix/internal/store"
 )
 
 func TestGenericOperationHTTPIsIdempotentFencedReplayableAndWorkspaceScoped(t *testing.T) {
@@ -243,6 +244,87 @@ func TestGenericOperationHTTPRejectsEffectfulCapabilityWithoutReservation(t *tes
 	executeResponse := performOperationRequest(handler, token, workspaceID, http.MethodPost, "/v1/operations/"+operationID+"/execute?workspace_id="+workspaceID, []byte(`{}`), nil)
 	if executeResponse.Code != http.StatusConflict {
 		t.Fatalf("effectful execute status=%d body=%s", executeResponse.Code, executeResponse.Body.String())
+	}
+}
+
+func TestGenericOperationHTTPReservesAndReconcilesExternalEffect(t *testing.T) {
+	srv, pool, workspaceID, token := newServerAuthTest(t, []contracts.Permission{contracts.PermissionOperationRead, contracts.PermissionOperationCreate, contracts.PermissionOperationExecute})
+	srv.admission = store.NewAdmissionStore(pool, srv.events)
+	principal, err := srv.auth.Authenticate(context.Background(), token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := genericOperationRequest(workspaceID)
+	request.ID = "operation-effect-http"
+	request.RequestID = "request-effect-http"
+	request.IdempotencyKey = "operation-effect-http-create"
+	request.Actor = principal.Actor()
+	hash := strings.Repeat("b", 64)
+	plan := contracts.OperationPlan{ID: "plan-effect-http", WorkspaceID: workspaceID, Actor: principal.Actor(), Steps: []contracts.OperationStep{{
+		ID: "step-effect", Ordinal: 0, Kind: "dispatch", Capability: request.Capability, Target: request.Target,
+		Effect: contracts.EffectClassReversibleWrite, Profile: contracts.DefaultExecutionProfile(), InputHash: hash,
+	}}}
+	created, err := srv.operations.Create(context.Background(), store.OperationCreateInput{Request: request, Plan: &plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lease, err := srv.operations.AcquireLease(context.Background(), workspaceID, created.Operation.ID, principal.ID, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, inserted, err := srv.operations.ReserveAttempt(context.Background(), store.OperationAttemptInput{WorkspaceID: workspaceID, OperationID: created.Operation.ID, StepID: "step-effect", Attempt: 1, AttemptID: "attempt-effect-http", OwnerID: principal.ID, Fence: lease.Lease.Fence, RequestHash: hash, IdempotencyKey: "attempt-effect-http"}); err != nil || !inserted {
+		t.Fatalf("reserve attempt inserted=%v err=%v", inserted, err)
+	}
+	handler := withRequestMiddleware(srv.securityMiddleware(srv.routes()), 2<<20)
+	fenceHeaders := map[string]string{"X-Operation-Fence": strconv.FormatUint(lease.Lease.Fence, 10)}
+	effectBody := []byte(`{"step_id":"step-effect","attempt_id":"attempt-effect-http","request_hash":"` + hash + `","effect":{"workspace_id":"` + workspaceID + `","boundary":"fixture","class":"reversible_write","delivery_guarantee":"at_least_once","idempotency_key":"provider-effect-http","verification_required":true,"verification_status":"pending","compensation_status":"available"}}`)
+	reservePath := "/v1/operations/" + created.Operation.ID + "/effects/reserve?workspace_id=" + workspaceID
+	reserved := performOperationRequest(handler, token, workspaceID, http.MethodPost, reservePath, effectBody, fenceHeaders)
+	if reserved.Code != http.StatusOK {
+		t.Fatalf("reserve status=%d body=%s", reserved.Code, reserved.Body.String())
+	}
+	reservedJSON := decodeOperationJSON(t, reserved)
+	effect := objectValue(t, reservedJSON, "effect")
+	effectID := stringValue(t, effect, "effect_id")
+	if effectID == "" || stringValue(t, effect, "request_hash") != hash {
+		t.Fatalf("reserved effect=%s", responseJSON(reservedJSON))
+	}
+	getPath := "/v1/operations/" + created.Operation.ID + "/effects/" + effectID + "?workspace_id=" + workspaceID
+	got := performOperationRequest(handler, token, workspaceID, http.MethodGet, getPath, nil, nil)
+	if got.Code != http.StatusOK || stringValue(t, objectValue(t, decodeOperationJSON(t, got), "effect"), "state") != contracts.ExternalEffectReserved {
+		t.Fatalf("get reserved status=%d body=%s", got.Code, got.Body.String())
+	}
+	statePath := "/v1/operations/" + created.Operation.ID + "/effects/" + effectID + "/state?workspace_id=" + workspaceID
+	stateBody := []byte(`{"idempotency_key":"effect-dispatch-http","state":"dispatched","provider_request_id":"provider-request-http"}`)
+	dispatched := performOperationRequest(handler, token, workspaceID, http.MethodPost, statePath, stateBody, fenceHeaders)
+	if dispatched.Code != http.StatusOK {
+		t.Fatalf("dispatch status=%d body=%s", dispatched.Code, dispatched.Body.String())
+	}
+	if stringValue(t, objectValue(t, decodeOperationJSON(t, dispatched), "effect"), "state") != contracts.ExternalEffectDispatched {
+		t.Fatalf("dispatch response=%s", dispatched.Body.String())
+	}
+	duplicate := performOperationRequest(handler, token, workspaceID, http.MethodPost, statePath, stateBody, fenceHeaders)
+	if duplicate.Code != http.StatusOK || !boolValue(t, decodeOperationJSON(t, duplicate), "duplicate") {
+		t.Fatalf("duplicate dispatch status=%d body=%s", duplicate.Code, duplicate.Body.String())
+	}
+	conflict := performOperationRequest(handler, token, workspaceID, http.MethodPost, statePath, []byte(`{"idempotency_key":"effect-dispatch-http","state":"acknowledged"}`), fenceHeaders)
+	if conflict.Code != http.StatusConflict {
+		t.Fatalf("idempotency conflict status=%d body=%s", conflict.Code, conflict.Body.String())
+	}
+	foreign := performOperationRequest(handler, token, "foreign-workspace", http.MethodGet, getPath+"&workspace_id=foreign-workspace", nil, nil)
+	if foreign.Code != http.StatusForbidden {
+		t.Fatalf("cross-workspace effect status=%d body=%s", foreign.Code, foreign.Body.String())
+	}
+
+	if err := srv.operations.ReleaseLease(context.Background(), store.OperationLease{WorkspaceID: workspaceID, OperationID: created.Operation.ID, OwnerID: principal.ID, Fence: lease.Lease.Fence}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := srv.operations.AcquireLease(context.Background(), workspaceID, created.Operation.ID, "takeover-effect-http", time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	stale := performOperationRequest(handler, token, workspaceID, http.MethodPost, statePath, []byte(`{"idempotency_key":"effect-ack-stale","state":"acknowledged"}`), fenceHeaders)
+	if stale.Code != http.StatusConflict {
+		t.Fatalf("stale reconciliation status=%d body=%s", stale.Code, stale.Body.String())
 	}
 }
 

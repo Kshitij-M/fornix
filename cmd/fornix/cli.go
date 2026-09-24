@@ -179,7 +179,7 @@ Work:
   change      Propose, approve, apply, and disclose repository changes
   validation  Run and inspect post-change validation
   policy      Inspect and resolve validation policy packs
-  operation   Create, execute, lease, renew, release, advance, and replay operations
+	 operation   Create, execute, lease, renew, release, effect recovery, and replay operations
   incident    Run the bounded multi-domain incident workflow
 
 Identity and diagnostics:
@@ -450,7 +450,7 @@ func (c *operatorCLI) runCommand(args []string) error {
 // lifecycle commands use the same authenticated HTTP authority.
 func (c *operatorCLI) operationCommand(args []string) error {
 	if len(args) == 0 {
-		return errors.New("operation requires create, execute, get, lease, renew, release, transition, or replay")
+		return errors.New("operation requires create, execute, get, lease, renew, release, effect-reserve, effect-get, effect-state, transition, or replay")
 	}
 	switch args[0] {
 	case "create":
@@ -487,6 +487,48 @@ func (c *operatorCLI) operationCommand(args []string) error {
 			delete(body, "idempotency_key")
 		}
 		return c.requestPrint(http.MethodPost, path, body, false)
+	case "effect-reserve":
+		id := valueArg(args[1:], "id", "")
+		if id == "" {
+			return errors.New("operation effect-reserve requires --id ID")
+		}
+		effectFile := valueArg(args[1:], "effect-file", "")
+		if effectFile == "" {
+			return errors.New("operation effect-reserve requires --effect-file PATH")
+		}
+		effectJSON, err := readBoundedJSONFile(effectFile, 32<<10)
+		if err != nil {
+			return err
+		}
+		var effect contracts.ExternalEffect
+		if err := json.Unmarshal(effectJSON, &effect); err != nil {
+			return fmt.Errorf("decode effect file: %w", err)
+		}
+		effectID := valueArg(args[1:], "effect-id", "")
+		path := "/v1/operations/" + url.PathEscape(id) + "/effects/"
+		if effectID == "" {
+			effectID = "reserve"
+		}
+		path += url.PathEscape(effectID) + "?workspace_id=" + url.QueryEscape(c.workspace)
+		body := map[string]any{"step_id": valueArg(args[1:], "step-id", ""), "attempt_id": valueArg(args[1:], "attempt-id", ""), "request_hash": valueArg(args[1:], "request-hash", ""), "effect": effect}
+		return c.requestPrintWithHeaders(http.MethodPost, path, body, false, map[string]string{"X-Operation-Fence": strconv.FormatUint(uint64Value(args[1:], "fence", 0), 10)})
+	case "effect-get":
+		id := valueArg(args[1:], "id", "")
+		effectID := valueArg(args[1:], "effect-id", "")
+		if id == "" || effectID == "" {
+			return errors.New("operation effect-get requires --id ID and --effect-id ID")
+		}
+		path := "/v1/operations/" + url.PathEscape(id) + "/effects/" + url.PathEscape(effectID) + "?workspace_id=" + url.QueryEscape(c.workspace)
+		return c.requestPrint(http.MethodGet, path, nil, false)
+	case "effect-state":
+		id := valueArg(args[1:], "id", "")
+		effectID := valueArg(args[1:], "effect-id", "")
+		if id == "" || effectID == "" {
+			return errors.New("operation effect-state requires --id ID and --effect-id ID")
+		}
+		path := "/v1/operations/" + url.PathEscape(id) + "/effects/" + url.PathEscape(effectID) + "/state?workspace_id=" + url.QueryEscape(c.workspace)
+		body := map[string]any{"request_id": valueArg(args[1:], "request-id", ""), "idempotency_key": valueArg(args[1:], "idempotency", ""), "state": valueArg(args[1:], "state", ""), "provider_request_id": valueArg(args[1:], "provider-request-id", ""), "response_hash": valueArg(args[1:], "response-hash", ""), "verification_hash": valueArg(args[1:], "verification-hash", ""), "compensation_hash": valueArg(args[1:], "compensation-hash", ""), "failure_code": valueArg(args[1:], "failure-code", "")}
+		return c.requestPrintWithHeaders(http.MethodPost, path, body, false, map[string]string{"X-Operation-Fence": strconv.FormatUint(uint64Value(args[1:], "fence", 0), 10)})
 	case "get":
 		return c.requestPrint(http.MethodGet, "/v1/operations/"+url.PathEscape(valueArg(args[1:], "id", ""))+"?workspace_id="+url.QueryEscape(c.workspace), nil, false)
 	case "lease":

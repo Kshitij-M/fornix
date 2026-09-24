@@ -122,6 +122,10 @@ input and producing the input/schema hashes before admission.
 | `POST` | `/v1/operations/{id}/transition` | Advance one legal state transition | `operation:execute` |
 | `POST` | `/v1/operations/{id}/execute` | Execute one trusted read-only or observation capability and persist its result | `operation:execute` |
 | `POST` | `/v1/operations/{id}/replay` | Verify the durable transition/event hash chain | `operation:read` |
+| `POST` | `/v1/operations/{id}/effects/reserve` | Reserve an external effect before connector dispatch | `operation:execute` |
+| `POST` | `/v1/operations/{id}/effects/{effect_id}` | Reserve an external effect with a caller-selected identity | `operation:execute` |
+| `GET` | `/v1/operations/{id}/effects/{effect_id}` | Read the current effect recovery state | `operation:read` |
+| `POST` | `/v1/operations/{id}/effects/{effect_id}/state` | Append a fenced dispatch, acknowledgement, verification, compensation, or recovery transition | `operation:execute` |
 
 The create body contains a `request` object and may contain a normalized
 `plan`, bounded resource references, and provenance links. The authenticated
@@ -156,6 +160,9 @@ fornix operation lease --id op-123
 fornix operation execute --id op-123
 fornix operation transition --id op-123 --fence 1 --to-status planned
 fornix operation replay --id op-123
+fornix operation effect-reserve --id op-123 --effect-file effect.json --step-id step-1 --attempt-id attempt-1 --request-hash HASH --fence 1
+fornix operation effect-get --id op-123 --effect-id effect-123
+fornix operation effect-state --id op-123 --effect-id effect-123 --state recovery_required --idempotency recovery-1 --fence 1
 ```
 
 Replay is read-only. It validates the initial state anchor, contiguous
@@ -163,6 +170,24 @@ versions, previous-state hashes, legal status transitions, linked event rows,
 and the current projection hash. It never calls a model, tool, connector, or
 external system. A committed external effect remains explicitly at-least-once
 and is represented as uncertain when delivery cannot be reconciled.
+
+### External-effect reconciliation
+
+Reservation is the admission boundary, not execution. The reservation body
+contains `step_id`, `attempt_id`, `request_hash`, and a typed `effect` with a
+workspace, boundary, effect class, delivery guarantee, provider idempotency
+metadata, and verification/compensation status. It does not contain a provider
+payload, secret, credential, header, or arbitrary diagnostic text. The caller
+must hold the current `X-Operation-Fence` returned by the operation lease.
+
+The state route accepts only typed provider request identifiers, SHA-256
+response/verification/compensation references, and a bounded failure code. It
+uses the authenticated operation actor as the lease owner. Valid transitions
+are enforced by `AdmissionStore`; repeated idempotency keys return the
+committed state, while a different command under the same key is a conflict.
+A provider timeout or process crash must be reconciled explicitly. Fornix
+never silently repeats an external call and never claims exactly-once remote
+execution.
 
 ## Retrieval, evidence, and artifacts
 

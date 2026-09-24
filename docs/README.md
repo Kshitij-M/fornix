@@ -123,6 +123,7 @@ and [`71-loop-25-completion.md`](71-loop-25-completion.md).
 | 30 | Universal credential leases and capability trust admission | [`80-credential-egress-trust-foundation.md`](80-credential-egress-trust-foundation.md) | [`81-loop-30-completion.md`](81-loop-30-completion.md) |
 | 31 | Shared destination and egress policy | [`82-egress-policy-foundation.md`](82-egress-policy-foundation.md) | [`83-loop-31-completion.md`](83-loop-31-completion.md) |
 | 32 | Durable generic connector execution | [`84-generic-execution-foundation.md`](84-generic-execution-foundation.md) | [`85-loop-32-completion.md`](85-loop-32-completion.md) |
+| 33 | External-effect reservation and reconciliation API | [`86-external-effect-reconciliation-foundation.md`](86-external-effect-reconciliation-foundation.md) | [`87-loop-33-completion.md`](87-loop-33-completion.md) |
 
 ## Local package and managed runtime
 

@@ -88,6 +88,12 @@ contains the current/planned domain matrix and the precise category boundary.
   and atomic lease-renewed checkpoint commits.
 - Docker-backed Go/Python checks, Postgres integration tests, CI, and smoke
   tests.
+- Domain-neutral connector execution is split at the external boundary:
+  trusted read/observation capabilities can persist results, while effectful
+  work must first create a durable reservation and use the fenced reconciliation
+  API. Dispatch, acknowledgement, verification, compensation, and recovery
+  states are append-only and idempotent; this still does not qualify any live
+  provider connector or exactly-once external execution.
 - Workspace-scoped identities, deterministic RBAC, fail-closed authorization,
   API-key hashing/expiry/revocation/rotation, credential-reference lifecycle,
   append-only authorization audit, and authenticated actor propagation.
@@ -308,6 +314,7 @@ make smoke-universal-operation
 make smoke-universal-trust
 make smoke-universal-egress
 make smoke-universal-execution
+make smoke-universal-effects
 ```
 
 For release output produced by GoReleaser, run:

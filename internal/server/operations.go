@@ -10,6 +10,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	connectorruntime "github.com/omaveda/fornix/internal/connector"
 	"github.com/omaveda/fornix/internal/contracts"
 	"github.com/omaveda/fornix/internal/store"
@@ -29,6 +31,31 @@ type operationCreateRequest struct {
 
 type operationLeaseRequest struct {
 	TTLMS int64 `json:"ttl_ms,omitempty"`
+}
+
+// operationEffectReserveRequest is deliberately reference-only. The effect
+// payload is owned by the connector and must be represented by hashes and
+// provider identifiers, never by credentials or arbitrary request bytes.
+type operationEffectReserveRequest struct {
+	StepID      string                   `json:"step_id"`
+	AttemptID   string                   `json:"attempt_id"`
+	RequestHash string                   `json:"request_hash"`
+	Effect      contracts.ExternalEffect `json:"effect"`
+}
+
+// operationEffectStateRequest is the public reconciliation command. Identity,
+// workspace, operation, owner, and fence are supplied by the authenticated
+// route and operation lease; accepting them from JSON would create a fence or
+// workspace-confusion primitive.
+type operationEffectStateRequest struct {
+	RequestID         string `json:"request_id,omitempty"`
+	IdempotencyKey    string `json:"idempotency_key"`
+	State             string `json:"state"`
+	ProviderRequestID string `json:"provider_request_id,omitempty"`
+	ResponseHash      string `json:"response_hash,omitempty"`
+	VerificationHash  string `json:"verification_hash,omitempty"`
+	CompensationHash  string `json:"compensation_hash,omitempty"`
+	FailureCode       string `json:"failure_code,omitempty"`
 }
 
 // operationTransitionRequest deliberately omits actor and owner fields from
@@ -127,6 +154,21 @@ func (s *server) handleOperation(w http.ResponseWriter, r *http.Request) {
 		s.handleOperationGet(w, r, operationID)
 		return
 	}
+	if len(parts) == 3 && parts[1] == "effects" {
+		effectID := parts[2]
+		if r.Method == http.MethodGet {
+			s.handleOperationEffectGet(w, r, operationID, effectID)
+			return
+		}
+		if r.Method == http.MethodPost {
+			s.handleOperationEffectReserve(w, r, operationID, effectID)
+			return
+		}
+	}
+	if len(parts) == 4 && parts[1] == "effects" && parts[3] == "state" && r.Method == http.MethodPost {
+		s.handleOperationEffectState(w, r, operationID, parts[2])
+		return
+	}
 	if len(parts) != 2 || r.Method != http.MethodPost {
 		writeErr(w, http.StatusNotFound, "unknown operation command")
 		return
@@ -147,6 +189,141 @@ func (s *server) handleOperation(w http.ResponseWriter, r *http.Request) {
 	default:
 		writeErr(w, http.StatusNotFound, "unknown operation command")
 	}
+}
+
+// handleOperationEffectReserve makes an external effect visible before a
+// connector is dispatched. The operation store owns reservation idempotency,
+// operation leases, task fences, and the initial append-only state.
+func (s *server) handleOperationEffectReserve(w http.ResponseWriter, r *http.Request, operationID, effectID string) {
+	if s.admission == nil {
+		writeErr(w, http.StatusServiceUnavailable, "effect admission unavailable")
+		return
+	}
+	var input operationEffectReserveRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<10)).Decode(&input); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid effect reservation request")
+		return
+	}
+	principal, ok := principalFromRequest(r)
+	if !ok || !principal.Authenticated {
+		writeErr(w, http.StatusUnauthorized, "unauthorised")
+		return
+	}
+	workspaceID := requestWorkspace(r, r.URL.Query().Get("workspace_id"))
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	operation, err := s.operations.Get(ctx, workspaceID, operationID)
+	if err != nil {
+		writeOperationErr(w, err)
+		return
+	}
+	if operation.Request.Actor.ID != principal.ID || operation.Request.Actor.WorkspaceID != principal.WorkspaceID {
+		writeOperationErr(w, store.ErrOperationWorkspace)
+		return
+	}
+	pathEffectID := strings.TrimSpace(effectID)
+	if pathEffectID == "reserve" {
+		pathEffectID = ""
+	}
+	if pathEffectID != "" && strings.TrimSpace(input.Effect.ID) != "" && strings.TrimSpace(input.Effect.ID) != pathEffectID {
+		writeErr(w, http.StatusBadRequest, "effect id mismatch")
+		return
+	}
+	// `reserve` is the create form of this endpoint; an explicit effect ID is
+	// still accepted in the body, while the path form remains authoritative
+	// when a caller selects an identity.
+	if pathEffectID != "" {
+		input.Effect.ID = pathEffectID
+	}
+	input.Effect.WorkspaceID = workspaceID
+	result, inserted, err := s.operations.ReserveEffect(ctx, store.OperationEffectInput{
+		WorkspaceID: workspaceID, OperationID: operationID, StepID: input.StepID, AttemptID: input.AttemptID,
+		OwnerID: principal.ID, Fence: operationLeaseFence(r), Effect: input.Effect, RequestHash: input.RequestHash,
+	})
+	if err != nil {
+		writeOperationErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"effect": publicOperationEffect(result), "reserved": inserted})
+}
+
+func (s *server) handleOperationEffectGet(w http.ResponseWriter, r *http.Request, operationID, effectID string) {
+	if s.admission == nil {
+		writeErr(w, http.StatusServiceUnavailable, "effect admission unavailable")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	workspaceID := requestWorkspace(r, r.URL.Query().Get("workspace_id"))
+	state, err := s.admission.GetEffectState(ctx, workspaceID, effectID)
+	if err != nil {
+		writeAdmissionErr(w, err)
+		return
+	}
+	if state.OperationID != operationID {
+		writeErr(w, http.StatusNotFound, "effect not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"effect": publicEffectState(state)})
+}
+
+func (s *server) handleOperationEffectState(w http.ResponseWriter, r *http.Request, operationID, effectID string) {
+	if s.admission == nil {
+		writeErr(w, http.StatusServiceUnavailable, "effect admission unavailable")
+		return
+	}
+	var input operationEffectStateRequest
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 32<<10)).Decode(&input); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid effect state request")
+		return
+	}
+	headerIdempotency := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if input.IdempotencyKey != "" && headerIdempotency != "" && input.IdempotencyKey != headerIdempotency {
+		writeErr(w, http.StatusBadRequest, "idempotency key mismatch")
+		return
+	}
+	if input.IdempotencyKey == "" {
+		input.IdempotencyKey = headerIdempotency
+	}
+	if input.IdempotencyKey == "" {
+		writeErr(w, http.StatusBadRequest, "idempotency key is required")
+		return
+	}
+	principal, ok := principalFromRequest(r)
+	if !ok || !principal.Authenticated {
+		writeErr(w, http.StatusUnauthorized, "unauthorised")
+		return
+	}
+	workspaceID := requestWorkspace(r, r.URL.Query().Get("workspace_id"))
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	operation, err := s.operations.Get(ctx, workspaceID, operationID)
+	if err != nil {
+		writeOperationErr(w, err)
+		return
+	}
+	if operation.Request.Actor.ID != principal.ID || operation.Request.Actor.WorkspaceID != principal.WorkspaceID {
+		writeOperationErr(w, store.ErrOperationWorkspace)
+		return
+	}
+	requestID := strings.TrimSpace(input.RequestID)
+	if requestID == "" {
+		requestID = requestIDFromRequest(r)
+	}
+	if requestID == "" {
+		requestID = "effect-state:" + input.IdempotencyKey
+	}
+	result, err := s.admission.UpdateEffect(ctx, contracts.ExternalEffectUpdate{
+		WorkspaceID: workspaceID, OperationID: operationID, EffectID: effectID, OwnerID: principal.ID,
+		Fence: operationLeaseFence(r), RequestID: requestID, IdempotencyKey: input.IdempotencyKey,
+		State: input.State, ProviderRequestID: input.ProviderRequestID, ResponseHash: input.ResponseHash,
+		VerificationHash: input.VerificationHash, CompensationHash: input.CompensationHash, FailureCode: input.FailureCode,
+	})
+	if err != nil {
+		writeAdmissionErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"effect": publicEffectState(result.State), "duplicate": result.Duplicate})
 }
 
 // handleOperationExecute connects the durable operation authority to the
@@ -501,6 +678,27 @@ func publicOperationResult(record store.OperationResultRecord) map[string]any {
 	}
 }
 
+func publicOperationEffect(effect store.OperationEffect) map[string]any {
+	return map[string]any{
+		"workspace_id": effect.WorkspaceID, "operation_id": effect.OperationID, "step_id": effect.StepID,
+		"attempt_id": effect.AttemptID, "effect_id": effect.EffectID, "effect_class": effect.EffectClass,
+		"boundary": effect.Boundary, "idempotency_key": effect.IdempotencyKey,
+		"provider_request_id": effect.ProviderRequestID, "provider_idempotency_supported": effect.ProviderIdempotency,
+		"delivery_semantics": effect.DeliverySemantics, "verification_status": effect.VerificationStatus,
+		"compensation_status": effect.CompensationStatus, "request_hash": effect.RequestHash,
+		"response_hash": effect.ResponseHash, "created_at": effect.CreatedAt, "verified_at": effect.VerifiedAt,
+	}
+}
+
+func publicEffectState(state store.EffectState) map[string]any {
+	return map[string]any{
+		"workspace_id": state.WorkspaceID, "effect_id": state.EffectID, "operation_id": state.OperationID,
+		"state": state.State, "version": state.Version, "provider_request_id": state.ProviderRequestID,
+		"response_hash": state.ResponseHash, "verification_hash": state.VerificationHash,
+		"compensation_hash": state.CompensationHash, "failure_code": state.FailureCode, "updated_at": state.UpdatedAt,
+	}
+}
+
 func writeOperationErr(w http.ResponseWriter, err error) {
 	status := http.StatusBadRequest
 	switch {
@@ -512,6 +710,22 @@ func writeOperationErr(w http.ResponseWriter, err error) {
 		status = http.StatusConflict
 	case errors.Is(err, store.ErrOperationReplay):
 		status = http.StatusUnprocessableEntity
+	}
+	writeErr(w, status, err.Error())
+}
+
+func writeAdmissionErr(w http.ResponseWriter, err error) {
+	status := http.StatusBadRequest
+	switch {
+	case errors.Is(err, store.ErrAdmissionNotFound), errors.Is(err, pgx.ErrNoRows):
+		status = http.StatusNotFound
+	case errors.Is(err, store.ErrOperationWorkspace), errors.Is(err, store.ErrOperationTaskFence):
+		status = http.StatusForbidden
+	case errors.Is(err, store.ErrAdmissionConflict), errors.Is(err, store.ErrAdmissionEffect), errors.Is(err, store.ErrAdmissionEffectTerminal),
+		errors.Is(err, store.ErrOperationLeaseMissing), errors.Is(err, store.ErrOperationLeaseHeld), errors.Is(err, store.ErrOperationLeaseOwned),
+		errors.Is(err, store.ErrOperationLeaseFenced), errors.Is(err, store.ErrOperationLeaseExpired), errors.Is(err, store.ErrOperationLeaseReleased),
+		errors.Is(err, store.ErrOperationIdempotency):
+		status = http.StatusConflict
 	}
 	writeErr(w, status, err.Error())
 }
