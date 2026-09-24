@@ -16,6 +16,7 @@ database version, duration, and result.
 | Full repository smoke | `make smoke` | Running service, Postgres, Python helpers, Docker for local runtime | Fake-first; optional adapters are explicit | Yes, disposable smoke workspaces |
 | Optional OpenAI | `make smoke-reference-openai` | `FORNIX_OPENAI_API_KEY` in the environment only | OpenAI call; bounded by smoke config | Model-call metadata only; never store the key |
 | Package/release | `make package-check`, `make release-check`, `make smoke-package` | GoReleaser/package tools | No | Temporary archive/install directories only |
+| Backup/restore drill | `make qualification-backup-restore` with separate DSNs and explicit confirmation | PostgreSQL client tools and a clean restore database | Destructive only on the explicitly named restore target | Backup file plus restored database |
 
 ## Environment rules
 
@@ -39,6 +40,11 @@ For a qualification run, record:
 - test/smoke output after redaction;
 - replay, state, context, artifact, and report hashes where applicable;
 - storage and row-count deltas for database-backed tests.
+
+For the backup/restore drill, also retain the backup checksum, byte size,
+backup duration, restore duration, source/restore fingerprint, measured
+deployment RPO, and measured deployment RTO. Never retain DSNs or secret
+values in the qualification record.
 
 ## Current production gates still open
 
