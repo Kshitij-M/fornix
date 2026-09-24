@@ -192,6 +192,21 @@ func TestOperationPlanAndResultAreAtomicFencedAndIdempotent(t *testing.T) {
 	if resultRows != 1 {
 		t.Fatalf("result rows=%d, want 1", resultRows)
 	}
+	var embeddedResultID string
+	if err := pool.QueryRow(context.Background(), `SELECT result->>'id' FROM fornix.operation_results WHERE workspace_id=$1 AND operation_id=$2`, workspace, created.Operation.ID).Scan(&embeddedResultID); err != nil {
+		t.Fatal(err)
+	}
+	if embeddedResultID != result.ID {
+		t.Fatalf("embedded result id=%q, relational result id=%q", embeddedResultID, written.Record.ResultID)
+	}
+	conflicting := result
+	conflicting.OperationHash = testHash("different-operation")
+	if _, err := operationStore.RecordResult(context.Background(), OperationResultInput{
+		WorkspaceID: workspace, OperationID: created.Operation.ID, OwnerID: "stale-owner", Fence: 1,
+		Actor: request.Actor, IdempotencyKey: "conflicting-operation-result", Result: conflicting,
+	}); !errors.Is(err, ErrOperationResultConflict) {
+		t.Fatalf("operation hash mismatch error=%v, want ErrOperationResultConflict", err)
+	}
 }
 
 func TestTerminalOperationRejectsNewLeasesAndAdmissions(t *testing.T) {

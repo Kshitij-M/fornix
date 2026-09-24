@@ -621,6 +621,9 @@ func (s *OperationStore) recordResultTx(ctx context.Context, tx pgx.Tx, input Op
 	if err != nil {
 		return OperationResultWrite{}, err
 	}
+	if input.Result.OperationHash != operation.OperationHash {
+		return OperationResultWrite{}, ErrOperationResultConflict
+	}
 	resultHash := input.Result.StableHash()
 	if existing, readErr := readOperationResult(ctx, tx, input.WorkspaceID, input.OperationID); readErr == nil {
 		if existing.ResultHash != resultHash {
@@ -657,6 +660,10 @@ func (s *OperationStore) recordResultTx(ctx context.Context, tx pgx.Tx, input Op
 	if resultID == "" {
 		resultID = contracts.NewID("operation-result")
 	}
+	// Keep the embedded durable contract and the relational identity bound to
+	// the same result record. StableHash intentionally excludes this delivery
+	// identity, so retries remain idempotent even when the caller omitted it.
+	input.Result.ID = resultID
 	resultJSON, err := json.Marshal(input.Result)
 	if err != nil {
 		return OperationResultWrite{}, err
