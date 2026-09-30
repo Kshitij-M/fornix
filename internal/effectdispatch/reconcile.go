@@ -114,13 +114,16 @@ func (d *Dispatcher) Reconcile(ctx context.Context, request ReconcileRequest) (R
 	}
 	if state.State == contracts.ExternalEffectVerificationPending {
 		if state.Version != request.ExpectedEffectVer && state.Version != request.ExpectedEffectVer+1 {
-			return ReconcileResult{}, fmt.Errorf("%w: pending effect version %d, expected %d or %d", ErrVerificationFence, state.Version, request.ExpectedEffectVer, request.ExpectedEffectVer+1)
+			stale := fmt.Errorf("%w: pending effect version %d, expected %d or %d", ErrVerificationFence, state.Version, request.ExpectedEffectVer, request.ExpectedEffectVer+1)
+			return d.duplicateOrStaleReconcile(ctx, link, request, stale)
 		}
 	} else if state.Version != request.ExpectedEffectVer {
-		return ReconcileResult{}, fmt.Errorf("%w: effect version %d, expected %d", ErrVerificationFence, state.Version, request.ExpectedEffectVer)
+		stale := fmt.Errorf("%w: effect version %d, expected %d", ErrVerificationFence, state.Version, request.ExpectedEffectVer)
+		return d.duplicateOrStaleReconcile(ctx, link, request, stale)
 	}
 	if currentLink.Transition.Version != request.ExpectedLinkVersion {
-		return ReconcileResult{}, fmt.Errorf("%w: link version %d, expected %d", ErrVerificationFence, currentLink.Transition.Version, request.ExpectedLinkVersion)
+		stale := fmt.Errorf("%w: link version %d, expected %d", ErrVerificationFence, currentLink.Transition.Version, request.ExpectedLinkVersion)
+		return d.duplicateOrStaleReconcile(ctx, link, request, stale)
 	}
 
 	// Recovery and acknowledged states must first become verification_pending.
@@ -208,6 +211,43 @@ func (d *Dispatcher) Reconcile(ctx context.Context, request ReconcileRequest) (R
 		return ReconcileResult{}, err
 	}
 	return ReconcileResult{State: finalState, Link: finalLink, LinkVersion: finalLinkVersion, Duplicate: finalDuplicate}, nil
+}
+
+// duplicateOrStaleReconcile closes a read-skew race between the independently
+// read effect projection and domain-link projection. The final effect and link
+// transitions commit atomically, but the initial preflight reads are separate
+// transactions; a concurrent duplicate can therefore observe one projection
+// before and the other after the commit. Only the exact final idempotency
+// transition can turn that stale read into a duplicate success.
+func (d *Dispatcher) duplicateOrStaleReconcile(ctx context.Context, link contracts.DomainEffectLink, request ReconcileRequest, stale error) (ReconcileResult, error) {
+	transition, err := d.Admission.GetEffectTransition(ctx, request.WorkspaceID, request.EffectID, request.IdempotencyKey+":final")
+	if errors.Is(err, store.ErrAdmissionNotFound) {
+		return ReconcileResult{}, stale
+	}
+	if err != nil {
+		return ReconcileResult{}, fmt.Errorf("check committed effect reconciliation: %w", err)
+	}
+
+	state, err := d.Admission.GetEffectState(ctx, request.WorkspaceID, request.EffectID)
+	if err != nil {
+		return ReconcileResult{}, err
+	}
+	current, err := d.Links.CurrentByDomain(ctx, request.WorkspaceID, link.DomainKind, link.DomainID, link.LinkRole)
+	if err != nil {
+		return ReconcileResult{}, err
+	}
+	if current.Link.ID != request.LinkID {
+		return ReconcileResult{}, store.ErrDomainEffectLinkStale
+	}
+	toState, _, failureCode := reconcileStates(request.Outcome)
+	if transition.ToState != toState || transition.ResponseHash != request.Outcome.ResultHash || transition.VerificationHash != request.Outcome.VerificationHash || transition.FailureCode != failureCode || (request.Outcome.ProviderRequestID != "" && transition.ProviderRequestID != request.Outcome.ProviderRequestID) {
+		return ReconcileResult{}, ErrVerificationConflict
+	}
+	resultLink, committed := reconcileAlreadyCommitted(state, current, request.Outcome)
+	if !committed {
+		return ReconcileResult{}, ErrVerificationConflict
+	}
+	return ReconcileResult{State: state, Link: resultLink, LinkVersion: current.Transition.Version, Duplicate: true}, nil
 }
 
 func reconcileStates(outcome contracts.EffectVerificationResult) (effectState, linkStatus, failureCode string) {
