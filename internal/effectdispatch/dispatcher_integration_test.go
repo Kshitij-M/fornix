@@ -35,8 +35,9 @@ func TestDispatcherReservesBeforeInvokesAndDeduplicates(t *testing.T) {
 			t.Fatal("invoker called more than once")
 		}
 		effect := contracts.ExternalEffect{WorkspaceID: workspace, Boundary: "fixture.dispatch", Class: definition.Effect, DeliveryGuarantee: contracts.ExternalDeliveryAtLeastOnce, IdempotencyKey: request.IdempotencyKey, ProviderIdempotency: true, VerificationStatus: contracts.ExternalVerificationNotRequired, CompensationStatus: contracts.ExternalCompensationUnavailable}
-		result := contracts.OperationResult{ID: request.ID + "-result", OperationID: request.ID, OperationHash: request.StableHash(), RequestID: request.RequestID, WorkspaceID: workspace, Actor: request.Actor, Status: contracts.OperationStatusSucceeded, OutputHash: contracts.HashStrings("output"), ExternalEffects: []contracts.ExternalEffect{effect}}
-		return InvocationResult{Result: result}, nil
+		outputHash := contracts.HashStrings("output")
+		result := contracts.OperationResult{ID: request.ID + "-result", OperationID: request.ID, OperationHash: request.StableHash(), RequestID: request.RequestID, WorkspaceID: workspace, Actor: request.Actor, Status: contracts.OperationStatusSucceeded, OutputHash: outputHash, ExternalEffects: []contracts.ExternalEffect{effect}}
+		return InvocationResult{Result: result, ResponseHash: outputHash}, nil
 	}
 	input := dispatcherRequest(workspace, request, definition, admissionInput, lease.Lease, invoker)
 	var finalizerCalls atomic.Int32
@@ -49,7 +50,7 @@ func TestDispatcherReservesBeforeInvokesAndDeduplicates(t *testing.T) {
 	}
 	first, err := dispatcher.Dispatch(context.Background(), input)
 	if err != nil {
-		t.Fatal(err)
+		fatalDispatchWithFixtureCause(t, err)
 	}
 	if first.Duplicate || first.OperationResult == nil || first.State.State != contracts.ExternalEffectVerified || first.DomainLink == nil || first.DomainLink.Status != contracts.DomainEffectLinkStatusReconciled {
 		t.Fatalf("first dispatch = %+v", first)
@@ -73,14 +74,16 @@ func TestDispatcherFinalEffectLinkAndResultRollbackTogether(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	injectedFinalizationFailure := errors.New("injected specialized result commit failure")
 	var calls atomic.Int32
 	var effectID string
 	input := dispatcherRequest(workspace, request, definition, admissionInput, lease, func(_ context.Context, authority contracts.EffectAuthority) (InvocationResult, error) {
 		calls.Add(1)
 		effectID = authority.EffectID
 		effect := contracts.ExternalEffect{WorkspaceID: workspace, Boundary: "fixture.dispatch", Class: definition.Effect, DeliveryGuarantee: contracts.ExternalDeliveryAtLeastOnce, IdempotencyKey: request.IdempotencyKey, ProviderIdempotency: true, VerificationStatus: contracts.ExternalVerificationNotRequired, CompensationStatus: contracts.ExternalCompensationUnavailable}
-		result := contracts.OperationResult{ID: request.ID + "-result", OperationID: request.ID, OperationHash: request.StableHash(), RequestID: request.RequestID, WorkspaceID: workspace, Actor: request.Actor, Status: contracts.OperationStatusSucceeded, OutputHash: contracts.HashStrings("atomic-result"), ExternalEffects: []contracts.ExternalEffect{effect}}
-		return InvocationResult{Result: result}, nil
+		outputHash := contracts.HashStrings("atomic-result")
+		result := contracts.OperationResult{ID: request.ID + "-result", OperationID: request.ID, OperationHash: request.StableHash(), RequestID: request.RequestID, WorkspaceID: workspace, Actor: request.Actor, Status: contracts.OperationStatusSucceeded, OutputHash: outputHash, ExternalEffects: []contracts.ExternalEffect{effect}}
+		return InvocationResult{Result: result, ResponseHash: outputHash}, nil
 	})
 	var finalizerCalls atomic.Int32
 	input.FinalizeTx = func(_ context.Context, _ pgx.Tx, resultHash string) error {
@@ -88,10 +91,15 @@ func TestDispatcherFinalEffectLinkAndResultRollbackTogether(t *testing.T) {
 			return errors.New("finalizer received no result hash")
 		}
 		finalizerCalls.Add(1)
-		return errors.New("injected specialized result commit failure")
+		return injectedFinalizationFailure
 	}
 	if _, err := dispatcher.Dispatch(context.Background(), input); err == nil {
 		t.Fatal("injected finalization failure unexpectedly committed")
+	} else {
+		var dispatchErr *ExternalDispatchError
+		if errors.As(err, &dispatchErr) && !errors.Is(dispatchErr.Err, injectedFinalizationFailure) {
+			t.Fatalf("dispatch failed before the injected finalizer: %v (fixture cause: %v)", err, dispatchErr.Err)
+		}
 	}
 	if finalizerCalls.Load() != 1 {
 		t.Fatalf("specialized finalizer calls=%d want 1", finalizerCalls.Load())
@@ -568,7 +576,7 @@ func TestDispatcherBindsDomainEffectBeforeExternalInvocation(t *testing.T) {
 	input := dispatcherRequest(workspace, request, definition, admission, lease, func(_ context.Context, authority contracts.EffectAuthority) (InvocationResult, error) {
 		effect := contracts.ExternalEffect{SchemaVersion: contracts.DomainNeutralSchemaVersion, ID: authority.EffectID, WorkspaceID: workspace, Boundary: "fixture.dispatch", Class: definition.Effect, DeliveryGuarantee: contracts.ExternalDeliveryAtLeastOnce, IdempotencyKey: request.IdempotencyKey, ProviderIdempotency: true, VerificationStatus: contracts.ExternalVerificationNotRequired, CompensationStatus: contracts.ExternalCompensationUnavailable}
 		result := contracts.OperationResult{ID: request.ID + "-result", OperationID: request.ID, OperationHash: request.StableHash(), RequestID: request.RequestID, WorkspaceID: workspace, Actor: request.Actor, Status: contracts.OperationStatusSucceeded, OutputSchemaVersion: definition.OutputSchemaVersion, OutputSchemaHash: definition.OutputSchemaHash, OutputHash: contracts.HashStrings("domain-link-result"), ExternalEffects: []contracts.ExternalEffect{effect}}
-		return InvocationResult{Result: result}, nil
+		return InvocationResult{Result: result, ProviderRequestID: "fixture-provider-request"}, nil
 	})
 	input.DomainLink = &contracts.DomainEffectLink{DomainKind: contracts.DomainEffectKindHTTPRequest, DomainID: "fixture-request-1", DomainHash: contracts.HashStrings("fixture-domain-request"), LinkRole: contracts.DomainEffectLinkRolePrimary, IdempotencyKey: "fixture-domain-link"}
 	first, err := dispatcher.Dispatch(context.Background(), input)
@@ -585,7 +593,7 @@ func TestDispatcherBindsDomainEffectBeforeExternalInvocation(t *testing.T) {
 	if stored.LinkHash != first.DomainLink.LinkHash || stored.OperationID != request.ID {
 		t.Fatalf("stored binding mismatch: %+v", stored)
 	}
-	if stored.Status != contracts.DomainEffectLinkStatusReconciled || stored.ResultHash == "" {
+	if stored.Status != contracts.DomainEffectLinkStatusReconciled || stored.ResultHash == "" || stored.ProviderRequestID != "fixture-provider-request" {
 		t.Fatalf("successful dispatch did not reconcile domain link: %+v", stored)
 	}
 	second, err := dispatcher.Dispatch(context.Background(), input)
@@ -652,6 +660,15 @@ func prepareDispatcherOperation(operations *store.OperationStore, workspace stri
 		}
 	}
 	return lease.Lease, nil
+}
+
+func fatalDispatchWithFixtureCause(t *testing.T, err error) {
+	t.Helper()
+	var dispatchErr *ExternalDispatchError
+	if errors.As(err, &dispatchErr) && dispatchErr.Err != nil {
+		t.Fatalf("dispatch failed: %v (fixture cause: %v)", err, dispatchErr.Err)
+	}
+	t.Fatal(err)
 }
 
 func newDispatcherFixture(t *testing.T) (*Dispatcher, *store.OperationStore, string, contracts.OperationRequest, contracts.CapabilityDefinition, contracts.AdmissionInput, *pgxpool.Pool) {
