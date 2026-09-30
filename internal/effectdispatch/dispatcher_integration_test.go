@@ -397,8 +397,9 @@ func TestDispatcherStaleAgentRunFenceFailsBeforeInvoker(t *testing.T) {
 	}
 
 	agentRuns := store.NewAgentRunStore(pool, store.NewEventStore(pool))
+	agentRunID := "agent-run-stale-dispatch-" + contracts.HashStrings(workspace)[:16]
 	agentRun, _, err := agentRuns.Reserve(context.Background(), contracts.AgentRunRequest{
-		RunID: "agent-run-stale-dispatch", RequestID: "agent-run-stale-request", IdempotencyKey: "agent-run-stale-key",
+		RunID: agentRunID, RequestID: agentRunID + "-request", IdempotencyKey: agentRunID + "-key",
 		WorkspaceID: workspace, Actor: contracts.ActorRef{ID: "operator", Kind: "human", WorkspaceID: workspace},
 		Goal: "exercise dispatch fencing", Provider: contracts.ProviderRef{Provider: "fake", Model: "fake-model"},
 		Budget: contracts.AgentBudget{MaxTurns: 2, MaxModelSteps: 2, MaxToolCalls: 2, MaxContextBytes: 4096, MaxOutputTokens: 64, MaxWallTimeMS: 60_000, MaxCostUSD: 1, MaxToolAttempts: 2},
