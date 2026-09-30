@@ -298,6 +298,8 @@ func NormalizePermissions(values []Permission) ([]Permission, error) {
 // retry of the same authorization input compares equal.
 func (d AuthorizationDecision) Hash() string {
 	value := fmt.Sprintf("%d|%s|%s|%s|%s|%s|%s|%s|%s|%t|%s|%s|%s", d.SchemaVersion, d.RequestID, d.WorkspaceID, d.Actor.ID, d.Actor.Kind, d.Actor.APIKeyID, d.Permission, d.Resource, d.Reason, d.Allowed, strings.ToUpper(strings.TrimSpace(d.Method)), strings.TrimSpace(d.Path), d.Actor.WorkspaceID)
+	// This is an integrity/idempotency digest over authorization metadata, not
+	// a password verifier; no credential secret is included in value.
 	digest := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(digest[:])
 }

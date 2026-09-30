@@ -588,6 +588,8 @@ func normalizeEvidenceInput(input EvidencePutInput) (EvidencePutInput, string, e
 		return EvidencePutInput{}, "", fmt.Errorf("%w: identity field is too large", ErrInvalidEvidence)
 	}
 	input.RawPayload = append([]byte(nil), input.RawPayload...)
+	// The digest authenticates immutable evidence bytes for replay and
+	// integrity checks; it is not a password/token verifier.
 	digest := sha256.Sum256(input.RawPayload)
 	return input, hex.EncodeToString(digest[:]), nil
 }

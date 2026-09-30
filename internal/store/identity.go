@@ -167,6 +167,9 @@ func (s *AuthStore) CreateAPIKey(ctx context.Context, input contracts.APIKeyInpu
 	secret := hex.EncodeToString(secretBytes)
 	token := "fornix_" + keyID + "_" + secret
 	prefix := "fornix_" + keyID + "_"
+	// API-key secrets contain 256 bits from crypto/rand, so a fast digest is
+	// appropriate for lookup; unlike a human password, this input is not
+	// feasible to brute-force and the plaintext is never persisted.
 	digest := sha256.Sum256([]byte(secret))
 	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
@@ -232,6 +235,8 @@ func (s *AuthStore) RotateAPIKey(ctx context.Context, workspaceID, keyID string,
 	secret := hex.EncodeToString(secretBytes)
 	token := "fornix_" + newID + "_" + secret
 	prefix := "fornix_" + newID + "_"
+	// Rotation generates another 256-bit random API-key secret, stored only as
+	// a digest for the same reason as CreateAPIKey above.
 	digest := sha256.Sum256([]byte(secret))
 	key := contracts.APIKey{SchemaVersion: contracts.IdentitySchemaVersion, ID: newID, WorkspaceID: workspaceID, IdentityID: identityID, Prefix: prefix, Status: contracts.APIKeyActive, ExpiresAt: expiresAt, RotatedFrom: keyID, Token: token, TokenHash: hex.EncodeToString(digest[:])}
 	if err := tx.QueryRow(ctx, `
