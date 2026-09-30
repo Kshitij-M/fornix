@@ -14,25 +14,28 @@ const (
 )
 
 // EffectVerificationRequest binds an adapter-owned proof attempt to the
-// immutable generic operation/effect/link identities. EffectVersion and
-// LinkVersion are optimistic fences read immediately before verification;
-// Postgres proves them again before committing a transition.
+// immutable generic operation/effect/link identities. OperationHash identifies
+// the complete persisted operation (including its plan), while
+// OperationRequestHash binds the request payload supplied to the verifier.
+// EffectVersion and LinkVersion are optimistic fences read immediately before
+// verification; Postgres proves them again before committing a transition.
 type EffectVerificationRequest struct {
-	SchemaVersion  int              `json:"schema_version"`
-	WorkspaceID    string           `json:"workspace_id"`
-	OperationID    string           `json:"operation_id"`
-	RunID          string           `json:"run_id"`
-	StepID         string           `json:"step_id"`
-	EffectID       string           `json:"effect_id"`
-	OperationHash  string           `json:"operation_hash"`
-	Operation      OperationRequest `json:"operation"`
-	Effect         ExternalEffect   `json:"effect"`
-	Link           DomainEffectLink `json:"link"`
-	EffectState    string           `json:"effect_state"`
-	EffectVersion  int64            `json:"effect_version"`
-	LinkVersion    int64            `json:"link_version"`
-	Actor          ActorRef         `json:"actor"`
-	IdempotencyKey string           `json:"idempotency_key"`
+	SchemaVersion        int              `json:"schema_version"`
+	WorkspaceID          string           `json:"workspace_id"`
+	OperationID          string           `json:"operation_id"`
+	RunID                string           `json:"run_id"`
+	StepID               string           `json:"step_id"`
+	EffectID             string           `json:"effect_id"`
+	OperationHash        string           `json:"operation_hash"`
+	OperationRequestHash string           `json:"operation_request_hash"`
+	Operation            OperationRequest `json:"operation"`
+	Effect               ExternalEffect   `json:"effect"`
+	Link                 DomainEffectLink `json:"link"`
+	EffectState          string           `json:"effect_state"`
+	EffectVersion        int64            `json:"effect_version"`
+	LinkVersion          int64            `json:"link_version"`
+	Actor                ActorRef         `json:"actor"`
+	IdempotencyKey       string           `json:"idempotency_key"`
 }
 
 // Normalize rejects ambiguous or cross-workspace proof requests before an
@@ -68,10 +71,13 @@ func (r *EffectVerificationRequest) Normalize() error {
 	if r.OperationHash, err = normalizeDomainHash(r.OperationHash, "effect verification operation_hash", true); err != nil {
 		return err
 	}
+	if r.OperationRequestHash, err = normalizeDomainHash(r.OperationRequestHash, "effect verification operation_request_hash", true); err != nil {
+		return err
+	}
 	if err := r.Operation.Normalize(); err != nil {
 		return fmt.Errorf("effect verification operation: %w", err)
 	}
-	if r.Operation.WorkspaceID != workspace || r.Operation.ID != r.OperationID || r.Operation.StableHash() != r.OperationHash {
+	if r.Operation.WorkspaceID != workspace || r.Operation.ID != r.OperationID || r.Operation.StableHash() != r.OperationRequestHash {
 		return fmt.Errorf("effect verification operation identity is not bound")
 	}
 	if r.EffectVersion < 1 || r.LinkVersion < 1 {

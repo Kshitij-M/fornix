@@ -11,7 +11,7 @@ func verificationTestRequest(t *testing.T, workspace string) EffectVerificationR
 	if err := operation.Normalize(); err != nil {
 		t.Fatal(err)
 	}
-	operationHash := operation.StableHash()
+	operationHash := domainTestHash("persisted-operation-including-plan")
 	effect := ExternalEffect{
 		ID: "effect-1", WorkspaceID: workspace, Boundary: "fixture.boundary",
 		Class: EffectClassExternalCommunication, DeliveryGuarantee: ExternalDeliveryAtLeastOnce,
@@ -38,7 +38,7 @@ func verificationTestRequest(t *testing.T, workspace string) EffectVerificationR
 	}
 	return EffectVerificationRequest{
 		WorkspaceID: workspace, OperationID: operation.ID, RunID: "run-1", StepID: "step-1",
-		EffectID: effect.ID, OperationHash: operationHash, Operation: operation, Effect: effect,
+		EffectID: effect.ID, OperationHash: operationHash, OperationRequestHash: operation.StableHash(), Operation: operation, Effect: effect,
 		Link: link, EffectState: ExternalEffectAcknowledged, EffectVersion: 1, LinkVersion: 1,
 		Actor: operation.Actor, IdempotencyKey: "verify-key",
 	}
@@ -58,6 +58,11 @@ func TestEffectVerificationRequestBindsAllAuthorities(t *testing.T) {
 	request.OperationHash = strings.Repeat("a", 64)
 	if err := request.Normalize(); err == nil {
 		t.Fatal("operation hash mismatch was accepted")
+	}
+	request = verificationTestRequest(t, "workspace-a")
+	request.OperationRequestHash = strings.Repeat("a", 64)
+	if err := request.Normalize(); err == nil {
+		t.Fatal("operation request hash mismatch was accepted")
 	}
 }
 

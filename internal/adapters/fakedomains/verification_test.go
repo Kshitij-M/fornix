@@ -48,7 +48,7 @@ func verificationRequestForFake(t *testing.T, providerID string) contracts.Effec
 	if err := effect.Normalize(); err != nil {
 		t.Fatal(err)
 	}
-	operationHash := operation.StableHash()
+	operationHash := contracts.HashStrings("persisted-operation-including-plan", operation.StableHash())
 	link := contracts.DomainEffectLink{
 		WorkspaceID: operation.WorkspaceID, OperationID: operation.ID, OperationHash: operationHash,
 		StepID: "step-1", AttemptID: "attempt-1", EffectID: effect.ID, EffectReservationHash: effect.StableHash(),
@@ -63,7 +63,7 @@ func verificationRequestForFake(t *testing.T, providerID string) contracts.Effec
 	}
 	request := contracts.EffectVerificationRequest{
 		WorkspaceID: operation.WorkspaceID, OperationID: operation.ID, RunID: "run-1", StepID: "step-1", EffectID: effect.ID,
-		OperationHash: operationHash, Operation: operation, Effect: effect, Link: link,
+		OperationHash: operationHash, OperationRequestHash: operation.StableHash(), Operation: operation, Effect: effect, Link: link,
 		EffectState: contracts.ExternalEffectAcknowledged, EffectVersion: 1, LinkVersion: 1, Actor: operation.Actor, IdempotencyKey: "verify-key",
 	}
 	if err := request.Normalize(); err != nil {

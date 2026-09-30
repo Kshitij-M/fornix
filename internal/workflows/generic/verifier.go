@@ -196,7 +196,7 @@ func (s *Service) VerifyEffect(ctx context.Context, workspaceID, runID string, a
 	}
 	proofRequest := contracts.EffectVerificationRequest{
 		WorkspaceID: workspaceID, OperationID: run.Operation.ID, RunID: run.ID, StepID: step.StepID,
-		EffectID: step.Effect.ID, OperationHash: currentLink.Link.OperationHash, Operation: operation.Request,
+		EffectID: step.Effect.ID, OperationHash: currentLink.Link.OperationHash, OperationRequestHash: operation.RequestHash, Operation: operation.Request,
 		Effect: effect, Link: currentLink.Link, EffectState: state.State, EffectVersion: state.Version,
 		LinkVersion: currentLink.Transition.Version, Actor: actor, IdempotencyKey: request.IdempotencyKey,
 	}
