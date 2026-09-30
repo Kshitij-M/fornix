@@ -56,6 +56,13 @@ type BoundaryProvider interface {
 	BoundaryAuthority() contracts.ExternalBoundaryAuthority
 }
 
+// LocalOnlyProvider explicitly declares that calls never cross a network or
+// other external boundary. The gateway still records every call, but does not
+// send it through external-effect admission/dispatch.
+type LocalOnlyProvider interface {
+	LocalOnly() bool
+}
+
 // EmbeddingProvider is an explicit capability boundary. Providers that only
 // implement chat cannot accidentally receive an embedding request merely
 // because they are present in the general model registry.

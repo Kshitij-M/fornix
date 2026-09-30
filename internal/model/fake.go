@@ -49,6 +49,7 @@ func NewFakeProvider(cfg FakeConfig) *FakeProvider {
 func (p *FakeProvider) Name() string                      { return "fake" }
 func (p *FakeProvider) Aliases() []string                 { return []string{"test", "mock"} }
 func (p *FakeProvider) Endpoint() contracts.ModelEndpoint { return p.endpoint }
+func (p *FakeProvider) LocalOnly() bool                   { return true }
 
 // Complete returns the configured or request-hash-derived fake response.
 func (p *FakeProvider) Complete(_ context.Context, request contracts.ModelRequest) (contracts.ModelResponse, error) {

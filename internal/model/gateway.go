@@ -244,7 +244,7 @@ func (g *Gateway) completeProvider(ctx context.Context, request contracts.ModelR
 	if !ok {
 		return contracts.ModelResponse{}, fmt.Errorf("%w: %s", ErrProviderNotFound, ref.Provider)
 	}
-	if g.Effects != nil {
+	if g.Effects != nil && !isLocalOnlyProvider(provider) {
 		return g.Effects.RunComplete(ctx, request, ref, attempt, func(callCtx context.Context) (contracts.ModelResponse, error) {
 			return provider.Complete(callCtx, request)
 		})
@@ -257,12 +257,17 @@ func (g *Gateway) streamProvider(ctx context.Context, request contracts.ModelReq
 	if !ok {
 		return contracts.ModelResponse{}, fmt.Errorf("%w: %s", ErrProviderNotFound, ref.Provider)
 	}
-	if g.Effects != nil {
+	if g.Effects != nil && !isLocalOnlyProvider(provider) {
 		return g.Effects.RunStream(ctx, request, ref, attempt, sink, func(callCtx context.Context, callSink StreamSink) (contracts.ModelResponse, error) {
 			return provider.Stream(callCtx, request, callSink)
 		})
 	}
 	return provider.Stream(ctx, request, sink)
+}
+
+func isLocalOnlyProvider(provider Provider) bool {
+	local, ok := provider.(LocalOnlyProvider)
+	return ok && local.LocalOnly()
 }
 
 func (g *Gateway) begin(ctx context.Context, request contracts.ModelRequest) (contracts.ModelRequest, CallStart, error) {
