@@ -590,6 +590,7 @@ func normalizeEvidenceInput(input EvidencePutInput) (EvidencePutInput, string, e
 	input.RawPayload = append([]byte(nil), input.RawPayload...)
 	// The digest authenticates immutable evidence bytes for replay and
 	// integrity checks; it is not a password/token verifier.
+	// codeql[go/weak-sensitive-data-hashing]
 	digest := sha256.Sum256(input.RawPayload)
 	return input, hex.EncodeToString(digest[:]), nil
 }

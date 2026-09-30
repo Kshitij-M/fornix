@@ -236,6 +236,7 @@ func (r RetentionPolicy) Normalize() (RetentionPolicy, error) {
 func ArtifactContentHash(raw []byte) string {
 	// Content addressing and integrity verification require a fast collision-
 	// resistant digest; this is not used for password or token verification.
+	// codeql[go/weak-sensitive-data-hashing]
 	digest := sha256.Sum256(raw)
 	return hex.EncodeToString(digest[:])
 }

@@ -294,6 +294,10 @@ func (s *AuthStore) Authenticate(ctx context.Context, token string) (contracts.P
 		return contracts.Principal{}, fmt.Errorf("begin authentication: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	// API keys are generated from 256 bits of cryptographic randomness; this
+	// SHA-256 digest is a lookup verifier for that high-entropy token, not a
+	// human-password hash.
+	// codeql[go/weak-sensitive-data-hashing]
 	digest := sha256.Sum256([]byte(secret))
 	var (
 		workspaceID, identityID, identitySubject, identityKind, displayName string
