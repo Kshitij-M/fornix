@@ -285,9 +285,21 @@ func evaluateAdmissionTx(ctx context.Context, tx pgx.Tx, workspaceID, deployment
 			return contracts.DeploymentAdmissionDecision{}, verificationErr
 		}
 	} else {
-		decision.Verification = &verification
 		if decision.ArtifactHash == "" {
 			decision.ArtifactHash = verification.ArtifactHash
+		}
+		artifactMatches := artifactHash == "" || verification.ArtifactHash == artifactHash
+		currentBindingsMatch := verification.GateHash == gate.GateHash &&
+			verification.ExternalBoundaryHash == gate.ExternalBoundaryHash &&
+			verification.BoundaryEvidenceHash == gate.BoundaryEvidenceHash &&
+			sameOptionalTime(verification.BoundaryEvidenceExpiresAt, gate.BoundaryEvidenceExpiresAt) &&
+			verification.TrustSnapshotRevision == release.TrustSnapshotRevision &&
+			verification.TrustSnapshotHash == release.TrustSnapshotHash
+		// Only disclose a verification alongside the exact artifact and gate it
+		// binds. A mismatch remains a deterministic blocked decision below; it
+		// must not make normalization fail by pairing unrelated authority facts.
+		if artifactMatches && currentBindingsMatch {
+			decision.Verification = &verification
 		}
 		if verification.Status != contracts.DeploymentVerificationVerified {
 			decision.BlockedReasons = append(decision.BlockedReasons, "release_verification_"+verification.Status)

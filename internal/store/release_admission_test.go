@@ -136,7 +136,7 @@ func TestDeploymentReleaseVerificationBindsGateAndAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	wrong, err := deployment.EvaluateAdmission(context.Background(), f.workspace, "deployment-a", release.ID, contracts.DeploymentArtifactImage, contracts.HashStrings("wrong"), now)
-	if err != nil || wrong.Ready || !containsString(wrong.BlockedReasons, "artifact_hash_mismatch") {
+	if err != nil || wrong.Ready || wrong.Verification != nil || !containsString(wrong.BlockedReasons, "artifact_hash_mismatch") {
 		t.Fatalf("wrong artifact admission=%+v err=%v", wrong, err)
 	}
 	if err := deployment.RevokeVerification(context.Background(), f.workspace, "deployment-a", release.ID, contracts.DeploymentArtifactImage, f.actor, now); err != nil {
