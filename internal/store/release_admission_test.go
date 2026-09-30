@@ -34,7 +34,21 @@ func TestDeploymentReleaseVerificationBindsGateAndAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	gate, err := deployment.EvaluateGate(context.Background(), f.workspace, "deployment-a", release.ID, []string{contracts.DeploymentEvidenceProvider}, now)
+	for _, kind := range contracts.DeploymentDefaultRequiredEvidenceKinds {
+		signedRequired, rawRequired := f.signed(t, f.keyID, f.private, "qualification-"+kind+"-verify")
+		importRequired, importErr := f.store.ImportAuthorized(context.Background(), f.importRequest(signedRequired, rawRequired, "import-"+kind+"-verify", false), from.Add(time.Hour))
+		if importErr != nil {
+			t.Fatalf("import %s qualification: %v", kind, importErr)
+		}
+		if _, _, linkErr := deployment.LinkEvidence(context.Background(), contracts.DeploymentEvidenceLinkRequest{
+			WorkspaceID: f.workspace, DeploymentID: "deployment-a", ReleaseID: release.ID,
+			Kind: kind, ImportID: importRequired.Record.ID,
+			IdempotencyKey: "evidence-" + kind + "-verify", Actor: f.actor,
+		}, now); linkErr != nil {
+			t.Fatalf("link %s qualification: %v", kind, linkErr)
+		}
+	}
+	gate, err := deployment.EvaluateGate(context.Background(), f.workspace, "deployment-a", release.ID, nil, now)
 	if err != nil || !gate.Ready {
 		t.Fatalf("gate=%+v err=%v", gate, err)
 	}
