@@ -19,6 +19,15 @@ type Service struct {
 	Store     *store.RepositoryChangeStore
 	Artifacts *store.ArtifactStore
 	Receipts  *store.WorkReceiptStore
+	Effects   EffectRunner
+}
+
+// EffectRunner is the generic durable boundary for filesystem application.
+// The callback is invoked only after a child operation and external-effect
+// reservation are committed. The change ledger remains authoritative for
+// packet approval, application state, and tree verification.
+type EffectRunner interface {
+	RunChange(ctx context.Context, request contracts.ChangeApplicationRequest, proposal contracts.ChangeProposal, application contracts.ChangeApplication, root string, packet contracts.ChangePacket, resolve ContentResolver, invoke func(context.Context) (AppliedChange, error)) (AppliedChange, error)
 }
 
 // SetReceiptStore enables derived Verified Change Packet output after an
@@ -111,7 +120,7 @@ func (s *Service) Apply(ctx context.Context, request contracts.ChangeApplication
 	}
 	packet := proposalPacket(proposal)
 	resolver := s.contentResolver()
-	result, applyErr := (Executor{}).Apply(ctx, root, packet, resolver, request.DryRun)
+	result, applyErr := s.runEffect(ctx, request, proposal, application, root, packet, resolver)
 	if applyErr != nil {
 		status := contracts.ChangeFailed
 		failure := &contracts.ChangeFailure{Code: contracts.ChangeFailureFilesystem, Message: boundedFailure(applyErr)}
@@ -142,6 +151,15 @@ func (s *Service) Apply(ctx context.Context, request contracts.ChangeApplication
 		return contracts.ChangeApplication{}, contracts.ChangeProposal{}, finalizeErr
 	}
 	return s.attachReceipt(ctx, finalized, finalProposal)
+}
+
+func (s *Service) runEffect(ctx context.Context, request contracts.ChangeApplicationRequest, proposal contracts.ChangeProposal, application contracts.ChangeApplication, root string, packet contracts.ChangePacket, resolver ContentResolver) (AppliedChange, error) {
+	if s.Effects != nil {
+		return s.Effects.RunChange(ctx, request, proposal, application, root, packet, resolver, func(runCtx context.Context) (AppliedChange, error) {
+			return (Executor{}).Apply(runCtx, root, packet, resolver, request.DryRun)
+		})
+	}
+	return (Executor{}).Apply(ctx, root, packet, resolver, request.DryRun)
 }
 
 func (s *Service) attachReceipt(ctx context.Context, application contracts.ChangeApplication, proposal contracts.ChangeProposal) (contracts.ChangeApplication, contracts.ChangeProposal, error) {

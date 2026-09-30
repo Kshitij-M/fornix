@@ -18,18 +18,25 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	pgvector "github.com/pgvector/pgvector-go"
 
+	"github.com/omaveda/fornix/internal/adapters/fakedomains"
 	"github.com/omaveda/fornix/internal/agentloop"
 	"github.com/omaveda/fornix/internal/change"
 	"github.com/omaveda/fornix/internal/config"
+	connectorruntime "github.com/omaveda/fornix/internal/connector"
 	"github.com/omaveda/fornix/internal/contracts"
+	"github.com/omaveda/fornix/internal/credentials"
+	"github.com/omaveda/fornix/internal/effectdispatch"
+	federationruntime "github.com/omaveda/fornix/internal/federation"
 	"github.com/omaveda/fornix/internal/ingest"
 	"github.com/omaveda/fornix/internal/model"
+	"github.com/omaveda/fornix/internal/operationworker"
 	policyruntime "github.com/omaveda/fornix/internal/policy"
 	"github.com/omaveda/fornix/internal/retrieval"
 	"github.com/omaveda/fornix/internal/scheduler"
@@ -37,52 +44,141 @@ import (
 	"github.com/omaveda/fornix/internal/tool"
 	validationruntime "github.com/omaveda/fornix/internal/validation"
 	"github.com/omaveda/fornix/internal/version"
+	genericworkflow "github.com/omaveda/fornix/internal/workflows/generic"
+	incidentworkflow "github.com/omaveda/fornix/internal/workflows/incident"
 )
 
 const embeddingDim = 768
 const embeddingModel = "nomic-embed-text"
 
 type server struct {
-	pool              *pgxpool.Pool
-	events            *store.EventStore
-	evidence          *store.EvidenceStore
-	artifacts         *store.ArtifactStore
-	ingests           *store.IngestStore
-	tasks             *store.TaskStore
-	retrieval         *retrieval.Store
-	retrievalSurfaces *store.RetrievalSurfaceStore
-	modelRegistry     *model.Registry
-	modelGateway      *model.Gateway
-	modelCalls        *store.ModelCallStore
-	operator          *store.OperatorStore
-	observability     *store.ObservabilityStore
-	evaluations       *store.EvaluationStore
-	workReceipts      *store.WorkReceiptStore
-	validations       *store.ValidationStore
-	policies          *store.PolicyStore
-	validation        *validationruntime.Service
-	changes           *change.Service
-	toolRegistry      *tool.Registry
-	toolExecutor      *tool.Executor
-	toolRuns          *store.ToolRunStore
-	agentRuns         *store.AgentRunStore
-	auth              *store.AuthStore
-	agentLoop         *agentloop.Orchestrator
-	agentWorker       *scheduler.Worker
-	apiKey            string
-	bootstrapKey      string
-	authMode          string
-	workerEnabled     bool
-	ollamaURL         string
-	httpClient        *http.Client
-	maxBodyBytes      int64
-	shutdownTimeout   time.Duration
+	pool                           *pgxpool.Pool
+	events                         *store.EventStore
+	operations                     *store.OperationStore
+	admission                      *store.AdmissionStore
+	workflows                      *store.WorkflowStore
+	evidence                       *store.EvidenceStore
+	artifacts                      *store.ArtifactStore
+	ingests                        *store.IngestStore
+	tasks                          *store.TaskStore
+	retrieval                      *retrieval.Store
+	retrievalSurfaces              *store.RetrievalSurfaceStore
+	modelRegistry                  *model.Registry
+	modelGateway                   *model.Gateway
+	modelCalls                     *store.ModelCallStore
+	embeddingGateway               *model.EmbeddingGateway
+	embeddingCalls                 *store.EmbeddingCallStore
+	domainLinks                    *store.DomainEffectLinkStore
+	embeddingRecovery              *store.EmbeddingRecoveryCoordinator
+	toolRecovery                   *store.ToolSandboxRecoveryCoordinator
+	sandboxCleanupWorker           *operationworker.SandboxCleanupWorker
+	operator                       *store.OperatorStore
+	observability                  *store.ObservabilityStore
+	evaluations                    *store.EvaluationStore
+	workReceipts                   *store.WorkReceiptStore
+	validations                    *store.ValidationStore
+	policies                       *store.PolicyStore
+	validation                     *validationruntime.Service
+	changes                        *change.Service
+	toolRegistry                   *tool.Registry
+	connectorRegistry              *connectorruntime.Registry
+	connectorExecutor              *connectorruntime.Executor
+	effectDispatcher               *effectdispatch.Dispatcher
+	trustCatalog                   *store.TrustCatalogStore
+	qualificationTrust             *store.QualificationTrustStore
+	deploymentEvidence             *store.DeploymentEvidenceStore
+	readiness                      *store.ReadinessStore
+	authorityMu                    sync.RWMutex
+	authorityReady                 bool
+	authorityError                 string
+	authorityLoadedAt              time.Time
+	authorityWorkspaces            int
+	authorityGenerations           map[string]authorityGeneration
+	requireSignedAuthority         bool
+	qualificationTrustRequired     bool
+	qualificationDeploymentID      string
+	qualificationAuthorityReady    bool
+	qualificationAuthorityError    string
+	qualificationAuthorityLoaded   time.Time
+	qualificationAuthorityCount    int
+	qualificationGenerations       map[string]qualificationGeneration
+	qualificationReleaseRequired   bool
+	qualificationReleaseID         string
+	qualificationReleaseKind       string
+	qualificationReleaseReady      bool
+	qualificationReleaseError      string
+	qualificationReleaseLoaded     time.Time
+	qualificationReleaseCount      int
+	qualificationReleaseReferences map[string]contracts.DeploymentAdmissionReference
+	effectConformanceHash          string
+	connectorBindings              *store.ConnectorBindingStore
+	incidentWorkflows              *incidentworkflow.Service
+	genericWorkflows               *genericworkflow.Service
+	toolExecutor                   *tool.Executor
+	toolRuns                       *store.ToolRunStore
+	agentRuns                      *store.AgentRunStore
+	coordination                   *store.WorkspaceCoordinationStore
+	federation                     *store.FederationStore
+	federationPoll                 *federationruntime.Poller
+	retentionOwner                 *federationruntime.RetentionOwner
+	retentionInterval              time.Duration
+	retentionBatchSize             int
+	retentionWorkspaceLimit        int
+	auth                           *store.AuthStore
+	agentLoop                      *agentloop.Orchestrator
+	agentWorker                    *scheduler.Worker
+	apiKey                         string
+	bootstrapKey                   string
+	authMode                       string
+	workerEnabled                  bool
+	operationWorkerMaxConcurrent   int
+	operationWorkerClaimBatch      int
+	operationWorkerMaxActive       int
+	operationWorkerPollInterval    time.Duration
+	legacyGlobalSurfaces           bool
+	ollamaURL                      string
+	httpClient                     *http.Client
+	maxBodyBytes                   int64
+	shutdownTimeout                time.Duration
+}
+
+// ServerDependencies contains deployment-owned authority adapters. The
+// default constructor intentionally leaves remote federation polling disabled
+// unless an explicit dependency is supplied. A hosted deployment can use a
+// managed SecretManager (wrapped by Fornix's Postgres lease authority) or
+// inject a LeaseResolver backed by workload identity or mTLS. The resolver
+// itself must validate the exact lease before egress. No field contains
+// secret bytes.
+type ServerDependencies struct {
+	// OpenAISecretManager is wrapped in the existing workspace-scoped Postgres
+	// credential lease authority. OpenAILeaseResolver can be injected directly
+	// when a deployment owns lease issuance/validation through workload identity
+	// or mTLS. Production OpenAI never consumes environment API keys.
+	OpenAISecretManager     credentials.SecretManager
+	OpenAILeaseResolver     credentials.LeaseResolver
+	FederationSecretManager credentials.SecretManager
+	FederationLeaseResolver credentials.LeaseResolver
+	FederationHTTPClient    *http.Client
+	FederationResolver      connectorruntime.IPResolver
+	// SandboxCleanupRunner is the authenticated host-runner client used to
+	// remove only exact, durably authorized non-local sandbox attempts. A nil
+	// runner keeps OCI cleanup unavailable; the server never falls back to a
+	// local process or direct Docker socket.
+	SandboxCleanupRunner operationworker.SandboxCleanupRunner
 }
 
 // New validates configuration, applies durable migrations, and composes the
 // authenticated control-plane services. It does not start listening; callers
 // use Run for the server lifecycle.
 func New(ctx context.Context, cfg config.Config) (*server, error) {
+	return NewWithDependencies(ctx, cfg, ServerDependencies{})
+}
+
+// NewWithDependencies composes the server with explicit deployment
+// authorities. It is separate from New so callers can qualify or inject a
+// real secret manager without making the ordinary local constructor read
+// ambient credentials.
+func NewWithDependencies(ctx context.Context, cfg config.Config, deps ServerDependencies) (*server, error) {
 	poolCfg, err := pgxpool.ParseConfig(cfg.DSN)
 	if err != nil {
 		return nil, fmt.Errorf("parse postgres DSN: %w", err)
@@ -102,7 +198,11 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 		return nil, fmt.Errorf("apply migrations: %w", err)
 	}
 	events := store.NewEventStore(pool)
+	operations := store.NewOperationStore(pool, events)
+	admission := store.NewAdmissionStore(pool, events)
+	workflows := store.NewWorkflowStore(pool, events, operations)
 	modelCalls := store.NewModelCallStore(pool)
+	embeddingCalls := store.NewEmbeddingCallStore(pool)
 	observability := store.NewObservabilityStore(pool)
 	evaluations := store.NewEvaluationStore(pool)
 	workReceipts := store.NewWorkReceiptStore(pool)
@@ -114,6 +214,47 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 	retrievalSurfaces := store.NewRetrievalSurfaceStore(pool)
 	authStore := store.NewAuthStore(pool)
 	operatorStore := store.NewOperatorStore(pool, events)
+	coordinationStore := store.NewWorkspaceCoordinationStore(pool, events)
+	federationStore := store.NewFederationStore(pool, events, coordinationStore)
+	federationStore.SetExternalBoundaryAuthorityRequired(cfg.RequireExternalBoundaryAuthority)
+	var retentionOwner *federationruntime.RetentionOwner
+	if cfg.FederationRetentionEnabled {
+		retentionOwner = &federationruntime.RetentionOwner{
+			Workspaces: operatorStore,
+			Leases:     events,
+			Sweeper:    federationStore,
+			OwnerID:    contracts.NewID("retention-owner"),
+			LeaseTTL:   contracts.DefaultConsumerLeaseTTL,
+		}
+	}
+	federationCredentials := deps.FederationLeaseResolver
+	if cfg.FederationPollEnabled && federationCredentials == nil && deps.FederationSecretManager != nil {
+		managedResolver := credentials.NewManagedSecretResolver(deps.FederationSecretManager)
+		leaseAuthority := store.NewCredentialLeaseStore(pool, managedResolver)
+		federationCredentials = leaseAuthority
+	}
+	if cfg.FederationPollEnabled && federationCredentials == nil {
+		pool.Close()
+		return nil, fmt.Errorf("federation polling is enabled but no credential lease authority was injected")
+	}
+	var federationPoll *federationruntime.Poller
+	if cfg.FederationPollEnabled && federationCredentials != nil {
+		federationClient := deps.FederationHTTPClient
+		if federationClient == nil {
+			federationClient = &http.Client{Timeout: 30 * time.Second}
+		}
+		federationPoll = &federationruntime.Poller{
+			Peers: federationStore, Credentials: federationCredentials,
+			Client:   federationClient,
+			Resolver: deps.FederationResolver,
+		}
+	}
+	trustCatalog := store.NewTrustCatalogStore(pool)
+	qualificationTrust := store.NewQualificationTrustStore(pool)
+	deploymentEvidence := store.NewDeploymentEvidenceStore(pool)
+	readiness := store.NewReadinessStore(pool, deploymentEvidence)
+	operations.SetDeploymentAdmissionAuthority(deploymentEvidence, cfg.RequireReleaseAdmissionForEffects)
+	operations.SetExternalBoundaryAuthorityRequired(cfg.RequireExternalBoundaryAuthority)
 	policyStore := store.NewPolicyStore(pool, events, nil)
 	modelRegistry := model.NewRegistry()
 	ollamaProvider, err := model.NewOllamaProvider(model.OllamaConfig{
@@ -137,14 +278,28 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 		return nil, fmt.Errorf("register fake model provider: %w", err)
 	}
 	if cfg.OpenAIEnabled {
+		openAILeaseResolver, authorityErr := resolveOpenAILeaseResolver(pool, deps, cfg.Environment == "production")
+		if authorityErr != nil {
+			pool.Close()
+			return nil, authorityErr
+		}
+		if openAILeaseResolver != nil {
+			if _, refErr := credentials.ParseRef(cfg.OpenAICredentialRef); refErr != nil {
+				pool.Close()
+				return nil, fmt.Errorf("managed OpenAI credential reference is invalid")
+			}
+		}
 		openAIProvider, providerErr := model.NewOpenAIProvider(model.OpenAIConfig{
 			Endpoint: contracts.ModelEndpoint{
 				ID: "openai", Provider: "openai", BaseURL: cfg.OpenAIBaseURL,
 				DefaultModel: cfg.OpenAIModel, CredentialRef: cfg.OpenAICredentialRef,
 				Enabled: true, AllowPrivate: cfg.OpenAIAllowPrivate,
 			},
-			RequireAPIKey: true, Timeout: cfg.OpenAITimeout,
-			ResolveCredential: func(ref string) (string, error) { return os.Getenv(ref), nil },
+			RequireAPIKey:               true,
+			Timeout:                     cfg.OpenAITimeout,
+			CredentialLease:             openAILeaseResolver,
+			AllowEnvironmentCredentials: cfg.Environment != "production" && openAILeaseResolver == nil,
+			ResolveCredential:           func(ref string) (string, error) { return os.Getenv(ref), nil },
 		})
 		if providerErr != nil {
 			pool.Close()
@@ -175,6 +330,40 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 		pool.Close()
 		return nil, fmt.Errorf("register repository tool: %w", err)
 	}
+	connectorRegistry := connectorruntime.NewRegistry()
+	if err := registerRepositoryConnector(connectorRegistry, contracts.DefaultWorkspaceID); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("register repository connector: %w", err)
+	}
+	if err := registerIncidentConnector(connectorRegistry, contracts.DefaultWorkspaceID); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("register incident connector: %w", err)
+	}
+	fakeDomains, err := fakedomains.NewConnector(contracts.DefaultWorkspaceID)
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("configure fake domain connector: %w", err)
+	}
+	if err := connectorRegistry.Register(fakeDomains); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("register fake domain connector: %w", err)
+	}
+	if err := connectorRegistry.TrustWorkspace(contracts.DefaultWorkspaceID, "builtin-v1"); err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("trust built-in connectors: %w", err)
+	}
+	connectorRegistry.RequireTrustPolicy(true)
+	connectorRegistry.RequireEffectAuthority(true)
+	dynamicConformance, err := effectdispatch.BuiltinConformanceRegistry()
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("configure dynamic effect conformance: %w", err)
+	}
+	dynamicConformanceHash, err := dynamicConformance.Validate()
+	if err != nil {
+		pool.Close()
+		return nil, fmt.Errorf("validate dynamic effect conformance: %w", err)
+	}
 	toolPolicy, err := tool.NewPolicy([]contracts.ToolPolicyRule{{
 		ID: "builtin-default-echo", Priority: 100, WorkspaceID: contracts.DefaultWorkspaceID,
 		ToolID: "fornix.echo", Capability: "process.echo", Mode: contracts.ToolModeAutomatic,
@@ -186,11 +375,20 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 	}
 	toolRuns := store.NewToolRunStore(pool, events)
 	agentRuns := store.NewAgentRunStore(pool, events)
+	domainLinks := store.NewDomainEffectLinkStore(pool)
+	toolRecovery := store.NewToolSandboxRecoveryCoordinator(pool, toolRuns, admission, domainLinks)
+	domainEffects := &domainEffectAdapters{runtime: &effectdispatch.Runtime{Operations: operations, Admission: admission, Links: domainLinks}, toolRuns: toolRuns}
+	embeddingRecovery := store.NewEmbeddingRecoveryCoordinator(pool, embeddingCalls, admission, domainLinks, events)
 	modelCalls.SetObservability(observability)
 	toolRuns.SetObservability(observability)
 	agentRuns.SetObservability(observability)
 	modelGateway := model.NewGateway(modelRegistry, modelCalls)
-	toolExecutor := &tool.Executor{Registry: toolRegistry, Policy: toolPolicy, Store: toolRuns, Fence: toolRuns}
+	modelGateway.Effects = domainEffects
+	embeddingGateway := model.NewEmbeddingGateway(modelRegistry, embeddingCalls)
+	embeddingGateway.Effects = domainEffects
+	embeddingGateway.RecoveryFinalizer = &embeddingRecoveryFinalizer{coordinator: embeddingRecovery}
+	toolExecutor := &tool.Executor{Registry: toolRegistry, Policy: toolPolicy, Store: toolRuns, Fence: toolRuns, Sandboxes: tool.NewDefaultSandboxRegistry(), Effects: domainEffects}
+	changeService.Effects = domainEffects
 	retrievalStore := retrieval.NewStore(pool)
 	retrievalStore.SetSurfaceRecorder(func(captureCtx context.Context, request contracts.RetrievalRequest, result retrieval.Result, duration time.Duration) error {
 		return captureRetrievalSurface(captureCtx, retrievalSurfaces, request, result, duration)
@@ -198,6 +396,9 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 	srv := &server{
 		pool:              pool,
 		events:            events,
+		operations:        operations,
+		admission:         admission,
+		workflows:         workflows,
 		evidence:          evidenceStore,
 		artifacts:         artifactStore,
 		tasks:             store.NewTaskStore(pool, events),
@@ -206,35 +407,93 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 		modelRegistry:     modelRegistry,
 		modelGateway:      modelGateway,
 		modelCalls:        modelCalls,
-		operator:          operatorStore,
-		observability:     observability,
-		evaluations:       evaluations,
-		workReceipts:      workReceipts,
-		validations:       store.NewValidationStore(pool, events, evidenceStore, artifactStore, observability),
-		policies:          policyStore,
-		changes:           changeService,
-		toolRegistry:      toolRegistry,
-		toolRuns:          toolRuns,
-		toolExecutor:      toolExecutor,
-		agentRuns:         agentRuns,
-		auth:              authStore,
+		embeddingGateway:  embeddingGateway,
+		embeddingCalls:    embeddingCalls,
+		domainLinks:       domainLinks,
+		embeddingRecovery: embeddingRecovery,
+		toolRecovery:      toolRecovery,
+		sandboxCleanupWorker: func() *operationworker.SandboxCleanupWorker {
+			if deps.SandboxCleanupRunner == nil {
+				return nil
+			}
+			return &operationworker.SandboxCleanupWorker{
+				Store: store.NewSandboxCleanupStore(pool), Runner: deps.SandboxCleanupRunner,
+				OwnerID: contracts.NewID("sandbox-cleanup-worker"), Limit: 16,
+			}
+		}(),
+		operator:                       operatorStore,
+		observability:                  observability,
+		evaluations:                    evaluations,
+		workReceipts:                   workReceipts,
+		validations:                    store.NewValidationStore(pool, events, evidenceStore, artifactStore, observability),
+		policies:                       policyStore,
+		changes:                        changeService,
+		toolRegistry:                   toolRegistry,
+		connectorRegistry:              connectorRegistry,
+		connectorExecutor:              &connectorruntime.Executor{Registry: connectorRegistry},
+		effectDispatcher:               &effectdispatch.Dispatcher{Operations: operations, Admission: admission, Links: domainLinks},
+		trustCatalog:                   trustCatalog,
+		qualificationTrust:             qualificationTrust,
+		deploymentEvidence:             deploymentEvidence,
+		readiness:                      readiness,
+		authorityReady:                 !cfg.RequireSignedAuthority,
+		authorityGenerations:           make(map[string]authorityGeneration),
+		requireSignedAuthority:         cfg.RequireSignedAuthority,
+		qualificationTrustRequired:     cfg.RequireQualificationTrust,
+		qualificationDeploymentID:      cfg.QualificationDeploymentID,
+		qualificationAuthorityReady:    !cfg.RequireQualificationTrust,
+		qualificationGenerations:       make(map[string]qualificationGeneration),
+		qualificationReleaseRequired:   cfg.RequireQualificationRelease || cfg.RequireReleaseAdmissionForEffects,
+		qualificationReleaseID:         cfg.QualificationReleaseID,
+		qualificationReleaseKind:       cfg.QualificationReleaseArtifactKind,
+		qualificationReleaseReady:      !(cfg.RequireQualificationRelease || cfg.RequireReleaseAdmissionForEffects),
+		qualificationReleaseReferences: make(map[string]contracts.DeploymentAdmissionReference),
+		effectConformanceHash:          dynamicConformanceHash,
+		connectorBindings:              store.NewConnectorBindingStore(pool, events),
+		toolRuns:                       toolRuns,
+		toolExecutor:                   toolExecutor,
+		agentRuns:                      agentRuns,
+		coordination:                   coordinationStore,
+		federation:                     federationStore,
+		federationPoll:                 federationPoll,
+		retentionOwner:                 retentionOwner,
+		retentionInterval:              cfg.FederationRetentionInterval,
+		retentionBatchSize:             cfg.FederationRetentionBatchSize,
+		retentionWorkspaceLimit:        cfg.FederationRetentionWorkspaceLimit,
+		auth:                           authStore,
 		agentLoop: func() *agentloop.Orchestrator {
 			loop := agentloop.New(agentRuns, modelGateway, toolExecutor)
 			loop.Approvals = toolRuns
 			return loop
 		}(),
-		apiKey:          cfg.APIKey,
-		bootstrapKey:    cfg.BootstrapKey,
-		authMode:        cfg.AuthMode,
-		workerEnabled:   cfg.WorkerEnabled,
-		ollamaURL:       cfg.OllamaURL,
-		httpClient:      &http.Client{Timeout: 30 * time.Second},
-		maxBodyBytes:    cfg.MaxBodyBytes,
-		shutdownTimeout: cfg.ShutdownTimeout,
+		apiKey:                       cfg.APIKey,
+		bootstrapKey:                 cfg.BootstrapKey,
+		authMode:                     cfg.AuthMode,
+		workerEnabled:                cfg.WorkerEnabled,
+		operationWorkerMaxConcurrent: cfg.OperationWorkerMaxConcurrent,
+		operationWorkerClaimBatch:    cfg.OperationWorkerClaimBatch,
+		operationWorkerMaxActive:     cfg.OperationWorkerMaxActive,
+		operationWorkerPollInterval:  cfg.OperationWorkerPollInterval,
+		legacyGlobalSurfaces:         cfg.EnableLegacyGlobalSurfaces,
+		ollamaURL:                    cfg.OllamaURL,
+		httpClient:                   &http.Client{Timeout: 30 * time.Second},
+		maxBodyBytes:                 cfg.MaxBodyBytes,
+		shutdownTimeout:              cfg.ShutdownTimeout,
 	}
+	domainEffects.deploymentAdmission = srv.deploymentAdmissionReference
+	srv.incidentWorkflows = incidentworkflow.NewService(store.NewIncidentStore(pool, events, evidenceStore), workflows, evidenceStore, artifactStore, workReceipts, connectorRegistry, modelGateway)
+	srv.incidentWorkflows.SetEffectDispatcher(operations, admission, srv.effectDispatcher)
+	srv.incidentWorkflows.SetConnectorExecutor(srv.connectorExecutor)
+	srv.genericWorkflows = genericworkflow.NewService(workflows, workReceipts)
+	genericExecutor := genericworkflow.NewConnectorStepExecutor(connectorRegistry, srv.connectorExecutor, operations)
+	genericExecutor.SetEffectBoundary(admission, srv.effectDispatcher)
+	srv.genericWorkflows.Executor = genericExecutor
+	srv.genericWorkflows.Effects = srv.effectDispatcher
+	srv.genericWorkflows.Verifier = genericworkflow.NewConnectorEffectVerifier(connectorRegistry)
 	srv.ingests = store.NewIngestStore(pool, events, srv.artifacts)
-	srv.ingests.SetEmbedder(func(embedCtx context.Context, text string) ([]float32, error) {
-		return srv.embed(embedCtx, text)
+	srv.ingests.SetEmbeddingCallStore(embeddingCalls)
+	srv.ingests.SetEmbedder(func(embedCtx context.Context, request contracts.EmbeddingRequest) ([]float32, error) {
+		return srv.embed(embedCtx, request)
 	})
 	validatorRegistry, err := validationruntime.NewDefaultRegistry()
 	if err != nil {
@@ -270,16 +529,142 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 	// Restore workspace-specific read-only repository admission rules from the
 	// durable workspace registry. The rule is only an in-process fast path; all
 	// requests still require authenticated workspace authorization.
-	if page, listErr := operatorStore.ListWorkspaces(ctx, 100, ""); listErr == nil {
-		for _, workspace := range page.Items {
-			root := workspace.ToolRoot
-			if root == "" {
-				continue
+	cursor := ""
+	loadedAuthorities := 0
+	qualificationLoadFailed := false
+	qualificationLoadError := ""
+	qualificationLoaded := 0
+	qualificationReleaseLoaded := 0
+	for {
+		page, listErr := operatorStore.ListWorkspaces(ctx, 100, cursor)
+		if listErr != nil {
+			if cfg.RequireSignedAuthority {
+				pool.Close()
+				return nil, fmt.Errorf("list workspaces for authority loading: %w", listErr)
 			}
-			_ = toolPolicy.RegisterWorkspaceTool(workspace.ID, "fornix.repository.read", "repository.read", root)
+			if cfg.RequireQualificationTrust || cfg.RequireQualificationRelease || cfg.RequireReleaseAdmissionForEffects {
+				qualificationLoadFailed = true
+				qualificationLoadError = shortError(listErr, 320)
+			}
+			break
+		}
+		for _, workspace := range page.Items {
+			if loadedAuthorities >= maxAuthorityWorkspaces {
+				pool.Close()
+				return nil, fmt.Errorf("workspace authority inventory exceeds %d entries", maxAuthorityWorkspaces)
+			}
+			if err := registerRepositoryConnector(connectorRegistry, workspace.ID); err != nil && !errors.Is(err, connectorruntime.ErrConnectorDuplicate) {
+				pool.Close()
+				return nil, fmt.Errorf("register workspace connector %s: %w", workspace.ID, err)
+			}
+			if err := registerIncidentConnector(connectorRegistry, workspace.ID); err != nil && !errors.Is(err, connectorruntime.ErrConnectorDuplicate) {
+				pool.Close()
+				return nil, fmt.Errorf("register incident workspace connector %s: %w", workspace.ID, err)
+			}
+			if err := registerFakeDomainsConnector(connectorRegistry, workspace.ID); err != nil && !errors.Is(err, connectorruntime.ErrConnectorDuplicate) {
+				pool.Close()
+				return nil, fmt.Errorf("register fake domain workspace connector %s: %w", workspace.ID, err)
+			}
+			if !cfg.RequireSignedAuthority {
+				if err := connectorRegistry.TrustWorkspace(workspace.ID, "workspace-builtins-v1"); err != nil {
+					pool.Close()
+					return nil, fmt.Errorf("trust workspace connector %s: %w", workspace.ID, err)
+				}
+			}
+			if err := srv.reloadWorkspaceAuthority(ctx, workspace.ID); err != nil {
+				srv.setAuthorityStatus(false, shortError(err, 320), time.Time{}, loadedAuthorities)
+				pool.Close()
+				return nil, fmt.Errorf("load workspace authority %s: %w", workspace.ID, err)
+			}
+			if cfg.RequireQualificationTrust {
+				if err := srv.reloadQualificationAuthority(ctx, workspace.ID); err != nil {
+					qualificationLoadFailed = true
+					if qualificationLoadError == "" {
+						qualificationLoadError = shortError(err, 320)
+					}
+				} else {
+					qualificationLoaded++
+				}
+			}
+			if cfg.RequireQualificationRelease || cfg.RequireReleaseAdmissionForEffects {
+				if err := srv.reloadQualificationRelease(ctx, workspace.ID); err != nil {
+					qualificationLoadFailed = true
+					if qualificationLoadError == "" {
+						qualificationLoadError = shortError(err, 320)
+					}
+				} else {
+					qualificationReleaseLoaded++
+				}
+			}
+			loadedAuthorities++
+			if workspace.ToolRoot != "" {
+				_ = toolPolicy.RegisterWorkspaceTool(workspace.ID, "fornix.repository.read", "repository.read", workspace.ToolRoot)
+			}
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
+	}
+	if loadedAuthorities > 0 {
+		srv.setAuthorityStatus(true, "", time.Now().UTC(), loadedAuthorities)
+	}
+	if cfg.RequireQualificationTrust {
+		if qualificationLoadFailed {
+			srv.setQualificationAuthorityStatus(false, qualificationLoadError, time.Time{}, qualificationLoaded)
+		} else {
+			srv.setQualificationAuthorityStatus(true, "", time.Now().UTC(), qualificationLoaded)
+		}
+	}
+	if cfg.RequireQualificationRelease || cfg.RequireReleaseAdmissionForEffects {
+		if qualificationReleaseLoaded == 0 && !qualificationLoadFailed {
+			qualificationLoadFailed = true
+			qualificationLoadError = "qualification release workspace inventory is empty"
+		}
+		if qualificationLoadFailed {
+			srv.setQualificationReleaseStatus(false, qualificationLoadError, time.Time{}, qualificationReleaseLoaded)
+		} else {
+			srv.setQualificationReleaseStatus(true, "", time.Now().UTC(), qualificationReleaseLoaded)
+		}
+		if cfg.RequireReleaseAdmissionForEffects && qualificationLoadFailed {
+			pool.Close()
+			return nil, fmt.Errorf("strict release admission inventory failed: %s", qualificationLoadError)
+		}
+	}
+	if cfg.RequireSignedAuthority {
+		connectorRegistry.RequireSignedTrustPolicy(true)
+		connectorRegistry.RequireSignedSchemaCatalog(true)
+		srv.setAuthorityStatus(true, "", time.Now().UTC(), loadedAuthorities)
+	}
+	if cfg.RequireSignedAuthority || cfg.RequireReleaseAdmissionForEffects {
+		if err := connectorRegistry.ValidateEffectAuthorityConformanceAll(true); err != nil {
+			pool.Close()
+			return nil, fmt.Errorf("validate registered effect authority conformance: %w", err)
 		}
 	}
 	srv.agentWorker = scheduler.NewWorker(agentRuns, srv.agentLoop, contracts.NewID("server-worker"))
+	srv.agentWorker.ListWorkspaces = func(listCtx context.Context) ([]string, error) {
+		const pageSize = 256
+		const maxWorkspaces = 4096
+		var workspaceIDs []string
+		cursor := ""
+		for len(workspaceIDs) < maxWorkspaces {
+			page, err := operatorStore.ListWorkspaces(listCtx, pageSize, cursor)
+			if err != nil {
+				return nil, err
+			}
+			for _, workspace := range page.Items {
+				if workspace.Status == "active" {
+					workspaceIDs = append(workspaceIDs, workspace.ID)
+				}
+			}
+			if page.NextCursor == "" {
+				return workspaceIDs, nil
+			}
+			cursor = page.NextCursor
+		}
+		return nil, fmt.Errorf("agent scheduler workspace inventory exceeds %d entries", maxWorkspaces)
+	}
 	srv.agentLoop.Retriever = agentloop.ContextRetrieverFunc(func(ctx context.Context, request contracts.RetrievalRequest) (contracts.ContextPack, error) {
 		result, err := srv.retrieval.Retrieve(ctx, request)
 		if err != nil {
@@ -288,6 +673,22 @@ func New(ctx context.Context, cfg config.Config) (*server, error) {
 		return result.Pack, nil
 	})
 	return srv, nil
+}
+
+func resolveOpenAILeaseResolver(pool *pgxpool.Pool, deps ServerDependencies, production bool) (credentials.LeaseResolver, error) {
+	if deps.OpenAILeaseResolver != nil {
+		return deps.OpenAILeaseResolver, nil
+	}
+	if deps.OpenAISecretManager != nil {
+		if pool == nil {
+			return nil, fmt.Errorf("OpenAI credential lease authority requires the Postgres pool")
+		}
+		return store.NewCredentialLeaseStore(pool, credentials.NewManagedSecretResolver(deps.OpenAISecretManager)), nil
+	}
+	if production {
+		return nil, fmt.Errorf("production OpenAI requires an injected credential lease authority")
+	}
+	return nil, nil
 }
 
 // Close releases the Postgres pool. It is safe for callers to use during
@@ -315,13 +716,30 @@ func (s *server) Run(ctx context.Context, listen string) error {
 	bgCtx, cancelBackground := context.WithCancel(ctx)
 	defer cancelBackground()
 	go s.sessionsReaper(bgCtx)
-	go s.federationPoller(bgCtx)
+	if s.legacyGlobalSurfaces {
+		go s.federationPoller(bgCtx)
+	}
+	if s.retentionOwner != nil {
+		go s.federationRetentionOwner(bgCtx)
+	}
 	if s.workerEnabled {
 		go func() {
 			if err := s.agentWorker.Run(bgCtx, ""); err != nil && !errors.Is(err, context.Canceled) {
 				log.Printf("agent run worker stopped: %v", err)
 			}
 		}()
+		go func() {
+			if err := s.runOperationWorker(bgCtx); err != nil && !errors.Is(err, context.Canceled) {
+				log.Printf("generic operation worker stopped: %v", err)
+			}
+		}()
+		if s.sandboxCleanupWorker != nil {
+			go func() {
+				if err := s.runSandboxCleanupWorker(bgCtx); err != nil && !errors.Is(err, context.Canceled) {
+					log.Printf("sandbox cleanup worker stopped code=%s", workerFailureCode(err))
+				}
+			}()
+		}
 	}
 
 	errCh := make(chan error, 1)
@@ -372,11 +790,13 @@ type memoCreateResp struct {
 }
 
 type searchReq struct {
-	WorkspaceID string `json:"workspace_id,omitempty"`
-	Query       string `json:"query"`
-	TopK        int    `json:"top_k"`
-	Type        string `json:"type"`
-	Mode        string `json:"mode"` // "hybrid" (default) | "tsvector" | "semantic"
+	WorkspaceID   string     `json:"workspace_id,omitempty"`
+	Query         string     `json:"query"`
+	TopK          int        `json:"top_k"`
+	Type          string     `json:"type"`
+	Mode          string     `json:"mode"`                     // "hybrid" (default) | "tsvector" | "semantic"
+	EmbeddingMode string     `json:"embedding_mode,omitempty"` // adaptive-v1 | legacy-v1 | required-v1 | disabled-v1
+	ReferenceTime *time.Time `json:"reference_time,omitempty"`
 }
 
 type searchHit struct {
@@ -430,12 +850,13 @@ type symbolEdgeReq struct {
 }
 
 type symbolSearchReq struct {
-	WorkspaceID string `json:"workspace_id,omitempty"`
-	Query       string `json:"query"`
-	TopK        int    `json:"top_k"`
-	Repo        string `json:"repo"`
-	Kind        string `json:"symbol_kind"`
-	Mode        string `json:"mode"` // hybrid | semantic | name
+	WorkspaceID   string `json:"workspace_id,omitempty"`
+	Query         string `json:"query"`
+	TopK          int    `json:"top_k"`
+	Repo          string `json:"repo"`
+	Kind          string `json:"symbol_kind"`
+	Mode          string `json:"mode"`                     // hybrid | semantic | name
+	EmbeddingMode string `json:"embedding_mode,omitempty"` // adaptive-v1 | legacy-v1 | required-v1 | disabled-v1
 }
 
 type symbolHit struct {
@@ -512,9 +933,18 @@ type agentRunExternalReq struct {
 // ---------- v0.7 federation types ----------
 
 type federationPeerReq struct {
-	ID          string `json:"id"`
-	URL         string `json:"url"`
-	BearerToken string `json:"bearer_token"`
+	WorkspaceID         string `json:"workspace_id,omitempty"`
+	RequestID           string `json:"request_id,omitempty"`
+	IdempotencyKey      string `json:"idempotency_key,omitempty"`
+	ID                  string `json:"id"`
+	RemoteWorkspaceID   string `json:"remote_workspace_id"`
+	EndpointURL         string `json:"endpoint_url"`
+	CredentialRef       string `json:"credential_ref"`
+	AllowPrivateNetwork bool   `json:"allow_private_networks,omitempty"`
+	MaxMessages         int    `json:"max_messages,omitempty"`
+	MaxResponseBytes    int64  `json:"max_response_bytes,omitempty"`
+	TimeoutMS           int64  `json:"timeout_ms,omitempty"`
+	Status              string `json:"status,omitempty"`
 }
 
 type federationPeerRow struct {
@@ -553,12 +983,80 @@ type routerRecommendation struct {
 	SampleSize  int     `json:"sample_size"`
 }
 
-func (s *server) embed(ctx context.Context, text string) ([]float32, error) {
-	provider, ok := s.modelRegistry.Lookup("ollama")
-	if !ok {
-		return nil, fmt.Errorf("ollama provider is not registered")
+func (s *server) embed(ctx context.Context, request contracts.EmbeddingRequest) ([]float32, error) {
+	if request.Provider.Provider == "" {
+		request.Provider.Provider = "ollama"
 	}
-	return provider.Embed(ctx, model.EmbeddingRequest{Model: embeddingModel, Text: text, MaxInputBytes: 2000})
+	if request.Model == "" {
+		request.Model = embeddingModel
+	}
+	if request.Provider.Model == "" {
+		request.Provider.Model = request.Model
+	}
+	return s.embeddingGateway.Embed(ctx, request)
+}
+
+// embedQuery is the legacy-route bridge to the bounded query-use ledger. It
+// keeps provider execution in EmbeddingGateway and records only canonical
+// call identity, hashes, usage classification, and cache attribution.
+func (s *server) embedQuery(ctx context.Context, request contracts.EmbeddingRequest, route, gateReason string) ([]float32, error) {
+	preexisting := false
+	if s.embeddingCalls != nil {
+		if existing, err := s.embeddingCalls.Get(ctx, request.WorkspaceID, request.IdempotencyKey); err == nil {
+			preexisting = existing.Status == contracts.EmbeddingCallSucceeded
+		}
+	}
+	vector, embedErr := s.embed(ctx, request)
+	if s.embeddingCalls == nil {
+		return vector, embedErr
+	}
+	record, recordErr := s.embeddingCalls.Get(ctx, request.WorkspaceID, request.IdempotencyKey)
+	if recordErr != nil {
+		record, recordErr = s.embeddingCalls.GetQueryCanonical(ctx, request.WorkspaceID, request.SourceHash, request.Provider.Provider, request.Model)
+	}
+	if recordErr != nil {
+		if embedErr != nil {
+			return nil, embedErr
+		}
+		return nil, recordErr
+	}
+	cacheHit := preexisting || record.RequestID != request.RequestID
+	use := contracts.EmbeddingQueryUse{
+		WorkspaceID: request.WorkspaceID, IdempotencyKey: contracts.HashStrings("embedding-query-use", request.WorkspaceID, request.Actor.ID, route, request.SourceHash),
+		RequestID: request.RequestID, EmbeddingRequestID: record.RequestID, SourceHash: request.SourceHash,
+		Provider: record.Provider, Actor: request.Actor, Route: route, GateReason: gateReason,
+		CacheHit: cacheHit, DuplicateWork: !cacheHit && record.AttemptCount > 1, Usage: record.Usage,
+		CostUSD: record.Usage.CostUSD, CostKnown: record.Usage.CostUSD > 0,
+		UsageMeasured: record.Usage.Measured, UsageEstimated: !record.Usage.Measured,
+	}
+	if _, err := s.embeddingCalls.RecordQueryUse(ctx, use); err != nil {
+		return nil, err
+	}
+	if s.observability != nil {
+		if err := s.observability.ObserveEmbeddingQueryUse(ctx, use); err != nil {
+			return nil, err
+		}
+	}
+	if embedErr != nil {
+		return nil, embedErr
+	}
+	return vector, nil
+}
+
+func (s *server) embeddingRequest(workspaceID string, actor contracts.ActorRef, sourceKind, sourceID, text string) contracts.EmbeddingRequest {
+	workspaceID = strings.TrimSpace(workspaceID)
+	if actor.WorkspaceID == "" {
+		actor.WorkspaceID = workspaceID
+	}
+	sourceHash := contracts.EmbeddingSourceHash(text)
+	identity := contracts.HashStrings(workspaceID, sourceKind, sourceID, sourceHash, embeddingModel)
+	return contracts.EmbeddingRequest{
+		RequestID: "embedding-" + identity[:40], IdempotencyKey: "embedding-" + identity,
+		CausationID: "embedding:" + sourceKind + ":" + sourceID, CorrelationID: identity,
+		WorkspaceID: workspaceID, Actor: actor, Provider: contracts.ProviderRef{Provider: "ollama", Model: embeddingModel},
+		Model: embeddingModel, SourceKind: sourceKind, SourceID: sourceID, SourceHash: sourceHash,
+		Text: text, Budget: contracts.EmbeddingBudget{MaxInputBytes: contracts.MaxEmbeddingInputBytes, Dimension: contracts.EmbeddingDimension, TimeoutMS: 30_000},
+	}
 }
 
 // ---------- helpers ----------
@@ -648,6 +1146,7 @@ func (s *server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"embedding_model": embeddingModel,
 		"embedding_dim":   embeddingDim,
 		"model_providers": s.modelRegistry.Names(),
+		"authority":       s.authorityStatus(),
 	})
 }
 
@@ -766,13 +1265,76 @@ func (s *server) handleAgentRunCreate(w http.ResponseWriter, r *http.Request) {
 		writeAgentRunError(w, err)
 		return
 	}
-	decision, runErr := s.agentLoop.Run(ctx, run.WorkspaceID, run.ID)
+	decision, runErr := s.runAgentOwned(ctx, run.WorkspaceID, run.ID, func(ownedCtx context.Context) (contracts.LoopDecision, error) {
+		return s.agentLoop.Run(ownedCtx, run.WorkspaceID, run.ID)
+	})
 	s.observeAgentOutcome(ctx, decision.Run)
 	if runErr != nil {
 		writeJSON(w, agentRunHTTPStatus(runErr), map[string]any{"run": run, "decision": decision, "deduplicated": deduplicated, "error": shortError(runErr, 320)})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"run": decision.Run, "decision": decision, "deduplicated": deduplicated})
+}
+
+// runAgentOwned gives direct HTTP mutations the same fenced ownership contract
+// as the background scheduler. The callback receives a context carrying the
+// exact Postgres lease; a renewal failure cancels the callback and prevents a
+// false success response.
+func (s *server) runAgentOwned(ctx context.Context, workspaceID, runID string, callback func(context.Context) (contracts.LoopDecision, error)) (contracts.LoopDecision, error) {
+	if s == nil || s.agentRuns == nil || callback == nil {
+		return contracts.LoopDecision{}, agentloop.ErrLoopLease
+	}
+	ownerID := contracts.NewID("api-agent-owner")
+	claim, err := s.agentRuns.AcquireAgentRunLease(ctx, workspaceID, runID, ownerID, contracts.DefaultAgentRunLeaseTTL)
+	if err != nil {
+		return contracts.LoopDecision{}, err
+	}
+	if claim.Lease.Fence == 0 {
+		// The run was already terminal; Run/Advance/Cancel/CompleteExternal
+		// will return its durable terminal decision without a mutation.
+		return callback(ctx)
+	}
+	ownedCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	interval := contracts.NormalizeAgentRunLeaseTTL(time.Duration(claim.Lease.LeaseTTLMS)*time.Millisecond) / 3
+	if interval < time.Millisecond {
+		interval = time.Millisecond
+	}
+	heartbeatDone := make(chan struct{})
+	heartbeatErr := make(chan error, 1)
+	var heartbeatWG sync.WaitGroup
+	heartbeatWG.Add(1)
+	go func() {
+		defer heartbeatWG.Done()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatDone:
+				return
+			case <-ticker.C:
+				if _, renewErr := s.agentRuns.RenewAgentRunLease(ownedCtx, claim.Lease, time.Duration(claim.Lease.LeaseTTLMS)*time.Millisecond); renewErr != nil {
+					heartbeatErr <- renewErr
+					cancel()
+					return
+				}
+			}
+		}
+	}()
+	decision, runErr := callback(agentloop.WithWorkerLease(ownedCtx, claim.Lease))
+	close(heartbeatDone)
+	heartbeatWG.Wait()
+	select {
+	case renewErr := <-heartbeatErr:
+		if runErr == nil {
+			runErr = fmt.Errorf("agent run heartbeat failed: %w", renewErr)
+		}
+	default:
+	}
+	if releaseErr := s.agentRuns.ReleaseAgentRunLease(context.Background(), claim.Lease); releaseErr != nil && runErr == nil {
+		runErr = fmt.Errorf("release agent run lease: %w", releaseErr)
+	}
+	return decision, runErr
 }
 
 func (s *server) handleAgentRunAdvance(w http.ResponseWriter, r *http.Request, runID string) {
@@ -783,7 +1345,9 @@ func (s *server) handleAgentRunAdvance(w http.ResponseWriter, r *http.Request, r
 	workspaceID := requestWorkspace(r, r.URL.Query().Get("workspace_id"))
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Minute)
 	defer cancel()
-	decision, err := s.agentLoop.Advance(ctx, workspaceID, runID)
+	decision, err := s.runAgentOwned(ctx, workspaceID, runID, func(ownedCtx context.Context) (contracts.LoopDecision, error) {
+		return s.agentLoop.Advance(ownedCtx, workspaceID, runID)
+	})
 	s.observeAgentOutcome(ctx, decision.Run)
 	if err != nil {
 		writeJSON(w, agentRunHTTPStatus(err), map[string]any{"decision": decision, "error": shortError(err, 320)})
@@ -842,7 +1406,9 @@ func (s *server) handleAgentRunCancel(w http.ResponseWriter, r *http.Request, ru
 	workspaceID := requestWorkspace(r, workspaceRef)
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
-	decision, err := s.agentLoop.Cancel(ctx, workspaceID, runID, request.Reason)
+	decision, err := s.runAgentOwned(ctx, workspaceID, runID, func(ownedCtx context.Context) (contracts.LoopDecision, error) {
+		return s.agentLoop.Cancel(ownedCtx, workspaceID, runID, request.Reason)
+	})
 	s.observeAgentOutcome(ctx, decision.Run)
 	if err != nil {
 		writeJSON(w, agentRunHTTPStatus(err), map[string]any{"decision": decision, "error": shortError(err, 320)})
@@ -872,11 +1438,12 @@ func (s *server) handleAgentRunExternal(w http.ResponseWriter, r *http.Request, 
 		decision contracts.LoopDecision
 		err      error
 	)
-	if operation == "wait" {
-		decision, err = s.agentLoop.WaitExternal(ctx, workspaceID, runID, request.Reason)
-	} else {
-		decision, err = s.agentLoop.CompleteExternal(ctx, workspaceID, runID, request.Output)
-	}
+	decision, err = s.runAgentOwned(ctx, workspaceID, runID, func(ownedCtx context.Context) (contracts.LoopDecision, error) {
+		if operation == "wait" {
+			return s.agentLoop.WaitExternal(ownedCtx, workspaceID, runID, request.Reason)
+		}
+		return s.agentLoop.CompleteExternal(ownedCtx, workspaceID, runID, request.Output)
+	})
 	s.observeAgentOutcome(ctx, decision.Run)
 	if err != nil {
 		writeJSON(w, agentRunHTTPStatus(err), map[string]any{"decision": decision, "error": shortError(err, 320)})
@@ -998,7 +1565,23 @@ func (s *server) handleReadiness(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": version.Version, "db": "ok"})
+	s.authorityMu.RLock()
+	authorityReady, authorityError := s.authorityReady, s.authorityError
+	s.authorityMu.RUnlock()
+	qualificationReady, qualificationError := s.qualificationAuthorityStatusValues()
+	qualificationReleaseReady, qualificationReleaseError := s.qualificationReleaseStatusValues()
+	if !authorityReady || (s.qualificationTrustRequired && !qualificationReady) || (s.qualificationReleaseRequired && !qualificationReleaseReady) {
+		errorMessage := authorityError
+		if errorMessage == "" {
+			errorMessage = qualificationError
+		}
+		if errorMessage == "" {
+			errorMessage = qualificationReleaseError
+		}
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "version": version.Version, "db": "ok", "authority": s.authorityStatus(), "error": errorMessage})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": version.Version, "db": "ok", "authority": s.authorityStatus()})
 }
 
 func (s *server) handleCreate(w http.ResponseWriter, r *http.Request) {
@@ -1026,8 +1609,9 @@ func (s *server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	// Generate embedding (best-effort; on failure store NULL)
+	embeddingRequest := s.embeddingRequest(workspaceID, requestActor(r), "memo", "create:"+hash, req.Title+"\n"+req.Content)
 	var emb []float32
-	if e, err := s.embed(ctx, req.Title+"\n"+req.Content); err == nil {
+	if e, err := s.embed(ctx, embeddingRequest); err == nil {
 		emb = e
 	} else {
 		log.Printf("embed warn (memo): %v", err)
@@ -1036,8 +1620,14 @@ func (s *server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var id int64
 	var deduped bool
 	var inserted bool
+	tx, err := store.BeginWorkspaceTx(ctx, s.pool, workspaceID)
+	if err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	if emb != nil {
-		err := s.pool.QueryRow(ctx, `
+		err := tx.QueryRow(ctx, `
 			INSERT INTO fornix.memos (workspace_id, title, content, type, tags, sha256, embedding)
 			VALUES ($1, $2, $3, $4, $5, $6, $7)
 			ON CONFLICT (workspace_id, sha256) DO UPDATE SET sha256 = EXCLUDED.sha256
@@ -1049,7 +1639,7 @@ func (s *server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		err := s.pool.QueryRow(ctx, `
+		err := tx.QueryRow(ctx, `
 			INSERT INTO fornix.memos (workspace_id, title, content, type, tags, sha256)
 			VALUES ($1, $2, $3, $4, $5, $6)
 			ON CONFLICT (workspace_id, sha256) DO UPDATE SET sha256 = EXCLUDED.sha256
@@ -1060,6 +1650,25 @@ func (s *server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 500, "db: "+err.Error())
 			return
 		}
+	}
+	if emb != nil && s.embeddingCalls != nil {
+		vectorHash, hashErr := contracts.EmbeddingVectorHash(emb)
+		if hashErr != nil {
+			writeErr(w, 500, "embedding integrity: "+hashErr.Error())
+			return
+		}
+		if err := s.embeddingCalls.AttachTx(ctx, tx, contracts.EmbeddingTargetAttachment{
+			WorkspaceID: workspaceID, RequestID: embeddingRequest.RequestID,
+			TargetKind: "memo", TargetID: strconv.FormatInt(id, 10),
+			SourceHash: embeddingRequest.SourceHash, VectorHash: vectorHash,
+		}); err != nil {
+			writeErr(w, 500, "embedding attachment: "+err.Error())
+			return
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
 	}
 	deduped = !inserted
 	writeJSON(w, 200, memoCreateResp{ID: id, SHA256: hash, Deduped: deduped, Embedded: emb != nil})
@@ -1082,12 +1691,22 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request, id int64) 
 	var title, content, mtype string
 	var tags []string
 	workspaceID := requestWorkspace(r, "")
-	err := s.pool.QueryRow(ctx, `SELECT title, content, type, tags FROM fornix.memos WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL`, workspaceID, id).Scan(&title, &content, &mtype, &tags)
+	readTx, err := store.BeginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
+	err = readTx.QueryRow(ctx, `SELECT title, content, type, tags FROM fornix.memos WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL`, workspaceID, id).Scan(&title, &content, &mtype, &tags)
+	if err != nil {
+		_ = readTx.Rollback(ctx)
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeErr(w, 404, "not found")
 			return
 		}
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
+	if err := readTx.Commit(ctx); err != nil {
 		writeErr(w, 500, "db: "+err.Error())
 		return
 	}
@@ -1105,18 +1724,44 @@ func (s *server) handleUpdate(w http.ResponseWriter, r *http.Request, id int64) 
 	}
 	hash := sha256hex(title + "\n" + content)
 	// Re-embed
+	embeddingRequest := s.embeddingRequest(workspaceID, requestActor(r), "memo", fmt.Sprintf("%d:%s", id, hash), title+"\n"+content)
 	var emb []float32
-	if e, err := s.embed(ctx, title+"\n"+content); err == nil {
+	if e, err := s.embed(ctx, embeddingRequest); err == nil {
 		emb = e
 	}
+	tx, txErr := store.BeginWorkspaceTx(ctx, s.pool, workspaceID)
+	if txErr != nil {
+		writeErr(w, 500, "db: "+txErr.Error())
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	if emb != nil {
-		_, err = s.pool.Exec(ctx, `UPDATE fornix.memos SET title=$1, content=$2, type=$3, tags=$4, sha256=$5, embedding=$6, updated_at=now() WHERE workspace_id=$7 AND id=$8`,
+		_, err = tx.Exec(ctx, `UPDATE fornix.memos SET title=$1, content=$2, type=$3, tags=$4, sha256=$5, embedding=$6, updated_at=now() WHERE workspace_id=$7 AND id=$8`,
 			title, content, mtype, tags, hash, pgvector.NewVector(emb), workspaceID, id)
 	} else {
-		_, err = s.pool.Exec(ctx, `UPDATE fornix.memos SET title=$1, content=$2, type=$3, tags=$4, sha256=$5, updated_at=now() WHERE workspace_id=$6 AND id=$7`,
+		_, err = tx.Exec(ctx, `UPDATE fornix.memos SET title=$1, content=$2, type=$3, tags=$4, sha256=$5, updated_at=now() WHERE workspace_id=$6 AND id=$7`,
 			title, content, mtype, tags, hash, workspaceID, id)
 	}
 	if err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
+	if emb != nil && s.embeddingCalls != nil {
+		vectorHash, hashErr := contracts.EmbeddingVectorHash(emb)
+		if hashErr != nil {
+			writeErr(w, 500, "embedding integrity: "+hashErr.Error())
+			return
+		}
+		if err := s.embeddingCalls.AttachTx(ctx, tx, contracts.EmbeddingTargetAttachment{
+			WorkspaceID: workspaceID, RequestID: embeddingRequest.RequestID,
+			TargetKind: "memo", TargetID: strconv.FormatInt(id, 10),
+			SourceHash: embeddingRequest.SourceHash, VectorHash: vectorHash,
+		}); err != nil {
+			writeErr(w, 500, "embedding attachment: "+err.Error())
+			return
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
 		writeErr(w, 500, "db: "+err.Error())
 		return
 	}
@@ -1131,13 +1776,23 @@ func (s *server) handleDelete(w http.ResponseWriter, r *http.Request, id int64) 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	workspaceID := requestWorkspace(r, "")
-	tag, err := s.pool.Exec(ctx, `UPDATE fornix.memos SET deleted_at=now() WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL`, workspaceID, id)
+	tx, err := store.BeginWorkspaceTx(ctx, s.pool, workspaceID)
+	if err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tag, err := tx.Exec(ctx, `UPDATE fornix.memos SET deleted_at=now() WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL`, workspaceID, id)
 	if err != nil {
 		writeErr(w, 500, "db: "+err.Error())
 		return
 	}
 	if tag.RowsAffected() == 0 {
 		writeErr(w, 404, "not found or already deleted")
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeErr(w, 500, "db: "+err.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]any{"id": id, "deleted": true})
@@ -1154,12 +1809,22 @@ func (s *server) handleGet(w http.ResponseWriter, r *http.Request, id int64) {
 	var title, content, mtype string
 	var tags []string
 	var createdAt, updatedAt time.Time
-	err := s.pool.QueryRow(ctx, `SELECT title, content, type, tags, created_at, updated_at FROM fornix.memos WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL`, workspaceID, id).Scan(&title, &content, &mtype, &tags, &createdAt, &updatedAt)
+	tx, err := store.BeginWorkspaceTx(ctx, s.pool, workspaceID)
+	if err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	err = tx.QueryRow(ctx, `SELECT title, content, type, tags, created_at, updated_at FROM fornix.memos WHERE workspace_id=$1 AND id=$2 AND deleted_at IS NULL`, workspaceID, id).Scan(&title, &content, &mtype, &tags, &createdAt, &updatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeErr(w, 404, "not found")
 			return
 		}
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
 		writeErr(w, 500, "db: "+err.Error())
 		return
 	}
@@ -1189,76 +1854,128 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if req.Mode == "" {
 		req.Mode = "hybrid"
 	}
+	if req.Mode != "tsvector" && req.Mode != "semantic" && req.Mode != "hybrid" {
+		writeErr(w, http.StatusBadRequest, "invalid mode")
+		return
+	}
+	defaultEmbeddingMode := queryEmbeddingModeAdaptive
+	if req.Mode == "semantic" {
+		defaultEmbeddingMode = queryEmbeddingModeRequired
+	}
+	req.EmbeddingMode = normalizeQueryEmbeddingMode(strings.ToLower(strings.TrimSpace(req.EmbeddingMode)), defaultEmbeddingMode)
+	if req.EmbeddingMode == "" {
+		writeErr(w, http.StatusBadRequest, "invalid embedding_mode")
+		return
+	}
+	if req.Mode == "semantic" && req.EmbeddingMode == queryEmbeddingModeDisabled {
+		writeErr(w, http.StatusBadRequest, "semantic mode requires embeddings")
+		return
+	}
+	referenceTime, err := resolveReferenceTime(req.ReferenceTime)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	workspaceID := requestWorkspace(r, req.WorkspaceID)
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
-	// Compute query embedding for semantic + hybrid modes
+	// Deterministic lexical preflight runs before the expensive provider path in
+	// adaptive hybrid mode. Explicit semantic mode remains provider-required.
 	var qEmb []float32
+	gateReason := "embedding_not_requested"
 	if req.Mode == "semantic" || req.Mode == "hybrid" {
-		if e, err := s.embed(ctx, req.Query); err == nil {
-			qEmb = e
-		} else {
-			log.Printf("embed warn (search): %v", err)
-			// fall back to tsvector if embedding fails
-			req.Mode = "tsvector"
+		shouldEmbed := req.Mode == "semantic" || req.EmbeddingMode == queryEmbeddingModeRequired || req.EmbeddingMode == queryEmbeddingModeLegacy
+		if req.EmbeddingMode == queryEmbeddingModeDisabled {
+			shouldEmbed = false
+			gateReason = "embedding_disabled"
+		}
+		if req.Mode == "hybrid" && req.EmbeddingMode == queryEmbeddingModeAdaptive {
+			gate, gateErr := s.memoDeterministicGate(ctx, workspaceID, req.Query, req.Type, req.TopK)
+			if gateErr != nil {
+				writeErr(w, http.StatusInternalServerError, "deterministic retrieval preflight failed")
+				return
+			}
+			gateReason = gate.Reason
+			shouldEmbed = !gate.Satisfied
+			if gate.Satisfied {
+				req.Mode = "tsvector"
+			}
+		}
+		if shouldEmbed {
+			if e, err := s.embedQuery(ctx, s.embeddingRequest(workspaceID, requestActor(r), "memo_query", sha256hex(req.Query), req.Query), "memo", gateReason); err == nil {
+				qEmb = e
+			} else if req.Mode == "semantic" && req.EmbeddingMode == queryEmbeddingModeRequired {
+				writeErr(w, http.StatusServiceUnavailable, "semantic embedding is unavailable")
+				return
+			} else {
+				// Adaptive and legacy hybrid remain useful when the provider is
+				// unavailable; the deterministic result is explicit in the response.
+				req.Mode = "tsvector"
+				gateReason = "provider_unavailable"
+			}
 		}
 	}
 
+	tx, txErr := store.BeginWorkspaceTx(ctx, s.pool, workspaceID)
+	if txErr != nil {
+		writeErr(w, 500, "db: "+txErr.Error())
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	var rows pgx.Rows
-	var err error
+	err = nil
 	switch req.Mode {
 	case "tsvector":
-		rows, err = s.pool.Query(ctx, `
+		rows, err = tx.Query(ctx, `
 			SELECT id, title, content,
 			       ts_rank(tsv, plainto_tsquery('english', $1)) * 0.7
-			       + (1.0 / (1 + EXTRACT(EPOCH FROM (now()-created_at))/86400.0/30)) * 0.3 AS score,
-			       type, created_at
-			FROM fornix.memos
-			WHERE workspace_id=$3 AND deleted_at IS NULL
-			  AND tsv @@ plainto_tsquery('english', $1)
-			  AND ($2 = '' OR type = $2)
-			ORDER BY score DESC, id LIMIT $4`,
-			req.Query, req.Type, workspaceID, req.TopK)
-	case "semantic":
-		rows, err = s.pool.Query(ctx, `
-			SELECT id, title, content,
-			       (1.0 - (embedding <=> $1)) * 0.8
-			       + (1.0 / (1 + EXTRACT(EPOCH FROM (now()-created_at))/86400.0/30)) * 0.2 AS score,
-			       type, created_at
-			FROM fornix.memos
-			WHERE workspace_id=$2 AND deleted_at IS NULL
-			  AND embedding IS NOT NULL
-			  AND ($3 = '' OR type = $3)
-			ORDER BY embedding <=> $1 ASC, id LIMIT $4`,
-			pgvector.NewVector(qEmb), workspaceID, req.Type, req.TopK)
-	default: // hybrid
-		rows, err = s.pool.Query(ctx, `
-			SELECT id, title, content,
-			       CASE WHEN embedding IS NULL THEN
-			           ts_rank(tsv, plainto_tsquery('english', $2)) * 0.7
-			           + (1.0 / (1 + EXTRACT(EPOCH FROM (now()-created_at))/86400.0/30)) * 0.3
-			       ELSE
-			           (1.0 - (embedding <=> $1)) * 0.5
-			           + COALESCE(ts_rank(tsv, plainto_tsquery('english', $2)), 0) * 0.3
-			           + (1.0 / (1 + EXTRACT(EPOCH FROM (now()-created_at))/86400.0/30)) * 0.2
-			       END AS score,
+			       + (1.0 / (1 + EXTRACT(EPOCH FROM (CASE WHEN created_at > $3 THEN INTERVAL '0' ELSE $3-created_at END))/86400.0/30)) * 0.3 AS score,
 			       type, created_at
 			FROM fornix.memos
 			WHERE workspace_id=$4 AND deleted_at IS NULL
+			  AND tsv @@ plainto_tsquery('english', $1)
+			  AND ($2 = '' OR type = $2)
+			ORDER BY score DESC, id LIMIT $5`,
+			req.Query, req.Type, referenceTime, workspaceID, req.TopK)
+	case "semantic":
+		rows, err = tx.Query(ctx, `
+			SELECT id, title, content,
+			       (1.0 - (embedding <=> $1)) * 0.8
+			       + (1.0 / (1 + EXTRACT(EPOCH FROM (CASE WHEN created_at > $2 THEN INTERVAL '0' ELSE $2-created_at END))/86400.0/30)) * 0.2 AS score,
+			       type, created_at
+			FROM fornix.memos
+			WHERE workspace_id=$3 AND deleted_at IS NULL
+			  AND embedding IS NOT NULL
+			  AND ($4 = '' OR type = $4)
+			ORDER BY score DESC, id LIMIT $5`,
+			pgvector.NewVector(qEmb), referenceTime, workspaceID, req.Type, req.TopK)
+	default: // hybrid
+		rows, err = tx.Query(ctx, `
+			SELECT id, title, content,
+			       CASE WHEN embedding IS NULL THEN
+			           ts_rank(tsv, plainto_tsquery('english', $2)) * 0.7
+			           + (1.0 / (1 + EXTRACT(EPOCH FROM (CASE WHEN created_at > $4 THEN INTERVAL '0' ELSE $4-created_at END))/86400.0/30)) * 0.3
+			       ELSE
+			           (1.0 - (embedding <=> $1)) * 0.5
+			           + COALESCE(ts_rank(tsv, plainto_tsquery('english', $2)), 0) * 0.3
+			           + (1.0 / (1 + EXTRACT(EPOCH FROM (CASE WHEN created_at > $4 THEN INTERVAL '0' ELSE $4-created_at END))/86400.0/30)) * 0.2
+			       END AS score,
+			       type, created_at
+			FROM fornix.memos
+			WHERE workspace_id=$5 AND deleted_at IS NULL
 			  AND ($3 = '' OR type = $3)
 			  AND (
 			      embedding IS NOT NULL
 			      OR tsv @@ plainto_tsquery('english', $2)
 			  )
-			ORDER BY score DESC, id LIMIT $5`,
-			pgvector.NewVector(qEmb), req.Query, req.Type, workspaceID, req.TopK)
+			ORDER BY score DESC, id LIMIT $6`,
+			pgvector.NewVector(qEmb), req.Query, req.Type, referenceTime, workspaceID, req.TopK)
 	}
 	if err != nil {
 		writeErr(w, 500, "db: "+err.Error())
 		return
 	}
-	defer rows.Close()
 
 	results := []searchHit{}
 	for rows.Next() {
@@ -1270,7 +1987,16 @@ func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		h.Excerpt = excerpt(content, 200)
 		results = append(results, h)
 	}
-	writeJSON(w, 200, map[string]any{"results": results, "mode": req.Mode})
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"results": results, "mode": req.Mode, "embedding_mode": req.EmbeddingMode, "gate_reason": gateReason, "reference_time": referenceTime})
 }
 
 // ---------- coord endpoints ----------
@@ -1289,23 +2015,29 @@ func (s *server) handleCoordSend(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "sender, recipient, subject required")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
-	host, _ := os.Hostname()
-	var id int64
-	err := s.pool.QueryRow(ctx, `
-		INSERT INTO public.coord_messages (sender, recipient, subject, body, host, origin_host)
-		VALUES ($1, $2, $3, $4, $5, $5)
-		RETURNING id`,
-		req.Sender, req.Recipient, req.Subject, req.Body, host,
-	).Scan(&id)
-	if err != nil {
-		writeErr(w, 500, "db: "+err.Error())
+	workspaceID := requestWorkspace(r, "")
+	if workspaceID == "" || s.coordination == nil {
+		writeErr(w, http.StatusServiceUnavailable, "workspace coordination is unavailable")
 		return
 	}
-	// pg_notify trigger should already fire; do it explicitly too for safety
-	_, _ = s.pool.Exec(ctx, `SELECT pg_notify('coord', $1)`, fmt.Sprintf(`{"id":%d,"sender":%q,"recipient":%q,"subject":%q}`, id, req.Sender, req.Recipient, req.Subject))
-	writeJSON(w, 200, map[string]any{"id": id, "sent": true})
+	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if idempotencyKey == "" {
+		idempotencyKey = requestIDFromRequest(r)
+	}
+	host, _ := os.Hostname()
+	message := contracts.CoordinationMessage{WorkspaceID: workspaceID, RequestID: requestIDFromRequest(r), IdempotencyKey: idempotencyKey, Sender: req.Sender, Recipient: req.Recipient, Subject: req.Subject, Body: req.Body, Actor: requestActor(r), OriginHost: host}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	stored, duplicate, err := s.coordination.AppendMessage(ctx, message)
+	if err != nil {
+		if errors.Is(err, store.ErrCoordinationConflict) {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, "db: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": stored.ID, "sequence": stored.Sequence, "sent": true, "duplicate": duplicate})
 }
 
 func (s *server) handleCoordRecent(w http.ResponseWriter, r *http.Request) {
@@ -1317,40 +2049,30 @@ func (s *server) handleCoordRecent(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	since := r.URL.Query().Get("since") // RFC3339 timestamp
+	afterSequenceValue := strings.TrimSpace(r.URL.Query().Get("after_sequence"))
+	afterSequence := int64(0)
+	if afterSequenceValue != "" {
+		parsed, err := strconv.ParseInt(afterSequenceValue, 10, 64)
+		if err != nil || parsed < 0 {
+			writeErr(w, http.StatusBadRequest, "after_sequence must be a non-negative integer")
+			return
+		}
+		afterSequence = parsed
+	}
 	recipient := r.URL.Query().Get("recipient")
-
+	workspaceID := requestWorkspace(r, "")
+	if workspaceID == "" || s.coordination == nil {
+		writeErr(w, http.StatusServiceUnavailable, "workspace coordination is unavailable")
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-
-	query := `SELECT id, sender, recipient, subject, body, COALESCE(host,''), COALESCE(origin_host,'local'), ts FROM public.coord_messages WHERE 1=1`
-	args := []any{}
-	if since != "" {
-		args = append(args, since)
-		query += fmt.Sprintf(" AND ts > $%d", len(args))
-	}
-	if recipient != "" {
-		args = append(args, recipient)
-		query += fmt.Sprintf(" AND (recipient = $%d OR recipient = 'all' OR recipient = 'ALL')", len(args))
-	}
-	args = append(args, limit)
-	query += fmt.Sprintf(" ORDER BY ts DESC LIMIT $%d", len(args))
-
-	rows, err := s.pool.Query(ctx, query, args...)
+	messages, err := s.coordination.ReadMessages(ctx, workspaceID, afterSequence, recipient, limit)
 	if err != nil {
 		writeErr(w, 500, "db: "+err.Error())
 		return
 	}
-	defer rows.Close()
-	msgs := []coordMsg{}
-	for rows.Next() {
-		var m coordMsg
-		if err := rows.Scan(&m.ID, &m.Sender, &m.Recipient, &m.Subject, &m.Body, &m.Host, &m.OriginHost, &m.TS); err != nil {
-			continue
-		}
-		msgs = append(msgs, m)
-	}
-	writeJSON(w, 200, map[string]any{"messages": msgs, "count": len(msgs)})
+	writeJSON(w, http.StatusOK, map[string]any{"messages": messages, "count": len(messages)})
 }
 
 // ---------- backfill ----------
@@ -1362,9 +2084,22 @@ func (s *server) handleBackfillEmbeddings(w http.ResponseWriter, r *http.Request
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Minute)
 	defer cancel()
+	workspaceID := requestWorkspace(r, "")
+	limit := 128
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, parseErr := strconv.Atoi(raw); parseErr == nil && parsed > 0 && parsed < 512 {
+			limit = parsed
+		}
+	}
 
-	rows, err := s.pool.Query(ctx, `SELECT id, title, content FROM fornix.memos WHERE embedding IS NULL AND deleted_at IS NULL ORDER BY id`)
+	readTx, err := store.BeginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
+	rows, err := readTx.Query(ctx, `SELECT id, title, content FROM fornix.memos WHERE workspace_id=$1 AND embedding IS NULL AND deleted_at IS NULL ORDER BY id LIMIT $2`, workspaceID, limit)
+	if err != nil {
+		_ = readTx.Rollback(ctx)
 		writeErr(w, 500, "db: "+err.Error())
 		return
 	}
@@ -1382,17 +2117,53 @@ func (s *server) handleBackfillEmbeddings(w http.ResponseWriter, r *http.Request
 		pending = append(pending, t)
 	}
 	rows.Close()
+	if err := rows.Err(); err != nil {
+		_ = readTx.Rollback(ctx)
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
+	if err := readTx.Commit(ctx); err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
 
 	stats := map[string]int{"total": len(pending), "ok": 0, "fail": 0}
 	for _, t := range pending {
 		ec, ecancel := context.WithTimeout(ctx, 15*time.Second)
-		emb, err := s.embed(ec, t.Title+"\n"+t.Content)
+		embeddingRequest := s.embeddingRequest(workspaceID, requestActor(r), "memo_backfill", fmt.Sprintf("%d:%s", t.ID, sha256hex(t.Title+"\n"+t.Content)), t.Title+"\n"+t.Content)
+		emb, err := s.embed(ec, embeddingRequest)
 		ecancel()
 		if err != nil {
 			stats["fail"]++
 			continue
 		}
-		if _, err := s.pool.Exec(ctx, `UPDATE fornix.memos SET embedding=$1 WHERE id=$2`, pgvector.NewVector(emb), t.ID); err != nil {
+		vectorHash, hashErr := contracts.EmbeddingVectorHash(emb)
+		if hashErr != nil {
+			stats["fail"]++
+			continue
+		}
+		tx, txErr := store.BeginWorkspaceTx(ctx, s.pool, workspaceID)
+		if txErr != nil {
+			stats["fail"]++
+			continue
+		}
+		updated, updateErr := tx.Exec(ctx, `UPDATE fornix.memos SET embedding=$1 WHERE workspace_id=$2 AND id=$3 AND deleted_at IS NULL`, pgvector.NewVector(emb), workspaceID, t.ID)
+		txErr = updateErr
+		if txErr == nil && updated.RowsAffected() != 1 {
+			txErr = errors.New("memo disappeared during embedding backfill")
+		}
+		if txErr == nil && s.embeddingCalls != nil {
+			txErr = s.embeddingCalls.AttachTx(ctx, tx, contracts.EmbeddingTargetAttachment{
+				WorkspaceID: workspaceID, RequestID: embeddingRequest.RequestID,
+				TargetKind: "memo", TargetID: strconv.FormatInt(t.ID, 10),
+				SourceHash: embeddingRequest.SourceHash, VectorHash: vectorHash,
+			})
+		}
+		if txErr == nil {
+			txErr = tx.Commit(ctx)
+		}
+		_ = tx.Rollback(ctx)
+		if txErr != nil {
 			stats["fail"]++
 			continue
 		}
@@ -1427,9 +2198,10 @@ func (s *server) handleSymbolUpsert(w http.ResponseWriter, r *http.Request) {
 	}
 	hash := sha256hex(fmt.Sprintf("%s|%s|%s|%s|%d|%d|%s", req.Repo, req.FilePath, req.SymbolName, req.SymbolKind, req.LineStart, req.LineEnd, req.Signature))
 
+	embeddingRequest := s.embeddingRequest(workspaceID, requestActor(r), "symbol", fmt.Sprintf("%s:%s:%s", req.Repo, req.FilePath, req.SymbolName), embedText)
 	var emb []float32
 	if strings.TrimSpace(embedText) != "" {
-		if e, err := s.embed(ctx, embedText); err == nil {
+		if e, err := s.embed(ctx, embeddingRequest); err == nil {
 			emb = e
 		} else {
 			log.Printf("embed warn (symbol): %v", err)
@@ -1438,8 +2210,14 @@ func (s *server) handleSymbolUpsert(w http.ResponseWriter, r *http.Request) {
 
 	var id int64
 	var inserted bool
+	tx, err := store.BeginWorkspaceTx(ctx, s.pool, workspaceID)
+	if err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	if emb != nil {
-		err := s.pool.QueryRow(ctx, `
+		err := tx.QueryRow(ctx, `
 			INSERT INTO fornix.symbols (workspace_id, repo, file_path, symbol_name, symbol_kind, language, line_start, line_end, signature, docstring, embedding, sha256)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
 			ON CONFLICT (workspace_id, repo, file_path, symbol_name, symbol_kind) DO UPDATE
@@ -1461,7 +2239,7 @@ func (s *server) handleSymbolUpsert(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		err := s.pool.QueryRow(ctx, `
+		err := tx.QueryRow(ctx, `
 			INSERT INTO fornix.symbols (workspace_id, repo, file_path, symbol_name, symbol_kind, language, line_start, line_end, signature, docstring, sha256)
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
 			ON CONFLICT (workspace_id, repo, file_path, symbol_name, symbol_kind) DO UPDATE
@@ -1481,6 +2259,25 @@ func (s *server) handleSymbolUpsert(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 500, "db: "+err.Error())
 			return
 		}
+	}
+	if emb != nil && s.embeddingCalls != nil {
+		vectorHash, hashErr := contracts.EmbeddingVectorHash(emb)
+		if hashErr != nil {
+			writeErr(w, 500, "embedding integrity: "+hashErr.Error())
+			return
+		}
+		if err := s.embeddingCalls.AttachTx(ctx, tx, contracts.EmbeddingTargetAttachment{
+			WorkspaceID: workspaceID, RequestID: embeddingRequest.RequestID,
+			TargetKind: "symbol", TargetID: strconv.FormatInt(id, 10),
+			SourceHash: embeddingRequest.SourceHash, VectorHash: vectorHash,
+		}); err != nil {
+			writeErr(w, 500, "embedding attachment: "+err.Error())
+			return
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
 	}
 	writeJSON(w, 200, map[string]any{"id": id, "inserted": inserted, "embedded": emb != nil})
 }
@@ -1502,13 +2299,23 @@ func (s *server) handleSymbolEdge(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	workspaceID := requestWorkspace(r, req.WorkspaceID)
-	_, err := s.pool.Exec(ctx, `
+	tx, err := store.BeginWorkspaceTx(ctx, s.pool, workspaceID)
+	if err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	_, err = tx.Exec(ctx, `
 		INSERT INTO fornix.symbol_edges (src_id, dst_id, edge_kind)
 		SELECT $1, $2, $3
 		WHERE EXISTS (SELECT 1 FROM fornix.symbols WHERE id=$1 AND workspace_id=$4)
 		  AND EXISTS (SELECT 1 FROM fornix.symbols WHERE id=$2 AND workspace_id=$4)
 		ON CONFLICT DO NOTHING`, req.SrcID, req.DstID, req.EdgeKind, workspaceID)
 	if err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
 		writeErr(w, 500, "db: "+err.Error())
 		return
 	}
@@ -1535,25 +2342,71 @@ func (s *server) handleSymbolSearch(w http.ResponseWriter, r *http.Request) {
 	if req.Mode == "" {
 		req.Mode = "hybrid"
 	}
+	if req.Mode != "name" && req.Mode != "semantic" && req.Mode != "hybrid" {
+		writeErr(w, http.StatusBadRequest, "invalid mode")
+		return
+	}
+	defaultEmbeddingMode := queryEmbeddingModeAdaptive
+	if req.Mode == "semantic" {
+		defaultEmbeddingMode = queryEmbeddingModeRequired
+	}
+	req.EmbeddingMode = normalizeQueryEmbeddingMode(strings.ToLower(strings.TrimSpace(req.EmbeddingMode)), defaultEmbeddingMode)
+	if req.EmbeddingMode == "" {
+		writeErr(w, http.StatusBadRequest, "invalid embedding_mode")
+		return
+	}
+	if req.Mode == "semantic" && req.EmbeddingMode == queryEmbeddingModeDisabled {
+		writeErr(w, http.StatusBadRequest, "semantic mode requires embeddings")
+		return
+	}
 	workspaceID := requestWorkspace(r, req.WorkspaceID)
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
 	var qEmb []float32
+	gateReason := "embedding_not_requested"
 	if req.Mode == "semantic" || req.Mode == "hybrid" {
-		if e, err := s.embed(ctx, req.Query); err == nil {
-			qEmb = e
-		} else {
-			log.Printf("embed warn (symbol search): %v", err)
-			req.Mode = "name"
+		shouldEmbed := req.Mode == "semantic" || req.EmbeddingMode == queryEmbeddingModeRequired || req.EmbeddingMode == queryEmbeddingModeLegacy
+		if req.EmbeddingMode == queryEmbeddingModeDisabled {
+			shouldEmbed = false
+			gateReason = "embedding_disabled"
+		}
+		if req.Mode == "hybrid" && req.EmbeddingMode == queryEmbeddingModeAdaptive {
+			gate, gateErr := s.symbolDeterministicGate(ctx, workspaceID, req.Query, req.Repo, req.Kind, req.TopK)
+			if gateErr != nil {
+				writeErr(w, http.StatusInternalServerError, "deterministic symbol preflight failed")
+				return
+			}
+			gateReason = gate.Reason
+			shouldEmbed = !gate.Satisfied
+			if gate.Satisfied {
+				req.Mode = "name"
+			}
+		}
+		if shouldEmbed {
+			if e, err := s.embedQuery(ctx, s.embeddingRequest(workspaceID, requestActor(r), "symbol_query", sha256hex(req.Query), req.Query), "symbol", gateReason); err == nil {
+				qEmb = e
+			} else if req.Mode == "semantic" && req.EmbeddingMode == queryEmbeddingModeRequired {
+				writeErr(w, http.StatusServiceUnavailable, "semantic embedding is unavailable")
+				return
+			} else {
+				req.Mode = "name"
+				gateReason = "provider_unavailable"
+			}
 		}
 	}
 
+	tx, txErr := store.BeginWorkspaceTx(ctx, s.pool, workspaceID)
+	if txErr != nil {
+		writeErr(w, 500, "db: "+txErr.Error())
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	var rows pgx.Rows
 	var err error
 	switch req.Mode {
 	case "name":
-		rows, err = s.pool.Query(ctx, `
+		rows, err = tx.Query(ctx, `
 			SELECT id, repo, file_path, symbol_name, symbol_kind, language, line_start, line_end, COALESCE(signature,''),
 			       CASE WHEN symbol_name = $1 THEN 1.0
 			            WHEN symbol_name ILIKE $1 || '%' THEN 0.85
@@ -1567,7 +2420,7 @@ func (s *server) handleSymbolSearch(w http.ResponseWriter, r *http.Request) {
 			ORDER BY score DESC, symbol_name, id LIMIT $5`,
 			req.Query, req.Repo, req.Kind, workspaceID, req.TopK)
 	case "semantic":
-		rows, err = s.pool.Query(ctx, `
+		rows, err = tx.Query(ctx, `
 			SELECT id, repo, file_path, symbol_name, symbol_kind, language, line_start, line_end, COALESCE(signature,''),
 			       (1.0 - (embedding <=> $1)) AS score
 			FROM fornix.symbols
@@ -1578,7 +2431,7 @@ func (s *server) handleSymbolSearch(w http.ResponseWriter, r *http.Request) {
 			ORDER BY embedding <=> $1 ASC, id LIMIT $5`,
 			pgvector.NewVector(qEmb), workspaceID, req.Repo, req.Kind, req.TopK)
 	default: // hybrid: exact-name dominates; otherwise blend semantic + name signal
-		rows, err = s.pool.Query(ctx, `
+		rows, err = tx.Query(ctx, `
 			SELECT id, repo, file_path, symbol_name, symbol_kind, language, line_start, line_end, COALESCE(signature,''),
 			       CASE
 			         WHEN symbol_name = $2 THEN
@@ -1603,7 +2456,6 @@ func (s *server) handleSymbolSearch(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "db: "+err.Error())
 		return
 	}
-	defer rows.Close()
 	hits := []symbolHit{}
 	for rows.Next() {
 		var h symbolHit
@@ -1612,7 +2464,16 @@ func (s *server) handleSymbolSearch(w http.ResponseWriter, r *http.Request) {
 		}
 		hits = append(hits, h)
 	}
-	writeJSON(w, 200, map[string]any{"results": hits, "mode": req.Mode})
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
+	writeJSON(w, 200, map[string]any{"results": hits, "mode": req.Mode, "embedding_mode": req.EmbeddingMode, "gate_reason": gateReason})
 }
 
 func (s *server) handleSymbolNeighbours(w http.ResponseWriter, r *http.Request, id int64, direction string) {
@@ -1646,12 +2507,17 @@ func (s *server) handleSymbolNeighbours(w http.ResponseWriter, r *http.Request, 
 			WHERE e.src_id = $1 AND s.deleted_at IS NULL
 			ORDER BY s.repo, s.file_path, s.symbol_name, s.id`
 	}
-	rows, err := s.pool.Query(ctx, query, id, workspaceID)
+	tx, err := store.BeginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
 		writeErr(w, 500, "db: "+err.Error())
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = tx.Rollback(ctx) }()
+	rows, err := tx.Query(ctx, query, id, workspaceID)
+	if err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
 	type neighbour struct {
 		symbolHit
 		EdgeKind string `json:"edge_kind"`
@@ -1663,6 +2529,15 @@ func (s *server) handleSymbolNeighbours(w http.ResponseWriter, r *http.Request, 
 			continue
 		}
 		out = append(out, n)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
 	}
 	writeJSON(w, 200, map[string]any{"results": out, "direction": direction, "count": len(out)})
 }
@@ -1688,8 +2563,18 @@ func (s *server) handleSymbolReindex(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 	defer cancel()
 	workspaceID := requestWorkspace(r, "")
-	tag, err := s.pool.Exec(ctx, `UPDATE fornix.symbols SET deleted_at = now() WHERE workspace_id=$1 AND repo=$2 AND file_path=$3 AND deleted_at IS NULL`, workspaceID, req.Repo, req.FilePath)
+	tx, err := store.BeginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tag, err := tx.Exec(ctx, `UPDATE fornix.symbols SET deleted_at = now() WHERE workspace_id=$1 AND repo=$2 AND file_path=$3 AND deleted_at IS NULL`, workspaceID, req.Repo, req.FilePath)
+	if err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
 		writeErr(w, 500, "db: "+err.Error())
 		return
 	}
@@ -1719,7 +2604,13 @@ func (s *server) handleSessionRegister(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	var registeredWorkspace string
-	err := s.pool.QueryRow(ctx, `
+	tx, err := store.BeginWorkspaceTx(ctx, s.pool, workspaceID)
+	if err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	err = tx.QueryRow(ctx, `
 		INSERT INTO fornix.sessions (workspace_id, id, host, capabilities, status, last_heartbeat, registered_at)
 		VALUES ($1,$2,$3,$4,'idle', clock_timestamp(), clock_timestamp())
 		ON CONFLICT (workspace_id, id) DO UPDATE SET
@@ -1737,6 +2628,10 @@ func (s *server) handleSessionRegister(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, "db: "+err.Error())
 		return
 	}
+	if err := tx.Commit(ctx); err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
 	writeJSON(w, 200, map[string]any{"id": req.ID, "workspace_id": registeredWorkspace, "registered": true})
 }
 
@@ -1748,7 +2643,13 @@ func (s *server) handleSessionHeartbeat(w http.ResponseWriter, r *http.Request, 
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
 	workspaceID := requestWorkspace(r, "")
-	tag, err := s.pool.Exec(ctx, `
+	tx, err := store.BeginWorkspaceTx(ctx, s.pool, workspaceID)
+	if err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	tag, err := tx.Exec(ctx, `
 		UPDATE fornix.sessions
 		SET last_heartbeat=clock_timestamp(),
 		    status=CASE WHEN status='offline' THEN 'idle' ELSE status END
@@ -1759,6 +2660,10 @@ func (s *server) handleSessionHeartbeat(w http.ResponseWriter, r *http.Request, 
 	}
 	if tag.RowsAffected() == 0 {
 		writeErr(w, 404, "session not registered")
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeErr(w, 500, "db: "+err.Error())
 		return
 	}
 	writeJSON(w, 200, map[string]any{"id": id, "heartbeat": time.Now().UTC()})
@@ -1789,12 +2694,17 @@ func (s *server) handleSessionsList(w http.ResponseWriter, r *http.Request) {
 		query += fmt.Sprintf(" AND $%d = ANY(capabilities)", len(args))
 	}
 	query += " ORDER BY last_heartbeat DESC"
-	rows, err := s.pool.Query(ctx, query, args...)
+	tx, err := store.BeginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
 		writeErr(w, 500, "db: "+err.Error())
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = tx.Rollback(ctx) }()
+	rows, err := tx.Query(ctx, query, args...)
+	if err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
 	out := []sessionRow{}
 	for rows.Next() {
 		var sr sessionRow
@@ -1804,6 +2714,15 @@ func (s *server) handleSessionsList(w http.ResponseWriter, r *http.Request) {
 		}
 		sr.CurrentTaskID = current
 		out = append(out, sr)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
 	}
 	writeJSON(w, 200, map[string]any{"sessions": out, "count": len(out)})
 }
@@ -2188,26 +3107,61 @@ func (s *server) handleFederationPeerUpsert(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	var req federationPeerReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeErr(w, 400, "invalid json")
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid federation peer request")
 		return
 	}
-	if req.ID == "" || req.URL == "" || req.BearerToken == "" {
-		writeErr(w, 400, "id, url, bearer_token required")
+	workspaceID := requestWorkspace(r, req.WorkspaceID)
+	if workspaceID == "" || s.federation == nil {
+		writeErr(w, http.StatusServiceUnavailable, "workspace federation is unavailable")
 		return
+	}
+	requestID := strings.TrimSpace(req.RequestID)
+	if requestID == "" {
+		requestID = requestIDFromRequest(r)
+	}
+	idempotencyKey := strings.TrimSpace(req.IdempotencyKey)
+	if idempotencyKey == "" {
+		idempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	}
+	if idempotencyKey == "" {
+		idempotencyKey = requestID
+	}
+	actor := requestActor(r)
+	peer := contracts.FederationPeer{
+		SchemaVersion:       contracts.FederationSchemaVersion,
+		ID:                  req.ID,
+		WorkspaceID:         workspaceID,
+		RemoteWorkspaceID:   req.RemoteWorkspaceID,
+		EndpointURL:         req.EndpointURL,
+		CredentialRef:       req.CredentialRef,
+		AllowPrivateNetwork: req.AllowPrivateNetwork,
+		MaxMessages:         req.MaxMessages,
+		MaxResponseBytes:    req.MaxResponseBytes,
+		TimeoutMS:           req.TimeoutMS,
+		Status:              req.Status,
+		CreatedBy:           actor,
+	}
+	command := contracts.FederationPeerCommand{
+		SchemaVersion:  contracts.FederationSchemaVersion,
+		RequestID:      requestID,
+		IdempotencyKey: idempotencyKey,
+		WorkspaceID:    workspaceID,
+		Peer:           peer,
+		Actor:          actor,
+		CausationID:    requestID,
+		CorrelationID:  requestID,
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	_, err := s.pool.Exec(ctx, `
-		INSERT INTO fornix.federation_peers (id, url, bearer_token)
-		VALUES ($1,$2,$3)
-		ON CONFLICT (id) DO UPDATE SET url=EXCLUDED.url, bearer_token=EXCLUDED.bearer_token`,
-		req.ID, req.URL, req.BearerToken)
+	stored, duplicate, err := s.federation.CreatePeer(ctx, command)
 	if err != nil {
-		writeErr(w, 500, "db: "+err.Error())
+		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, 200, map[string]any{"id": req.ID, "registered": true})
+	writeJSON(w, http.StatusOK, map[string]any{"peer": stored, "registered": true, "duplicate": duplicate})
 }
 
 func (s *server) handleFederationPeersList(w http.ResponseWriter, r *http.Request) {
@@ -2215,25 +3169,158 @@ func (s *server) handleFederationPeersList(w http.ResponseWriter, r *http.Reques
 		writeErr(w, 401, "unauthorised")
 		return
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
-	rows, err := s.pool.Query(ctx, `SELECT id, url, last_pull_at, last_pull_high_water FROM fornix.federation_peers ORDER BY id`)
-	if err != nil {
-		writeErr(w, 500, "db: "+err.Error())
+	workspaceID := requestWorkspace(r, "")
+	if workspaceID == "" || s.federation == nil {
+		writeErr(w, http.StatusServiceUnavailable, "workspace federation is unavailable")
 		return
 	}
-	defer rows.Close()
-	out := []federationPeerRow{}
-	for rows.Next() {
-		var p federationPeerRow
-		var lpa *time.Time
-		if err := rows.Scan(&p.ID, &p.URL, &lpa, &p.LastPullHighWater); err != nil {
-			continue
+	limit := 100
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil {
+			limit = parsed
 		}
-		p.LastPullAt = lpa
-		out = append(out, p)
 	}
-	writeJSON(w, 200, map[string]any{"peers": out, "count": len(out)})
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	peers, err := s.federation.ListPeers(ctx, workspaceID, limit)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "federation peers unavailable")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"peers": peers, "count": len(peers)})
+}
+
+func (s *server) handleFederationPoll(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuth(r) {
+		writeErr(w, http.StatusUnauthorized, "unauthorised")
+		return
+	}
+	if s.federationPoll == nil {
+		writeErr(w, http.StatusServiceUnavailable, "federation poll credential authority is not configured")
+		return
+	}
+	var request contracts.FederationPollRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid federation poll request")
+		return
+	}
+	request.WorkspaceID = requestWorkspace(r, request.WorkspaceID)
+	request.Actor = requestActor(r)
+	if request.RequestID == "" {
+		request.RequestID = requestIDFromRequest(r)
+	}
+	if request.IdempotencyKey == "" {
+		request.IdempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	}
+	if request.OwnerID == "" {
+		request.OwnerID = request.Actor.ID
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+	attempt, err := s.federationPoll.Poll(ctx, request)
+	if err != nil {
+		if errors.Is(err, federationruntime.ErrRecoveryRequired) {
+			writeJSON(w, http.StatusConflict, map[string]any{"attempt": attempt, "recovery_required": true})
+			return
+		}
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"attempt": attempt})
+}
+
+func (s *server) handleFederationPollReconcile(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuth(r) {
+		writeErr(w, http.StatusUnauthorized, "unauthorised")
+		return
+	}
+	if s.federationPoll == nil {
+		writeErr(w, http.StatusServiceUnavailable, "federation poll authority is not configured")
+		return
+	}
+	var request contracts.FederationPollReconcileRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid federation reconciliation request")
+		return
+	}
+	request.WorkspaceID = requestWorkspace(r, request.WorkspaceID)
+	request.Actor = requestActor(r)
+	if request.OwnerID == "" {
+		request.OwnerID = request.Actor.ID
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+	defer cancel()
+	attempt, imported, err := s.federationPoll.Reconcile(ctx, request)
+	if err != nil {
+		if errors.Is(err, federationruntime.ErrRecoveryRequired) {
+			writeJSON(w, http.StatusConflict, map[string]any{"recovery_required": true})
+			return
+		}
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"attempt": attempt, "imported": imported})
+}
+
+func (s *server) handleFederationLegacyQuarantine(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuth(r) {
+		writeErr(w, http.StatusUnauthorized, "unauthorised")
+		return
+	}
+	workspaceID := requestWorkspace(r, "")
+	if workspaceID == "" || s.federation == nil {
+		writeErr(w, http.StatusServiceUnavailable, "workspace federation is unavailable")
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	if r.Method == http.MethodGet {
+		limit := 100
+		if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+			if parsed, err := strconv.Atoi(raw); err == nil {
+				limit = parsed
+			}
+		}
+		page, err := s.federation.ListLegacyQuarantine(ctx, workspaceID, r.URL.Query().Get("cursor"), limit)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "federation quarantine unavailable")
+			return
+		}
+		writeJSON(w, http.StatusOK, page)
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeErr(w, http.StatusMethodNotAllowed, "GET or POST only")
+		return
+	}
+	var request contracts.FederationLegacyQuarantineRequest
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid federation quarantine request")
+		return
+	}
+	request.AuditWorkspaceID = workspaceID
+	request.Actor = requestActor(r)
+	if request.RequestID == "" {
+		request.RequestID = requestIDFromRequest(r)
+	}
+	if request.IdempotencyKey == "" {
+		request.IdempotencyKey = strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	}
+	if request.IdempotencyKey == "" {
+		request.IdempotencyKey = request.RequestID
+	}
+	page, duplicate, err := s.federation.QuarantineLegacyPeers(ctx, request)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"page": page, "duplicate": duplicate})
 }
 
 // ---------- v0.8 router learning handlers ----------
@@ -2248,8 +3335,8 @@ func (s *server) handleRouterObservation(w http.ResponseWriter, r *http.Request)
 		writeErr(w, 400, "invalid json")
 		return
 	}
-	if req.RequestHash == "" || req.TaskCategory == "" || req.ModelID == "" {
-		writeErr(w, 400, "request_hash, task_category, model_id required")
+	if req.TaskCategory == "" || req.ModelID == "" {
+		writeErr(w, 400, "task_category, model_id required")
 		return
 	}
 	if req.Outcome == "" {
@@ -2266,20 +3353,38 @@ func (s *server) handleRouterObservation(w http.ResponseWriter, r *http.Request)
 		graded = req.OutcomeScore
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-	defer cancel()
-	var id int64
-	err := s.pool.QueryRow(ctx, `
-		INSERT INTO fornix.router_observations (request_hash, task_category, model_id, cost_usd, latency_ms, outcome, outcome_score)
-		VALUES ($1,$2,$3,$4,$5,$6,$7)
-		RETURNING id`,
-		req.RequestHash, req.TaskCategory, req.ModelID, req.CostUSD, req.LatencyMs, req.Outcome, graded,
-	).Scan(&id)
-	if err != nil {
-		writeErr(w, 500, "db: "+err.Error())
+	workspaceID := requestWorkspace(r, "")
+	if workspaceID == "" || s.coordination == nil {
+		writeErr(w, http.StatusServiceUnavailable, "workspace router is unavailable")
 		return
 	}
-	writeJSON(w, 200, map[string]any{"id": id, "recorded": true, "outcome_score": graded, "graded": req.OutcomeScore == nil})
+	requestID := requestIDFromRequest(r)
+	idempotencyKey := strings.TrimSpace(r.Header.Get("Idempotency-Key"))
+	if idempotencyKey == "" {
+		idempotencyKey = strings.TrimSpace(req.RequestHash)
+		if idempotencyKey == "" {
+			idempotencyKey = requestID
+		}
+	}
+	if requestID == "" {
+		requestID = idempotencyKey
+	}
+	// request_hash was a legacy caller-supplied marker and was not a canonical
+	// hash. The new store derives the authoritative hash from normalized fields
+	// while retaining the marker as the default idempotency key.
+	observation := contracts.RouterObservation{WorkspaceID: workspaceID, RequestID: requestID, IdempotencyKey: idempotencyKey, TaskCategory: req.TaskCategory, ModelID: req.ModelID, CostUSD: req.CostUSD, LatencyMS: int64(req.LatencyMs), Outcome: req.Outcome, OutcomeScore: graded, Actor: requestActor(r), CausationID: r.Header.Get("X-Causation-ID"), CorrelationID: r.Header.Get("X-Correlation-ID")}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	stored, duplicate, err := s.coordination.AppendRouterObservation(ctx, observation)
+	if err != nil {
+		if errors.Is(err, store.ErrRouterObservationConflict) {
+			writeErr(w, http.StatusConflict, err.Error())
+			return
+		}
+		writeErr(w, http.StatusInternalServerError, "db: "+err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"id": stored.ID, "recorded": true, "duplicate": duplicate, "outcome_score": stored.OutcomeScore, "graded": req.OutcomeScore == nil})
 }
 
 // gradeOutcome assigns a 0..1 quality score from coarse signals on the
@@ -2321,42 +3426,19 @@ func (s *server) handleRouterRecommend(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "category required")
 		return
 	}
+	workspaceID := requestWorkspace(r, "")
+	if workspaceID == "" || s.coordination == nil {
+		writeErr(w, http.StatusServiceUnavailable, "workspace router is unavailable")
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
 	defer cancel()
-	rows, err := s.pool.Query(ctx, `
-		SELECT model_id,
-		       AVG(cost_usd)::float8 AS cost_usd_avg,
-		       percentile_cont(0.5) WITHIN GROUP (ORDER BY latency_ms)::float8 AS latency_p50,
-		       (SUM(CASE WHEN outcome='success' THEN 1 ELSE 0 END)::float8 / NULLIF(COUNT(*),0))::float8 AS success_rate,
-		       COUNT(*)::int AS sample_size
-		FROM fornix.router_observations
-		WHERE task_category = $1 AND observed_at > now() - INTERVAL '30 days'
-		GROUP BY model_id
-		HAVING COUNT(*) >= 1`, category)
+	recommendations, err := s.coordination.Recommend(ctx, workspaceID, category, 100)
 	if err != nil {
 		writeErr(w, 500, "db: "+err.Error())
 		return
 	}
-	defer rows.Close()
-	out := []routerRecommendation{}
-	for rows.Next() {
-		var rec routerRecommendation
-		if err := rows.Scan(&rec.ModelID, &rec.CostUSDAvg, &rec.LatencyP50, &rec.SuccessRate, &rec.SampleSize); err != nil {
-			continue
-		}
-		out = append(out, rec)
-	}
-	// Sort by (success_rate / cost_usd_avg) DESC — cheapest model meeting quality wins.
-	for i := 0; i < len(out); i++ {
-		for j := i + 1; j < len(out); j++ {
-			si := out[i].SuccessRate / max(out[i].CostUSDAvg, 1e-9)
-			sj := out[j].SuccessRate / max(out[j].CostUSDAvg, 1e-9)
-			if sj > si {
-				out[i], out[j] = out[j], out[i]
-			}
-		}
-	}
-	writeJSON(w, 200, map[string]any{"category": category, "recommendations": out})
+	writeJSON(w, http.StatusOK, map[string]any{"category": category, "recommendations": recommendations})
 }
 
 // ---------- background workers ----------
@@ -2395,6 +3477,47 @@ func (s *server) federationPoller(ctx context.Context) {
 			return
 		case <-t.C:
 			s.pollPeersOnce(ctx)
+		}
+	}
+}
+
+// federationRetentionOwner runs only when explicitly enabled. Each pass
+// acquires a workspace-scoped Postgres consumer lease before selecting any
+// operational rows; takeover and stale-worker rejection are enforced inside
+// the same transaction as tombstones, deletion, and the audit event.
+func (s *server) federationRetentionOwner(ctx context.Context) {
+	if s == nil || s.retentionOwner == nil {
+		return
+	}
+	interval := s.retentionInterval
+	if interval <= 0 {
+		interval = time.Hour
+	}
+	run := func() {
+		result, err := s.retentionOwner.RunOnce(ctx, federationruntime.RetentionOwnerRequest{
+			BatchSize:      s.retentionBatchSize,
+			WorkspaceLimit: s.retentionWorkspaceLimit,
+			Actor:          contracts.ActorRef{ID: s.retentionOwner.OwnerID, Kind: "service"},
+			CausationID:    "server.retention.owner",
+			CorrelationID:  s.retentionOwner.OwnerID,
+		})
+		if err != nil {
+			log.Printf("federation retention owner: %v", err)
+			return
+		}
+		if result.SweepsFailed > 0 {
+			log.Printf("federation retention owner: scanned=%d committed=%d failed=%d busy=%d", result.WorkspacesScanned, result.SweepsCommitted, result.SweepsFailed, result.LeasesBusy)
+		}
+	}
+	run()
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			run()
 		}
 	}
 }
@@ -2563,6 +3686,24 @@ func (s *server) routes() http.Handler {
 	})
 	mux.HandleFunc("/v1/operator/ingest/jobs/", s.handleIngestJob)
 	mux.HandleFunc("/v1/operator/ingest/jobs", s.handleIngestJobs)
+	mux.HandleFunc("/v1/qualification/signers/", s.handleQualificationSigners)
+	mux.HandleFunc("/v1/qualification/signers", s.handleQualificationSigners)
+	mux.HandleFunc("/v1/qualification/import", s.handleQualificationImport)
+	mux.HandleFunc("/v1/qualification/imports/", s.handleQualificationImports)
+	mux.HandleFunc("/v1/qualification/imports", s.handleQualificationImports)
+	mux.HandleFunc("/v1/qualification/snapshots/", s.handleQualificationSnapshots)
+	mux.HandleFunc("/v1/qualification/snapshots", s.handleQualificationSnapshots)
+	mux.HandleFunc("/v1/qualification/readiness/snapshots/", s.handleReadinessSnapshots)
+	mux.HandleFunc("/v1/qualification/readiness/snapshots", s.handleReadinessSnapshots)
+	mux.HandleFunc("/v1/qualification/readiness/policies/", s.handleReadinessPolicies)
+	mux.HandleFunc("/v1/qualification/readiness/policies", s.handleReadinessPolicies)
+	mux.HandleFunc("/v1/qualification/readiness/review", s.handleReadinessReview)
+	mux.HandleFunc("/v1/qualification/readiness/retention/", s.handleQualificationRetention)
+	mux.HandleFunc("/v1/qualification/readiness/retention", s.handleQualificationRetention)
+	mux.HandleFunc("/v1/qualification/refresh-schedules/", s.handleQualificationRefreshSchedules)
+	mux.HandleFunc("/v1/qualification/refresh-schedules", s.handleQualificationRefreshSchedules)
+	mux.HandleFunc("/v1/qualification/releases/", s.handleDeploymentEvidence)
+	mux.HandleFunc("/v1/qualification/releases", s.handleDeploymentEvidence)
 	mux.HandleFunc("/v1/observability/metrics", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			writeErr(w, http.StatusMethodNotAllowed, "GET only")
@@ -2721,12 +3862,26 @@ func (s *server) routes() http.Handler {
 		}
 		s.handleModelComplete(w, r)
 	})
+	mux.HandleFunc("/v1/embedding-calls/reconcile", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleEmbeddingRecovery(w, r)
+	})
 	mux.HandleFunc("/v1/tools/execute", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			writeErr(w, http.StatusMethodNotAllowed, "POST only")
 			return
 		}
 		s.handleToolExecute(w, r)
+	})
+	mux.HandleFunc("/v1/tools/recovery", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleToolRecovery(w, r)
 	})
 	mux.HandleFunc("/v1/tools/approvals/", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost || !strings.HasSuffix(r.URL.Path, "/decide") {
@@ -2741,6 +3896,65 @@ func (s *server) routes() http.Handler {
 			return
 		}
 		s.handleAgentRunCreate(w, r)
+	})
+	mux.HandleFunc("/v1/incident/workflows", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleIncidentWorkflowStart(w, r)
+	})
+	mux.HandleFunc("/v1/incident/workflows/", func(w http.ResponseWriter, r *http.Request) {
+		rest := strings.TrimPrefix(r.URL.Path, "/v1/incident/workflows/")
+		parts := strings.Split(strings.Trim(rest, "/"), "/")
+		if len(parts) == 0 || parts[0] == "" {
+			writeErr(w, http.StatusNotFound, "incident workflow id required")
+			return
+		}
+		runID := parts[0]
+		if len(parts) == 1 && r.Method == http.MethodGet {
+			s.handleIncidentWorkflowGet(w, r, runID)
+			return
+		}
+		if len(parts) == 2 && parts[1] == "approve" && r.Method == http.MethodPost {
+			s.handleIncidentWorkflowApprove(w, r, runID)
+			return
+		}
+		if len(parts) == 2 && parts[1] == "replay" && r.Method == http.MethodPost {
+			s.handleIncidentWorkflowReplay(w, r, runID)
+			return
+		}
+		writeErr(w, http.StatusNotFound, "unknown incident workflow operation")
+	})
+	mux.HandleFunc("/v1/workflows", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleGenericWorkflowCreate(w, r)
+	})
+	mux.HandleFunc("/v1/workflows/", s.handleGenericWorkflow)
+	mux.HandleFunc("/v1/operations/", s.handleOperation)
+	mux.HandleFunc("/v1/operations/claims", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleOperationClaims(w, r)
+	})
+	mux.HandleFunc("/v1/operation-effects/recovery", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeErr(w, http.StatusMethodNotAllowed, "GET only")
+			return
+		}
+		s.handleRecoverableEffects(w, r)
+	})
+	mux.HandleFunc("/v1/operations", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleOperationCreate(w, r)
 	})
 	mux.HandleFunc("/v1/agent/runs", s.handleAgentRunList)
 	mux.HandleFunc("/v1/agent/run/", func(w http.ResponseWriter, r *http.Request) {
@@ -3061,7 +4275,22 @@ func (s *server) routes() http.Handler {
 		}
 		s.handleFederationPeerUpsert(w, r)
 	})
+	mux.HandleFunc("/v1/federation/peer/poll", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleFederationPoll(w, r)
+	})
+	mux.HandleFunc("/v1/federation/poll/reconcile", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, "POST only")
+			return
+		}
+		s.handleFederationPollReconcile(w, r)
+	})
 	mux.HandleFunc("/v1/federation/peers", s.handleFederationPeersList)
+	mux.HandleFunc("/v1/federation/legacy-quarantine", s.handleFederationLegacyQuarantine)
 
 	// ---------- v0.8 router learning ----------
 	mux.HandleFunc("/v1/router/observation", func(w http.ResponseWriter, r *http.Request) {

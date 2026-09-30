@@ -1,17 +1,21 @@
 # Fornix
 
-Fornix is **verifiable AI work infrastructure for long-running repository
-operations**.
+Fornix is a **control plane for AI work against systems that matter**.
 
-Teams can already ask AI to suggest code. The harder problem is allowing AI to
-perform important work—dependency upgrades, security remediation, migrations,
-large refactors, CI repair, and repository maintenance—without losing control
-of scope, cost, evidence, approval, or recovery.
+It is verifiable AI work infrastructure for long-running production-system
+operations: bounded, durable, evidence-backed work with explicit scope,
+policy, approval, recovery, cost controls, and replay.
+
+Teams can already ask AI to suggest changes. The harder problem is allowing AI
+to perform important work against production systems—repositories, APIs,
+databases, cloud resources, ticketing systems, and internal operations—without
+losing control of scope, cost, evidence, approval, or recovery. Repository
+maintenance is Fornix's first concrete adapter, not its ceiling.
 
 Fornix is being built to close that gap:
 
-> **Delegate serious repository work to AI without losing the ability to bound,
-> understand, recover, and replay it.**
+> **Delegate serious production-system work to AI without losing the ability to
+> bound, understand, recover, and replay it.**
 
 The technical form is an efficiency-first AI harness. The product outcome is
 safe autonomous work. Fornix uses exact state, deterministic routing, and
@@ -19,12 +23,17 @@ bounded retrieval first, spending model tokens only when remaining ambiguity
 justifies them.
 
 Fornix is open source and currently alpha. The durable control and retrieval
-substrate is usable and tested, but the complete unattended repository
-maintenance product is still being built.
+substrate is usable and tested, but the complete autonomous production-system
+operations product is still being built.
 
 Read the [product vision](docs/01-product-vision.md) for the problem, target
 user, flagship workflow, and the distinction between the current alpha and the
 longer-term product.
+
+The canonical top-down explanation of the universal direction is the
+[Universal AI work control plane](docs/68-universal-work-control-plane.md).
+It describes the domain-neutral lifecycle first and the repository adapter
+second.
 
 ## The problem Fornix solves
 
@@ -60,6 +69,51 @@ current alpha already stores most of the underlying control-plane facts; the
 reference workflow assembles them into one immutable, hash-stable receipt
 without claiming that remote work was exactly-once.
 
+## The universal control-plane model
+
+Fornix is designed to govern work against repositories, APIs, databases, cloud
+resources, ticketing systems, and internal business systems through explicit
+typed adapters. The universal lifecycle is:
+
+```text
+intent
+  → scope and identity
+  → capability admission and policy
+  → approval and budgets
+  → durable fenced execution
+  → evidence, artifacts, and external-effect records
+  → validation and verification
+  → Work Receipt
+  → replay and evaluation
+```
+
+The repository adapter is the first concrete adapter and qualification path.
+Bounded HTTP/API and read-only SQL adapters also exist as alpha reference
+implementations, but they are not live-production-qualified. Cloud, ticketing,
+and generic effectful execution remain adapter and recovery work. See
+[`docs/02-what-works-today.md`](docs/02-what-works-today.md) for the concise
+capability map, the [universal work control plane overview](docs/68-universal-work-control-plane.md)
+for the architecture, and the [production qualification](docs/14-production-readiness-qualification.md)
+for verified boundaries.
+
+### What Fornix is relative to adjacent tools
+
+Fornix is not trying to replace every model SDK, agent framework, workflow
+engine, task queue, or connector. It provides the durable control plane around
+those layers:
+
+| Layer | Primary responsibility | Fornix’s relationship |
+| --- | --- | --- |
+| Model SDK | Call a model provider | Govern the bounded model step, usage, cost, evidence, and failure boundary |
+| Agent framework | Compose prompts, turns, and tools | Add durable scope, admission, recovery, provenance, and replay |
+| Workflow engine | Coordinate process execution | Add AI-specific context, approval, cost, and external-effect semantics |
+| Task queue | Dispatch work | Add authoritative operation identity, fencing, verification, and receipts |
+| Connector system | Access one external system | Standardize capability admission, policy, evidence, and lifecycle |
+
+Fornix can integrate with existing agent clients and runtimes. A team should
+not need to replace its preferred model or chat interface to gain bounded,
+inspectable work.
+
 ## What Fornix is—and is not
 
 Fornix is:
@@ -68,12 +122,15 @@ Fornix is:
 - a deterministic-first retrieval and context compiler;
 - a bounded model, tool, and agent-run execution substrate;
 - a workspace-scoped operator API, CLI, and MCP compatibility surface;
+- a domain-neutral operation vocabulary for typed systems, resources,
+  connectors, capabilities, effects, evidence, plans, and results;
 - a repository ingestion path for explicitly mounted local repositories.
 
 In the product direction, these capabilities combine into a safe,
-workspace-scoped runtime for repository maintenance. Fornix should integrate
-with existing agent clients and runtimes where possible rather than requiring
-every team to replace its preferred model or chat interface.
+workspace-scoped runtime for production-system operations. Repository
+maintenance is the first adapter and qualification path. Fornix should
+integrate with existing agent clients and runtimes where possible rather than
+requiring every team to replace its preferred model or chat interface.
 
 Fornix is not currently:
 
@@ -87,18 +144,23 @@ Fornix is not currently:
 These boundaries are intentional. The current qualification and gap list are
 maintained in [`docs/14-production-readiness-qualification.md`](docs/14-production-readiness-qualification.md).
 
+For a quick answer about supported domains, read
+[`docs/02-what-works-today.md`](docs/02-what-works-today.md). For the meaning
+of workspace, operation, capability, lease, fence, effect, evidence, artifact,
+and replay, read [`docs/03-concepts.md`](docs/03-concepts.md).
+
 ## How the architecture works
 
-At a high level, a request follows this shape:
+At a high level, a domain-neutral request follows this shape:
 
 ```text
-workspace + authenticated actor
-  → task and ownership/fencing
-  → deterministic retrieval and bounded context
-  → optional model step
-  → policy-controlled structured tool step
-  → durable checkpoint, evidence, and artifact
-  → projection, metrics, inspection, and replay
+intent + authenticated actor + workspace
+  → resource and capability admission
+  → policy, approval, and budgets
+  → durable ownership/fencing and checkpointed steps
+  → connector/model/tool execution
+  → evidence, artifacts, validation, and cost
+  → Work Receipt, inspection, and replay
 ```
 
 Postgres is the initial authority for control state, event history,
@@ -130,6 +192,9 @@ The current implementation includes the following tested slices:
 - bounded agent runs and a Postgres-backed single-node scheduler;
 - workspace identities, RBAC, hashed/expirable/revocable/rotatable API keys,
   credential references, and authorization audit records;
+- controlled outbound policy plus managed credential source-version/expiry
+  binding, and opt-in Ed25519-signed capability-schema catalogs with durable
+  Postgres publication, monotonic revisions, and fail-closed admission;
 - content-addressed Postgres artifacts, output links, retention/integrity
   operations, observations, cost accounting, offline evaluation, and
   retrieval-surface capture;
@@ -147,10 +212,43 @@ The current implementation includes the following tested slices:
   admission;
 - operator workspace/bootstrap, inspection, evaluation, disclosure, and
   durable repository-ingestion commands.
+- a domain-neutral durable workflow runtime with typed model/tool/connector,
+  approval/human/callback, validation, compensation, wait, retry, checkpoint,
+  fencing, and inert replay seams; repository maintenance is only one adapter.
+- a generic Postgres operation queue and adapter-owned worker boundary with
+  deterministic claims, heartbeats, cancellation, expiry takeover, and
+  fail-closed fencing; it does not dispatch providers or claim exactly-once
+  remote execution.
+- an explicit-workspace supervisor with deterministic round-robin turns,
+  bounded concurrency, workspace active-lease quotas, and declared resource
+  serialization; this is a scheduling foundation, not autoscaling or a
+  universal provider dispatcher.
 
 The [HTTP API reference](docs/53-http-api-reference.md) maps the current
 routes. The [production qualification](docs/14-production-readiness-qualification.md)
 records what has been verified and what remains outside the current slice.
+
+## Universal transformation roadmap
+
+The historical implementation loops built the deterministic control and
+retrieval substrate. The next transformation makes generic operations,
+connectors, effects, policy, and workflows first-class:
+
+| Issue | Scope | Status |
+| --- | --- | --- |
+| [#38](https://github.com/Kshitij-M/fornix/issues/38) | Universal transformation umbrella | Active roadmap |
+| [#41](https://github.com/Kshitij-M/fornix/issues/41) | Domain-neutral contracts and adapter boundary | Implemented alpha slice |
+| [#45](https://github.com/Kshitij-M/fornix/issues/45) | Connector and capability registry | Implemented alpha slice; process-local |
+| [#39](https://github.com/Kshitij-M/fornix/issues/39) | Durable generic operation authority | Alpha foundation implemented; final qualification and adapter integration remain |
+| [#46](https://github.com/Kshitij-M/fornix/issues/46) | Universal policy, approvals, and external effects | Alpha Postgres admission/effect foundation; connector qualification remains |
+| [#43](https://github.com/Kshitij-M/fornix/issues/43) | HTTP/API and read-only SQL connectors | Alpha bounded reference adapters; SQL v2 accepts only structured queries (no caller-authored SQL); production qualification remains |
+| [#44](https://github.com/Kshitij-M/fornix/issues/44) | Durable multi-step workflow runtime | Alpha foundation implemented; qualification remains |
+| [#42](https://github.com/Kshitij-M/fornix/issues/42) | Multi-domain reference workflow | Fake-first alpha workflow implemented; production qualification remains |
+| [#40](https://github.com/Kshitij-M/fornix/issues/40) | Universal production qualification | In progress: authority, RLS, capacity, queue-claim, adapter-worker, managed-credential, signed-schema, effect-dispatch, and embedding-recovery qualification slices; production security, fairness, HA, live-provider, backup/restore, and operational evidence remain |
+
+This roadmap is not a claim that the complete universal production platform
+already exists. It is the sequence for extending the implemented control-plane
+substrate beyond the repository adapter.
 
 ## Quickstart: Fornix Local
 
@@ -244,6 +342,29 @@ gated write boundary for explicitly configured local mounts; it does not yet
 automatically turn every agent response into a proposed patch or provide a
 host-independent sandbox.
 
+The first non-repository reference workflow is also available as a bounded,
+fake-first incident investigation flow. It accepts a typed monitoring event,
+reads a runbook through a connector seam, builds evidence-backed diagnostics,
+pauses for approval, records an idempotent remediation attempt, verifies the
+recorded external state, and produces a replayable result. It is a showcase
+of the universal control-plane contract—not a live monitoring or remediation
+integration.
+
+With the service running, exercise it through the shared HTTP/CLI/MCP surface:
+
+```sh
+bin/fornix incident start --workspace reference-local \
+  --source monitor --external-id payment-1 \
+  --payload '{"service":"payments","status":"degraded"}'
+bin/fornix incident approve --workspace reference-local \
+  --run-id <run-id> --decision approve
+bin/fornix incident replay --workspace reference-local --run-id <run-id>
+```
+
+The default incident adapter is deterministic and offline. No live external
+effect is enabled by this workflow, and rejection, duplicate delivery,
+workspace isolation, crash recovery, and inert replay are tested explicitly.
+
 With the service running:
 
 ```sh
@@ -306,6 +427,8 @@ The most useful entry points are:
   — verified capabilities and explicit production gaps.
 - [Reference reuse matrix](docs/13-reference-reuse-matrix.md) — research
   sources, independent reimplementation decisions, and license boundaries.
+- [Connector and capability foundation](docs/67-connector-capability-foundation.md)
+  — explicit adapter registration, fail-closed admission, and conformance.
 - [Contributing](CONTRIBUTING.md) and [Security](SECURITY.md) — how to help
   safely and how to report security concerns.
 
@@ -316,6 +439,8 @@ cmd/fornix/                 service and operator CLI entrypoint
 cmd/fornix-watcher/         filesystem watcher and indexing loop
 cmd/fornix-eval/            offline retrieval-evaluation CLI
 internal/contracts/         typed control-plane contracts
+internal/connector/         connector registry, admission, execution, conformance
+internal/adapters/          domain-specific connector implementations
 internal/model/             provider registry, gateway, and adapters
 internal/tool/              tool registry, policy, approvals, and executor
 internal/scheduler/         durable agent-run scheduling and recovery
@@ -330,12 +455,16 @@ fixtures/                   small deterministic development fixtures
 ## Status and roadmap boundary
 
 Fornix is intentionally being developed as a sequence of small, testable
-control-plane slices that lead toward safe autonomous repository work. The
+control-plane slices that lead toward safe autonomous production-system work.
+Repository maintenance is the first adapter and qualification path. The
 current alpha still lacks a fully automated agent-to-change workflow, OAuth/SSO,
-external KMS or secret-manager integration, PostgreSQL row-level security,
+a deployment-specific KMS or secret-manager adapter and a hosted production deployment
+that has completed the role-separated PostgreSQL/RLS qualification,
 general background evaluation and ingestion scheduling, multi-agent execution
-graphs, a general sandbox provider, external artifact storage, backup/restore
-drills, capacity benchmarks, and high-availability operations.
+graphs, a general sandbox provider, external artifact storage, deployment-
+specific backup/PITR/HA operations, and capacity benchmarks. A destructive
+logical backup/restore qualification drill exists, but it is not a production
+RPO/RTO or failover guarantee.
 
 The roadmap is expressed as architecture and completion records rather than
 an implied promise that every planned feature is production-ready. If you are

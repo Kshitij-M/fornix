@@ -25,6 +25,22 @@ func TestOSExecutorCapturesStructuredOutputAndExit(t *testing.T) {
 	}
 }
 
+func TestSafeDockerDiagnosticRedactsCredentialsAndBoundsOutput(t *testing.T) {
+	secret := "fornix-test-secret-value"
+	dsn := "postgres://fornix:" + secret + "@db/fornix"
+	serviceURL := "https://user:" + secret + "@service.invalid"
+	diagnostic := safeDockerDiagnostic("db Pulling\ndb Pulled\nError response from daemon: failed to resolve image dsn="+dsn+" url="+serviceURL, []string{"FORNIX_DATABASE_PASSWORD=" + secret, "FORNIX_PG_DSN=" + dsn, "FORNIX_SERVICE_URL=" + serviceURL})
+	if strings.Contains(diagnostic, secret) || strings.Contains(diagnostic, "@db") || strings.Contains(diagnostic, "service.invalid") {
+		t.Fatalf("diagnostic leaked credential material: %q", diagnostic)
+	}
+	if !strings.Contains(diagnostic, "Error response") || strings.Contains(diagnostic, "Pulling") || !strings.Contains(diagnostic, "[redacted]") {
+		t.Fatalf("diagnostic did not select the actionable redacted error: %q", diagnostic)
+	}
+	if len(safeDockerDiagnostic(strings.Repeat("x", 400), nil)) != 240 {
+		t.Fatal("diagnostic was not truncated to its output bound")
+	}
+}
+
 func TestOSExecutorEnforcesOutputLimit(t *testing.T) {
 	command := helperCommand("repeat", "x", "128")
 	command.MaxStdoutBytes = 16

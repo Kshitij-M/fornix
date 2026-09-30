@@ -36,7 +36,7 @@ func (s *EvaluationStore) CreateDataset(ctx context.Context, dataset contracts.E
 		return contracts.EvalDataset{}, false, err
 	}
 	cases, _ := json.Marshal(dataset.Cases)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, dataset.WorkspaceID)
 	if err != nil {
 		return contracts.EvalDataset{}, false, err
 	}
@@ -63,7 +63,7 @@ func (s *EvaluationStore) GetDataset(ctx context.Context, workspaceID, name stri
 	if s == nil || s.pool == nil {
 		return contracts.EvalDataset{}, fmt.Errorf("evaluation store is not configured")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, strings.TrimSpace(workspaceID))
 	if err != nil {
 		return contracts.EvalDataset{}, err
 	}
@@ -81,7 +81,7 @@ func (s *EvaluationStore) GetDatasetByID(ctx context.Context, workspaceID, id st
 	if s == nil || s.pool == nil {
 		return contracts.EvalDataset{}, fmt.Errorf("evaluation store is not configured")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, strings.TrimSpace(workspaceID))
 	if err != nil {
 		return contracts.EvalDataset{}, err
 	}
@@ -125,7 +125,7 @@ func (s *EvaluationStore) StartRun(ctx context.Context, run contracts.EvalRun) (
 	if len(report) == 0 {
 		report = []byte(`{}`)
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, run.WorkspaceID)
 	if err != nil {
 		return contracts.EvalRun{}, false, err
 	}
@@ -152,11 +152,17 @@ func (s *EvaluationStore) GetRun(ctx context.Context, workspaceID, id string) (c
 	if s == nil || s.pool == nil {
 		return contracts.EvalRun{}, fmt.Errorf("evaluation store is not configured")
 	}
+	workspaceID = strings.TrimSpace(workspaceID)
 	var run contracts.EvalRun
 	var gates, quality, regressions, report []byte
 	var reportArtifactID *int64
 	var finished *time.Time
-	err := s.pool.QueryRow(ctx, `SELECT id,workspace_id,dataset_id,dataset_hash,idempotency_key,request_hash,schema_version,status,dry_run,batch_limit,cases_total,cases_completed,cases_passed,cases_failed,cost_usd,cost_known,replay_hash,gates,retrieval_quality,regressions,baseline_eval_run_id,report,report_artifact_id,created_at,finished_at FROM fornix.eval_runs WHERE workspace_id=$1 AND id=$2`, workspaceID, id).Scan(&run.ID, &run.WorkspaceID, &run.DatasetID, &run.DatasetHash, &run.IdempotencyKey, &run.RequestHash, &run.SchemaVersion, &run.Status, &run.DryRun, &run.BatchLimit, &run.CasesTotal, &run.CasesCompleted, &run.CasesPassed, &run.CasesFailed, &run.CostUSD, &run.CostKnown, &run.ReplayHash, &gates, &quality, &regressions, &run.BaselineEvalRunID, &report, &reportArtifactID, &run.CreatedAt, &finished)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
+	if err != nil {
+		return run, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	err = tx.QueryRow(ctx, `SELECT id,workspace_id,dataset_id,dataset_hash,idempotency_key,request_hash,schema_version,status,dry_run,batch_limit,cases_total,cases_completed,cases_passed,cases_failed,cost_usd,cost_known,replay_hash,gates,retrieval_quality,regressions,baseline_eval_run_id,report,report_artifact_id,created_at,finished_at FROM fornix.eval_runs WHERE workspace_id=$1 AND id=$2`, workspaceID, id).Scan(&run.ID, &run.WorkspaceID, &run.DatasetID, &run.DatasetHash, &run.IdempotencyKey, &run.RequestHash, &run.SchemaVersion, &run.Status, &run.DryRun, &run.BatchLimit, &run.CasesTotal, &run.CasesCompleted, &run.CasesPassed, &run.CasesFailed, &run.CostUSD, &run.CostKnown, &run.ReplayHash, &gates, &quality, &regressions, &run.BaselineEvalRunID, &report, &reportArtifactID, &run.CreatedAt, &finished)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return run, ErrEvalNotFound
 	}
@@ -169,13 +175,16 @@ func (s *EvaluationStore) GetRun(ctx context.Context, workspaceID, id string) (c
 	run.Report = append([]byte(nil), report...)
 	run.FinishedAt = finished
 	if reportArtifactID != nil && *reportArtifactID > 0 && s.artifacts != nil {
-		artifact, err := s.artifacts.Get(ctx, workspaceID, *reportArtifactID)
+		artifact, err := readArtifactTx(ctx, tx, workspaceID, *reportArtifactID, false)
 		if err == nil {
-			ref, refErr := readArtifactRef(ctx, s.pool, `WHERE r.workspace_id=$1 AND r.artifact_id=$2 AND r.source_kind='eval_run' AND r.source_id=$3 AND r.role='report'`, workspaceID, artifact.ID, id)
+			ref, refErr := readArtifactRef(ctx, tx, `WHERE r.workspace_id=$1 AND r.artifact_id=$2 AND r.source_kind='eval_run' AND r.source_id=$3 AND r.role='report'`, workspaceID, artifact.ID, id)
 			if refErr == nil {
 				run.ReportArtifact = &ref
 			}
 		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return run, err
 	}
 	return run, nil
 }
@@ -202,7 +211,7 @@ func (s *EvaluationStore) RecordResult(ctx context.Context, result contracts.Eva
 	if string(regressions) == "null" {
 		regressions = []byte(`[]`)
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, result.WorkspaceID)
 	if err != nil {
 		return contracts.EvalResult{}, false, err
 	}
@@ -258,7 +267,7 @@ func (s *EvaluationStore) FinishRun(ctx context.Context, run contracts.EvalRun, 
 	if len(inline) == 0 {
 		inline = []byte(`{}`)
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, run.WorkspaceID)
 	if err != nil {
 		return contracts.EvalRun{}, err
 	}

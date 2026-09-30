@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 )
@@ -15,6 +16,8 @@ type recordingExecutor struct {
 	commands []Command
 	result   Result
 	err      error
+	results  []Result
+	errors   []error
 }
 
 func (e *recordingExecutor) Execute(_ context.Context, command Command) (Result, error) {
@@ -22,7 +25,15 @@ func (e *recordingExecutor) Execute(_ context.Context, command Command) (Result,
 	defer e.mu.Unlock()
 	command.Args = append([]string(nil), command.Args...)
 	e.commands = append(e.commands, command)
-	return e.result, e.err
+	index := len(e.commands) - 1
+	result, err := e.result, e.err
+	if index < len(e.results) {
+		result = e.results[index]
+	}
+	if index < len(e.errors) {
+		err = e.errors[index]
+	}
+	return result, err
 }
 
 func (e *recordingExecutor) snapshot() []Command {
@@ -92,6 +103,39 @@ func TestManagerPropagatesBoundedExecutorFailure(t *testing.T) {
 	result, err := manager.Start(context.Background())
 	if !errors.Is(err, ErrCommandOutputLimit) || !result.Truncated {
 		t.Fatalf("result=%+v error=%v, want bounded output failure", result, err)
+	}
+}
+
+func TestManagerAddsRedactedServiceLogsWhenContainerIsUnhealthy(t *testing.T) {
+	profile, err := NewProfile(filepath.Join(t.TempDir(), "profiles", "local"), "local")
+	if err != nil {
+		t.Fatal(err)
+	}
+	config, err := DefaultManifestConfig("v0.10.1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := "fornix-runtime-test-secret"
+	dsn := "postgres://fornix:" + secret + "@db/fornix"
+	executor := &recordingExecutor{
+		results: []Result{{}, {Stdout: "Fornix startup failed while connecting to " + dsn}},
+		errors:  []error{&CommandError{Executable: "docker", ExitCode: 1, Diagnostic: "container fornix-local-fornix-1 is unhealthy"}, nil},
+	}
+	manager, err := NewManagerWithEnvironment(profile, config, executor, "docker", DefaultLimits(), []string{"FORNIX_PG_DSN=" + dsn, "FORNIX_DATABASE_PASSWORD=" + secret})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = manager.Start(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "Fornix service:") || !strings.Contains(err.Error(), "[redacted]") {
+		t.Fatalf("start error = %v, want redacted service diagnostic", err)
+	}
+	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), "@db") {
+		t.Fatalf("start error leaked credential material: %v", err)
+	}
+	commands := executor.snapshot()
+	wantLogs := []string{"logs", "--no-color", "--timestamps", "--tail", "20", "fornix"}
+	if len(commands) != 2 || !reflect.DeepEqual(commands[1].Args[len(commands[1].Args)-len(wantLogs):], wantLogs) {
+		t.Fatalf("startup diagnostics commands = %+v, want bounded Fornix logs request", commands)
 	}
 }
 

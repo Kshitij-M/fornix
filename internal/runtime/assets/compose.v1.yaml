@@ -26,7 +26,11 @@ services:
     environment:
       FORNIX_AUTH_MODE: "workspace"
       FORNIX_WORKER_ENABLED: "${FORNIX_WORKER_ENABLED:-true}"
-      FORNIX_ENV: "production"
+      FORNIX_ENABLE_LEGACY_GLOBAL_SURFACES: "false"
+      # The managed local runtime is for development/evaluation. It retains
+      # workspace-scoped auth; production qualification trust must be
+      # provisioned explicitly by a deployment operator.
+      FORNIX_ENV: "development"
       FORNIX_LISTEN: ":8201"
       FORNIX_BOOTSTRAP_KEY: "${FORNIX_BOOTSTRAP_KEY:?FORNIX_BOOTSTRAP_KEY is required}"
       FORNIX_PG_DSN: "postgres://fornix:${FORNIX_DATABASE_PASSWORD}@db:5432/fornix?sslmode=disable"

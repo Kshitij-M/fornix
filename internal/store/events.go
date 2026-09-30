@@ -48,6 +48,17 @@ func (s *EventStore) Begin(ctx context.Context) (pgx.Tx, error) {
 	return s.pool.Begin(ctx)
 }
 
+// BeginWorkspace starts an event transaction with the transaction-local
+// workspace scope already installed. Projection and domain callers should use
+// this method whenever they know the workspace; Begin remains available for
+// compatibility with callers that immediately install their own scope.
+func (s *EventStore) BeginWorkspace(ctx context.Context, workspaceID string) (pgx.Tx, error) {
+	if s == nil || s.pool == nil {
+		return nil, fmt.Errorf("event store is not configured")
+	}
+	return beginWorkspaceTx(ctx, s.pool, workspaceID)
+}
+
 // AppendResult reports whether an event was appended or matched an existing
 // idempotency record.
 type AppendResult struct {
@@ -57,7 +68,15 @@ type AppendResult struct {
 
 // Append commits exactly one event and, when supplied, its idempotency record.
 func (s *EventStore) Append(ctx context.Context, event contracts.EventEnvelope) (AppendResult, error) {
-	tx, err := s.pool.Begin(ctx)
+	// Normalize an owned deep copy. Callers may submit the same logical event
+	// concurrently for duplicate delivery; mutating their slices here would
+	// turn a valid concurrency test into a data race before Postgres can
+	// perform idempotency arbitration.
+	event = event.Clone()
+	if err := event.Normalize(); err != nil {
+		return AppendResult{}, fmt.Errorf("normalize event: %w", err)
+	}
+	tx, err := beginWorkspaceTx(ctx, s.pool, event.Scope.WorkspaceID)
 	if err != nil {
 		return AppendResult{}, fmt.Errorf("begin event append: %w", err)
 	}
@@ -226,7 +245,19 @@ type ReadRequest struct {
 
 // ReadAfter reads ordered events after the requested cursor.
 func (s *EventStore) ReadAfter(ctx context.Context, request ReadRequest) ([]contracts.EventEnvelope, error) {
-	return readAfter(ctx, s.pool, request)
+	tx, err := beginWorkspaceTx(ctx, s.pool, request.WorkspaceID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	events, err := readAfter(ctx, tx, request)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("commit event read: %w", err)
+	}
+	return events, nil
 }
 
 // ReadAfterTx reads from the caller's transaction snapshot. Projection
@@ -328,7 +359,7 @@ func (s *EventStore) Replay(ctx context.Context, workspaceID string, from, to ui
 // AdvanceCheckpoint moves a consumer cursor monotonically in its own
 // transaction. Projection runners should use the lease-protected variant.
 func (s *EventStore) AdvanceCheckpoint(ctx context.Context, workspaceID, consumerID string, sequence uint64) error {
-	tx, err := s.Begin(ctx)
+	tx, err := s.BeginWorkspace(ctx, workspaceID)
 	if err != nil {
 		return fmt.Errorf("begin checkpoint advance: %w", err)
 	}
@@ -447,8 +478,13 @@ func (s *EventStore) ResetCheckpointTx(ctx context.Context, tx pgx.Tx, workspace
 
 // Checkpoint returns the durable cursor for one workspace consumer.
 func (s *EventStore) Checkpoint(ctx context.Context, workspaceID, consumerID string) (uint64, error) {
+	tx, err := s.BeginWorkspace(ctx, workspaceID)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	var sequence int64
-	err := s.pool.QueryRow(ctx, `
+	err = tx.QueryRow(ctx, `
 		SELECT sequence FROM fornix.control_checkpoints
 		WHERE workspace_id=$1 AND consumer_id=$2`,
 		strings.TrimSpace(workspaceID), strings.TrimSpace(consumerID)).Scan(&sequence)
@@ -460,6 +496,9 @@ func (s *EventStore) Checkpoint(ctx context.Context, workspaceID, consumerID str
 	}
 	if sequence < 0 {
 		return 0, fmt.Errorf("database returned negative checkpoint")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("commit checkpoint read: %w", err)
 	}
 	return uint64(sequence), nil
 }

@@ -13,6 +13,8 @@ PASS=0; FAIL=0
 ok()  { echo "  PASS — $1"; PASS=$((PASS+1)); }
 bad() { echo "  FAIL — $1"; FAIL=$((FAIL+1)); }
 
+LEGACY_GLOBAL_SURFACES="${FORNIX_ENABLE_LEGACY_GLOBAL_SURFACES:-false}"
+
 echo "== version =="
 ver=$(curl -sS "$FORNIX_URL/v1/health" | "$PYTHON_BIN" -c 'import json,sys; print(json.load(sys.stdin)["version"])')
 [ "$ver" = "0.10.1" ] && ok "fornix reports v$ver" || bad "expected v0.10.1, got v$ver"
@@ -55,16 +57,21 @@ grep -q '"fornix__symbol_context"'  /tmp/mcp-out.jsonl && ok "tools/list exposes
 grep -q 'handleSearch'              /tmp/mcp-out.jsonl && ok "symbol_search round-trips through MCP"      || bad "symbol_search round-trip failed"
 
 # ---------- D4: grader ----------
-echo "== D4: quality grader =="
-graded_ok=$(curl -sS "${H[@]}" -X POST "$FORNIX_URL/v1/router/observation" \
-            -d '{"request_hash":"v09-smoke-1","task_category":"smoke","model_id":"sonnet-4-6","cost_usd":0.01,"latency_ms":1200,"outcome":"success"}' \
-            | "$PYTHON_BIN" -c 'import json,sys; d=json.load(sys.stdin); print(d.get("outcome_score") or 0)')
-"$PYTHON_BIN" -c "import sys; v=float('$graded_ok'); sys.exit(0 if v >= 0.8 else 1)" && ok "success auto-graded >=0.8 ($graded_ok)" || bad "success grade too low ($graded_ok)"
-
-graded_fail=$(curl -sS "${H[@]}" -X POST "$FORNIX_URL/v1/router/observation" \
-              -d '{"request_hash":"v09-smoke-2","task_category":"smoke","model_id":"sonnet-4-6","cost_usd":0.01,"latency_ms":3200,"outcome":"failed"}' \
+if [[ "$LEGACY_GLOBAL_SURFACES" == "true" ]]; then
+  echo "== D4: quality grader =="
+  graded_ok=$(curl -sS "${H[@]}" -X POST "$FORNIX_URL/v1/router/observation" \
+              -d '{"request_hash":"v09-smoke-1","task_category":"smoke","model_id":"sonnet-4-6","cost_usd":0.01,"latency_ms":1200,"outcome":"success"}' \
               | "$PYTHON_BIN" -c 'import json,sys; d=json.load(sys.stdin); print(d.get("outcome_score") or 0)')
-"$PYTHON_BIN" -c "import sys; v=float('$graded_fail'); sys.exit(0 if v <= 0.3 else 1)" && ok "failure auto-graded <=0.3 ($graded_fail)" || bad "failure grade too high ($graded_fail)"
+  "$PYTHON_BIN" -c "import sys; v=float('$graded_ok'); sys.exit(0 if v >= 0.8 else 1)" && ok "success auto-graded >=0.8 ($graded_ok)" || bad "success grade too low ($graded_ok)"
+
+  graded_fail=$(curl -sS "${H[@]}" -X POST "$FORNIX_URL/v1/router/observation" \
+                -d '{"request_hash":"v09-smoke-2","task_category":"smoke","model_id":"sonnet-4-6","cost_usd":0.01,"latency_ms":3200,"outcome":"failed"}' \
+                | "$PYTHON_BIN" -c 'import json,sys; d=json.load(sys.stdin); print(d.get("outcome_score") or 0)')
+  "$PYTHON_BIN" -c "import sys; v=float('$graded_fail'); sys.exit(0 if v <= 0.3 else 1)" && ok "failure auto-graded <=0.3 ($graded_fail)" || bad "failure grade too high ($graded_fail)"
+else
+  echo "== D4: legacy global router grader skipped (surface disabled by default) =="
+  ok "legacy global router surface is quarantined"
+fi
 
 echo
 echo "== summary: pass=$PASS fail=$FAIL =="

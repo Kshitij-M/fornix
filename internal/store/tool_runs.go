@@ -16,10 +16,12 @@ import (
 )
 
 var (
-	ErrToolRunMissing       = errors.New("tool run not found")
-	ErrToolApprovalMissing  = errors.New("tool approval not found")
-	ErrToolApprovalConflict = errors.New("tool approval is already decided")
-	ErrToolRunTerminal      = errors.New("tool run is already terminal")
+	ErrToolRunMissing         = errors.New("tool run not found")
+	ErrToolApprovalMissing    = errors.New("tool approval not found")
+	ErrToolApprovalConflict   = errors.New("tool approval is already decided")
+	ErrToolRunTerminal        = errors.New("tool run is already terminal")
+	ErrToolRunRecovery        = errors.New("tool run requires external outcome recovery")
+	ErrToolResultHashConflict = errors.New("tool result content hash conflicts with its canonical result")
 )
 
 // ToolRunStore is the Postgres authority for durable tool reservations,
@@ -76,21 +78,26 @@ func (s *ToolRunStore) Reserve(ctx context.Context, req contracts.ToolRequest, m
 	actorJSON, _ := json.Marshal(req.Actor)
 	taskJSON, _ := jsonOrEmpty(req.Task)
 	sessionJSON, _ := jsonOrEmpty(req.Session)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, req.WorkspaceID)
 	if err != nil {
 		return contracts.ToolRun{}, false, fmt.Errorf("begin tool reservation: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if req.AgentRun != nil {
+		if err := validateAgentRunEffectFenceTx(ctx, tx, req.WorkspaceID, req.AgentRun.ID, req.AgentRunOwnerID, int64(req.AgentRunFence)); err != nil {
+			return contracts.ToolRun{}, false, fmt.Errorf("validate tool agent-run lease: %w", err)
+		}
+	}
 	var id string
 	err = tx.QueryRow(ctx, `
 		INSERT INTO fornix.tool_runs(id, workspace_id, request_id, idempotency_key, request_hash, schema_version,
 		  causation_id, correlation_id, tool_id, capability, mode, status, actor, task_ref, session_ref,
-		  task_owner_id, task_fence, request_evidence)
-		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending',$12::jsonb,$13::jsonb,$14::jsonb,$15,$16,$17::jsonb)
+		  task_owner_id, task_fence, agent_run_id, agent_run_owner_id, agent_run_fence, request_evidence)
+		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'pending',$12::jsonb,$13::jsonb,$14::jsonb,$15,$16,$17,$18,$19,$20::jsonb)
 		ON CONFLICT (workspace_id,idempotency_key) DO NOTHING RETURNING id`,
 		contracts.NewID("toolrun"), req.WorkspaceID, req.RequestID, req.IdempotencyKey, hash, req.SchemaVersion,
 		req.CausationID, req.CorrelationID, req.ToolID, req.Capability, mode, actorJSON, taskJSON, sessionJSON,
-		req.TaskOwnerID, int64(req.TaskFence), requestEvidence).Scan(&id)
+		req.TaskOwnerID, int64(req.TaskFence), agentRunID(req.AgentRun), req.AgentRunOwnerID, int64(req.AgentRunFence), requestEvidence).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		run, readErr := readToolRunTx(ctx, tx, req.WorkspaceID, req.IdempotencyKey)
 		if readErr != nil {
@@ -134,7 +141,7 @@ func (s *ToolRunStore) CreateApproval(ctx context.Context, run contracts.ToolRun
 	if ttl > 24*time.Hour {
 		ttl = 24 * time.Hour
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, run.WorkspaceID)
 	if err != nil {
 		return contracts.ApprovalRequest{}, err
 	}
@@ -202,7 +209,7 @@ func (s *ToolRunStore) SetAwaitingApproval(ctx context.Context, run contracts.To
 // MarkStarted transitions a non-terminal run to execution after validating its
 // task fence.
 func (s *ToolRunStore) MarkStarted(ctx context.Context, run contracts.ToolRun) (contracts.ToolRun, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, run.WorkspaceID)
 	if err != nil {
 		return contracts.ToolRun{}, err
 	}
@@ -215,6 +222,9 @@ func (s *ToolRunStore) MarkStarted(ctx context.Context, run contracts.ToolRun) (
 		return current, nil
 	}
 	if err := validateTaskFenceTx(ctx, tx, current); err != nil {
+		return contracts.ToolRun{}, err
+	}
+	if err := validateAgentRunEffectFenceTx(ctx, tx, current.WorkspaceID, agentRunID(current.AgentRun), current.AgentRunOwnerID, int64(current.AgentRunFence)); err != nil {
 		return contracts.ToolRun{}, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE fornix.tool_runs SET status='running', attempt=attempt+1, started_at=COALESCE(started_at,clock_timestamp()) WHERE id=$1 AND workspace_id=$2 AND status IN ('pending','awaiting_approval')`, current.ID, current.WorkspaceID); err != nil {
@@ -243,7 +253,7 @@ func (s *ToolRunStore) MarkStarted(ctx context.Context, run contracts.ToolRun) (
 // event, and optional observations atomically. A stale task worker is rejected
 // before any authoritative effect is written.
 func (s *ToolRunStore) Finish(ctx context.Context, run contracts.ToolRun, result contracts.ToolResult) (contracts.ToolRun, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, run.WorkspaceID)
 	if err != nil {
 		return contracts.ToolRun{}, err
 	}
@@ -255,9 +265,101 @@ func (s *ToolRunStore) Finish(ctx context.Context, run contracts.ToolRun, result
 	if contracts.IsToolTerminal(current.Status) {
 		return current, nil
 	}
+	if current.Status == contracts.ToolRunRecoveryRequired {
+		if result.Status == contracts.ToolRunRecoveryRequired {
+			return current, nil
+		}
+		return contracts.ToolRun{}, ErrToolRunRecovery
+	}
+	if result.Status == "" {
+		result.Status = contracts.ToolRunFailed
+	}
+	if result.Status == contracts.ToolRunSucceeded && result.Failure != nil {
+		result.Status = contracts.ToolRunFailed
+	}
+	if result.ContentHash != "" && result.ContentHash != result.Hash() {
+		return contracts.ToolRun{}, ErrToolResultHashConflict
+	}
 	if err := validateTaskFenceTx(ctx, tx, current); err != nil {
 		return contracts.ToolRun{}, err
 	}
+	if err := validateAgentRunEffectFenceTx(ctx, tx, current.WorkspaceID, agentRunID(current.AgentRun), current.AgentRunOwnerID, int64(current.AgentRunFence)); err != nil {
+		return contracts.ToolRun{}, err
+	}
+	updated, err := s.finishToolResultTx(ctx, tx, current, result, nil, "tool-result:"+current.ID, nil, true)
+	if err != nil {
+		return contracts.ToolRun{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return contracts.ToolRun{}, err
+	}
+	return updated, nil
+}
+
+// FinalizeEffectResultTx writes a tool result inside the dispatcher's
+// transaction that verifies the matching external effect and reconciles its
+// domain link. The caller owns the transaction and must invoke this only after
+// those generic records have been advanced to their terminal states.
+func (s *ToolRunStore) FinalizeEffectResultTx(ctx context.Context, tx pgx.Tx, expected contracts.ToolRun, result contracts.ToolResult, effectResultHash string) error {
+	if s == nil || tx == nil || strings.TrimSpace(expected.WorkspaceID) == "" || strings.TrimSpace(expected.IdempotencyKey) == "" {
+		return fmt.Errorf("tool effect finalizer is not configured")
+	}
+	if err := setWorkspaceContext(ctx, tx, expected.WorkspaceID); err != nil {
+		return err
+	}
+	current, err := readToolRunTx(ctx, tx, expected.WorkspaceID, expected.IdempotencyKey)
+	if err != nil {
+		return err
+	}
+	if current.ID != expected.ID || current.RequestHash == "" || current.RequestHash != expected.RequestHash || current.WorkspaceID != expected.WorkspaceID ||
+		current.RequestID != expected.RequestID || current.ToolID != expected.ToolID || current.IdempotencyKey != expected.IdempotencyKey ||
+		current.TaskOwnerID != expected.TaskOwnerID || current.TaskFence != expected.TaskFence || current.AgentRunOwnerID != expected.AgentRunOwnerID || current.AgentRunFence != expected.AgentRunFence || agentRunID(current.AgentRun) != agentRunID(expected.AgentRun) {
+		return ErrToolResultHashConflict
+	}
+	if result.RequestID != "" && result.RequestID != current.RequestID || result.RunID != "" && result.RunID != current.ID || result.ToolID != "" && result.ToolID != current.ToolID {
+		return ErrToolResultHashConflict
+	}
+	if result.Status == "" {
+		result.Status = contracts.ToolRunFailed
+	}
+	if result.Status == contracts.ToolRunSucceeded && result.Failure != nil {
+		result.Status = contracts.ToolRunFailed
+	}
+	if result.Status != contracts.ToolRunSucceeded && result.Status != contracts.ToolRunFailed {
+		return ErrToolResultHashConflict
+	}
+	resultHash := result.Hash()
+	if effectResultHash == "" || effectResultHash != resultHash || result.ContentHash != "" && result.ContentHash != resultHash {
+		return ErrToolResultHashConflict
+	}
+	if contracts.IsToolTerminal(current.Status) {
+		if current.Result == nil || current.Result.ContentHash != resultHash || current.Result.Status != result.Status {
+			return ErrToolResultHashConflict
+		}
+		return nil
+	}
+	if current.Status != contracts.ToolRunRunning {
+		return ErrToolRunTerminal
+	}
+	if err := validateTaskFenceTx(ctx, tx, current); err != nil {
+		return err
+	}
+	if err := validateAgentRunEffectFenceTx(ctx, tx, current.WorkspaceID, agentRunID(current.AgentRun), current.AgentRunOwnerID, int64(current.AgentRunFence)); err != nil {
+		return err
+	}
+	result.ContentHash = resultHash
+	_, err = s.finishToolResultTx(ctx, tx, current, result, nil, "tool-result:"+current.ID, nil, true)
+	if err != nil {
+		return fmt.Errorf("write transactional tool result: %w", err)
+	}
+	return nil
+}
+
+// finishToolResultTx is shared by ordinary execution and fenced recovery so
+// result artifacts, the terminal tool event, and observations use one
+// authoritative implementation. The caller owns the transaction and has
+// already checked the appropriate worker/effect fence.
+func (s *ToolRunStore) finishToolResultTx(ctx context.Context, tx pgx.Tx, current contracts.ToolRun, result contracts.ToolResult, eventActor *contracts.ActorRef, eventIdempotencyKey string, eventMetadata map[string]any, recordObservability bool) (contracts.ToolRun, error) {
 	status := result.Status
 	if status == "" {
 		status = contracts.ToolRunFailed
@@ -293,18 +395,37 @@ func (s *ToolRunStore) Finish(ctx context.Context, run contracts.ToolRun, result
 	if status == contracts.ToolRunSucceeded {
 		eventType = contracts.ToolEventSucceeded
 	}
+	if status == contracts.ToolRunRecoveryRequired {
+		eventType = contracts.ToolEventRecoveryRequired
+	}
 	if status == contracts.ToolRunDenied {
 		eventType = contracts.ToolEventDenied
 	}
-	event, err := toolEvent(eventType, current.WorkspaceID, request, current.ID, map[string]any{"run_id": current.ID, "status": status, "content_hash": result.ContentHash, "failure": result.Failure})
+	eventPayload := map[string]any{"run_id": current.ID, "status": status, "content_hash": result.ContentHash, "failure": result.Failure}
+	for key, value := range eventMetadata {
+		if _, exists := eventPayload[key]; !exists {
+			eventPayload[key] = value
+		}
+	}
+	event, err := toolEvent(eventType, current.WorkspaceID, request, current.ID, eventPayload)
 	if err != nil {
 		return contracts.ToolRun{}, err
 	}
-	event.IdempotencyKey = "tool-result:" + current.ID
+	if eventActor != nil {
+		actor := *eventActor
+		if actor.WorkspaceID != current.WorkspaceID {
+			return contracts.ToolRun{}, ErrToolRecoveryConflict
+		}
+		event.Actor = actor
+	}
+	if eventIdempotencyKey == "" {
+		eventIdempotencyKey = "tool-result:" + current.ID
+	}
+	event.IdempotencyKey = eventIdempotencyKey
 	if _, err := s.events.AppendTx(ctx, tx, event); err != nil {
 		return contracts.ToolRun{}, err
 	}
-	if s.observability != nil {
+	if s.observability != nil && recordObservability {
 		var durationMS int64
 		if err := tx.QueryRow(ctx, `SELECT duration_ms FROM fornix.tool_runs WHERE workspace_id=$1 AND id=$2`, current.WorkspaceID, current.ID).Scan(&durationMS); err != nil {
 			return contracts.ToolRun{}, fmt.Errorf("read tool run duration: %w", err)
@@ -325,7 +446,7 @@ func (s *ToolRunStore) Finish(ctx context.Context, run contracts.ToolRun, result
 	if err != nil {
 		return contracts.ToolRun{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
+	if err := enqueueTerminalSandboxCleanupTx(ctx, tx, current.WorkspaceID, current.ID); err != nil {
 		return contracts.ToolRun{}, err
 	}
 	return updated, nil
@@ -429,12 +550,65 @@ func artifactReferenceFromRef(ref contracts.ArtifactRef) contracts.ArtifactRefer
 
 // Get reads one tool run by workspace-scoped idempotency key.
 func (s *ToolRunStore) Get(ctx context.Context, workspaceID, idempotencyKey string) (contracts.ToolRun, error) {
-	return readToolRun(ctx, s.pool, strings.TrimSpace(workspaceID), strings.TrimSpace(idempotencyKey))
+	workspaceID, idempotencyKey = strings.TrimSpace(workspaceID), strings.TrimSpace(idempotencyKey)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
+	if err != nil {
+		return contracts.ToolRun{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	run, err := readToolRunTx(ctx, tx, workspaceID, idempotencyKey)
+	if err != nil {
+		return contracts.ToolRun{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return contracts.ToolRun{}, err
+	}
+	return run, nil
+}
+
+// GetByID reads one run by its workspace-scoped durable identifier.
+func (s *ToolRunStore) GetByID(ctx context.Context, workspaceID, runID string) (contracts.ToolRun, error) {
+	if s == nil || s.pool == nil {
+		return contracts.ToolRun{}, fmt.Errorf("tool run store is not configured")
+	}
+	workspaceID, runID = strings.TrimSpace(workspaceID), strings.TrimSpace(runID)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
+	if err != nil {
+		return contracts.ToolRun{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var idempotencyKey string
+	if err := tx.QueryRow(ctx, `SELECT idempotency_key FROM fornix.tool_runs WHERE workspace_id=$1 AND id=$2`, workspaceID, runID).Scan(&idempotencyKey); errors.Is(err, pgx.ErrNoRows) {
+		return contracts.ToolRun{}, ErrToolRunMissing
+	} else if err != nil {
+		return contracts.ToolRun{}, err
+	}
+	run, err := readToolRunTx(ctx, tx, workspaceID, idempotencyKey)
+	if err != nil {
+		return contracts.ToolRun{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return contracts.ToolRun{}, err
+	}
+	return run, nil
 }
 
 // GetApproval reads one approval request within its workspace.
 func (s *ToolRunStore) GetApproval(ctx context.Context, workspaceID, approvalID string) (contracts.ApprovalRequest, error) {
-	return readApproval(ctx, s.pool, strings.TrimSpace(workspaceID), strings.TrimSpace(approvalID))
+	workspaceID, approvalID = strings.TrimSpace(workspaceID), strings.TrimSpace(approvalID)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
+	if err != nil {
+		return contracts.ApprovalRequest{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	approval, err := readApprovalByIDTx(ctx, tx, workspaceID, approvalID)
+	if err != nil {
+		return contracts.ApprovalRequest{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return contracts.ApprovalRequest{}, err
+	}
+	return approval, nil
 }
 
 // DecideApproval commits one approval decision idempotently and leaves the
@@ -447,7 +621,7 @@ func (s *ToolRunStore) DecideApproval(ctx context.Context, decision contracts.Ap
 	if decision.Decision != contracts.ApprovalApproved && decision.Decision != contracts.ApprovalDenied {
 		return contracts.ApprovalRequest{}, errors.New("decision must be approved or denied")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, decision.WorkspaceID)
 	if err != nil {
 		return contracts.ApprovalRequest{}, err
 	}
@@ -503,7 +677,7 @@ func (s *ToolRunStore) DecideApproval(ctx context.Context, decision contracts.Ap
 // ValidateTaskFence verifies that a task-bound tool request still owns the
 // current workspace task fence.
 func (s *ToolRunStore) ValidateTaskFence(ctx context.Context, req contracts.ToolRequest) error {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, req.WorkspaceID)
 	if err != nil {
 		return err
 	}
@@ -551,11 +725,11 @@ func readToolRunWithQuery(ctx context.Context, queryer interface {
 }, workspaceID, key string) (contracts.ToolRun, error) {
 	var run contracts.ToolRun
 	var actorJSON, taskJSON, sessionJSON, requestEvidence, responseEvidence, resultJSON, failureJSON []byte
-	var taskOwner string
-	var fence int64
+	var taskOwner, agentOwner, agentID string
+	var fence, agentFence int64
 	var started, finished *time.Time
 	var stdoutArtifactID, stderrArtifactID, resultArtifactID *int64
-	err := queryer.QueryRow(ctx, `SELECT id,workspace_id,request_id,idempotency_key,request_hash,schema_version,causation_id,correlation_id,tool_id,capability,mode,status,actor,task_ref,session_ref,task_owner_id,task_fence,approval_id,attempt,result,failure,request_evidence,response_evidence,stdout_artifact_id,stderr_artifact_id,result_artifact_id,created_at,started_at,finished_at,duration_ms FROM fornix.tool_runs WHERE workspace_id=$1 AND idempotency_key=$2 FOR UPDATE`, workspaceID, key).Scan(&run.ID, &run.WorkspaceID, &run.RequestID, &run.IdempotencyKey, &run.RequestHash, &run.SchemaVersion, &run.CausationID, &run.CorrelationID, &run.ToolID, &run.Capability, &run.Mode, &run.Status, &actorJSON, &taskJSON, &sessionJSON, &taskOwner, &fence, &run.ApprovalID, &run.Attempt, &resultJSON, &failureJSON, &requestEvidence, &responseEvidence, &stdoutArtifactID, &stderrArtifactID, &resultArtifactID, &run.CreatedAt, &started, &finished, &run.DurationMS)
+	err := queryer.QueryRow(ctx, `SELECT id,workspace_id,request_id,idempotency_key,request_hash,schema_version,causation_id,correlation_id,tool_id,capability,mode,status,actor,task_ref,session_ref,task_owner_id,task_fence,agent_run_id,agent_run_owner_id,agent_run_fence,approval_id,attempt,result,failure,request_evidence,response_evidence,stdout_artifact_id,stderr_artifact_id,result_artifact_id,created_at,started_at,finished_at,duration_ms FROM fornix.tool_runs WHERE workspace_id=$1 AND idempotency_key=$2 FOR UPDATE`, workspaceID, key).Scan(&run.ID, &run.WorkspaceID, &run.RequestID, &run.IdempotencyKey, &run.RequestHash, &run.SchemaVersion, &run.CausationID, &run.CorrelationID, &run.ToolID, &run.Capability, &run.Mode, &run.Status, &actorJSON, &taskJSON, &sessionJSON, &taskOwner, &fence, &agentID, &agentOwner, &agentFence, &run.ApprovalID, &run.Attempt, &resultJSON, &failureJSON, &requestEvidence, &responseEvidence, &stdoutArtifactID, &stderrArtifactID, &resultArtifactID, &run.CreatedAt, &started, &finished, &run.DurationMS)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return contracts.ToolRun{}, ErrToolRunMissing
 	}
@@ -575,6 +749,10 @@ func readToolRunWithQuery(ctx context.Context, queryer interface {
 		return contracts.ToolRun{}, decErr
 	}
 	run.TaskOwnerID, run.TaskFence = taskOwner, uint64(fence)
+	if agentID != "" {
+		run.AgentRun = &contracts.EntityRef{ID: agentID, Kind: "agent_run", WorkspaceID: run.WorkspaceID}
+	}
+	run.AgentRunOwnerID, run.AgentRunFence = agentOwner, uint64(agentFence)
 	run.RequestEvidence = append([]byte(nil), requestEvidence...)
 	run.ResponseEvidence = append([]byte(nil), responseEvidence...)
 	run.StartedAt, run.FinishedAt = started, finished
@@ -679,7 +857,7 @@ func toolEvent(eventType, workspace string, req contracts.ToolRequest, runID str
 	return event, nil
 }
 func toolRequestFromRun(run contracts.ToolRun) contracts.ToolRequest {
-	return contracts.ToolRequest{SchemaVersion: run.SchemaVersion, RequestID: run.RequestID, IdempotencyKey: run.IdempotencyKey, CausationID: run.CausationID, CorrelationID: run.CorrelationID, WorkspaceID: run.WorkspaceID, Actor: run.Actor, Task: run.Task, Session: run.Session, TaskOwnerID: run.TaskOwnerID, TaskFence: run.TaskFence, ToolID: run.ToolID, Capability: run.Capability, Mode: run.Mode}
+	return contracts.ToolRequest{SchemaVersion: run.SchemaVersion, RequestID: run.RequestID, IdempotencyKey: run.IdempotencyKey, CausationID: run.CausationID, CorrelationID: run.CorrelationID, WorkspaceID: run.WorkspaceID, Actor: run.Actor, Task: run.Task, Session: run.Session, TaskOwnerID: run.TaskOwnerID, TaskFence: run.TaskFence, AgentRun: run.AgentRun, AgentRunOwnerID: run.AgentRunOwnerID, AgentRunFence: run.AgentRunFence, ToolID: run.ToolID, Capability: run.Capability, Mode: run.Mode}
 }
 func toolRequestFromApproval(a contracts.ApprovalRequest) contracts.ToolRequest {
 	return contracts.ToolRequest{SchemaVersion: contracts.ToolSchemaVersion, RequestID: a.RequestID, IdempotencyKey: a.RequestID, WorkspaceID: a.WorkspaceID, Actor: a.Actor, Task: a.Task, Session: a.Session, ToolID: a.ToolID}

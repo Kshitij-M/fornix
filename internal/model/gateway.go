@@ -19,6 +19,7 @@ import (
 type Gateway struct {
 	Registry *Registry
 	Recorder CallRecorder
+	Effects  EffectRunner
 	Sleep    func(context.Context, time.Duration) error
 }
 
@@ -49,9 +50,14 @@ func (g *Gateway) Complete(ctx context.Context, request contracts.ModelRequest, 
 	var lastErr error
 	attemptCount := 0
 	for _, ref := range refs {
-		provider, ok := g.Registry.Lookup(ref.Provider)
+		_, ok := g.Registry.Lookup(ref.Provider)
 		if !ok {
 			lastErr = newFailure(ref.Provider, contracts.ModelFailureProvider, "provider is not registered", 0, false)
+			continue
+		}
+		ref, err = enrichProviderRef(g.Registry, ref)
+		if err != nil {
+			lastErr = err
 			continue
 		}
 		routed := normalized
@@ -61,7 +67,7 @@ func (g *Gateway) Complete(ctx context.Context, request contracts.ModelRequest, 
 			if err := g.recordAttempt(ctx, normalized, attempt); err != nil {
 				return g.finishError(ctx, normalized, attemptCount, err, nil, false)
 			}
-			response, callErr := provider.Complete(ctx, routed)
+			response, callErr := g.completeProvider(ctx, routed, ref, attempt)
 			if callErr == nil {
 				response.RequestID = normalized.RequestID
 				if validationErr := validateResponse(normalized, &response); validationErr != nil {
@@ -74,7 +80,7 @@ func (g *Gateway) Complete(ctx context.Context, request contracts.ModelRequest, 
 				}
 			}
 			failure, evidence, _ := normalizeFailure(callErr, ref.Provider, false)
-			lastErr = &FailureError{Failure: failure, Evidence: evidence}
+			lastErr = gatewayFailure(callErr, failure, evidence)
 			if !failure.Retryable || !normalized.RetryPolicy.Allows(failure.Code) || attempt == normalized.RetryPolicy.MaxAttempts {
 				break
 			}
@@ -126,9 +132,14 @@ func (g *Gateway) Stream(ctx context.Context, request contracts.ModelRequest, si
 	var lastErr error
 	attemptCount := 0
 	for _, ref := range refs {
-		provider, ok := g.Registry.Lookup(ref.Provider)
+		_, ok := g.Registry.Lookup(ref.Provider)
 		if !ok {
 			lastErr = newFailure(ref.Provider, contracts.ModelFailureProvider, "provider is not registered", 0, false)
+			continue
+		}
+		ref, err = enrichProviderRef(g.Registry, ref)
+		if err != nil {
+			lastErr = err
 			continue
 		}
 		routed := normalized
@@ -179,7 +190,7 @@ func (g *Gateway) Stream(ctx context.Context, request contracts.ModelRequest, si
 				sink(event)
 			}
 
-			response, callErr := provider.Stream(ctx, routed, attemptSink)
+			response, callErr := g.streamProvider(ctx, routed, ref, attempt, attemptSink)
 			if callErr == nil && streamBudgetErr != nil {
 				callErr = streamBudgetErr
 			}
@@ -201,7 +212,7 @@ func (g *Gateway) Stream(ctx context.Context, request contracts.ModelRequest, si
 				}
 			}
 			failure, evidence, _ := normalizeFailure(callErr, ref.Provider, contentEmitted)
-			lastErr = &FailureError{Failure: failure, Evidence: evidence}
+			lastErr = gatewayFailure(callErr, failure, evidence)
 			if contentEmitted {
 				sink(contracts.ModelStreamEvent{Type: contracts.ModelStreamError, Failure: &failure})
 				break
@@ -211,7 +222,7 @@ func (g *Gateway) Stream(ctx context.Context, request contracts.ModelRequest, si
 			}
 			if err := g.waitRetry(ctx, normalized.RetryPolicy, attempt); err != nil {
 				failure, evidence, _ = normalizeFailure(err, ref.Provider, false)
-				lastErr = &FailureError{Failure: failure, Evidence: evidence}
+				lastErr = gatewayFailure(err, failure, evidence)
 				break
 			}
 		}
@@ -228,6 +239,37 @@ func (g *Gateway) Stream(ctx context.Context, request contracts.ModelRequest, si
 	return g.finishError(ctx, normalized, attemptCount, lastErr, failureEvidence(lastErr), false)
 }
 
+func (g *Gateway) completeProvider(ctx context.Context, request contracts.ModelRequest, ref contracts.ProviderRef, attempt int) (contracts.ModelResponse, error) {
+	provider, ok := g.Registry.Lookup(ref.Provider)
+	if !ok {
+		return contracts.ModelResponse{}, fmt.Errorf("%w: %s", ErrProviderNotFound, ref.Provider)
+	}
+	if g.Effects != nil && !isLocalOnlyProvider(provider) {
+		return g.Effects.RunComplete(ctx, request, ref, attempt, func(callCtx context.Context) (contracts.ModelResponse, error) {
+			return provider.Complete(callCtx, request)
+		})
+	}
+	return provider.Complete(ctx, request)
+}
+
+func (g *Gateway) streamProvider(ctx context.Context, request contracts.ModelRequest, ref contracts.ProviderRef, attempt int, sink StreamSink) (contracts.ModelResponse, error) {
+	provider, ok := g.Registry.Lookup(ref.Provider)
+	if !ok {
+		return contracts.ModelResponse{}, fmt.Errorf("%w: %s", ErrProviderNotFound, ref.Provider)
+	}
+	if g.Effects != nil && !isLocalOnlyProvider(provider) {
+		return g.Effects.RunStream(ctx, request, ref, attempt, sink, func(callCtx context.Context, callSink StreamSink) (contracts.ModelResponse, error) {
+			return provider.Stream(callCtx, request, callSink)
+		})
+	}
+	return provider.Stream(ctx, request, sink)
+}
+
+func isLocalOnlyProvider(provider Provider) bool {
+	local, ok := provider.(LocalOnlyProvider)
+	return ok && local.LocalOnly()
+}
+
 func (g *Gateway) begin(ctx context.Context, request contracts.ModelRequest) (contracts.ModelRequest, CallStart, error) {
 	if g == nil || g.Registry == nil {
 		return contracts.ModelRequest{}, CallStart{}, fmt.Errorf("model gateway is not configured")
@@ -242,10 +284,14 @@ func (g *Gateway) begin(ctx context.Context, request contracts.ModelRequest) (co
 	if _, ok := g.Registry.Lookup(request.Provider.Provider); !ok {
 		return contracts.ModelRequest{}, CallStart{}, fmt.Errorf("%w: %s", ErrProviderNotFound, request.Provider.Provider)
 	}
+	var err error
+	if request.Provider, err = enrichProviderRef(g.Registry, request.Provider); err != nil {
+		return contracts.ModelRequest{}, CallStart{}, err
+	}
 	if g.Recorder == nil {
 		return request, CallStart{}, nil
 	}
-	evidence, err := RedactJSON(request)
+	evidence, err := RequestEvidence(request)
 	if err != nil {
 		return contracts.ModelRequest{}, CallStart{}, fmt.Errorf("redact model request: %w", err)
 	}
@@ -255,7 +301,7 @@ func (g *Gateway) begin(ctx context.Context, request contracts.ModelRequest) (co
 	}
 	if start.Existing {
 		switch start.Record.Status {
-		case contracts.ModelCallSucceeded, contracts.ModelCallFailed:
+		case contracts.ModelCallSucceeded, contracts.ModelCallFailed, contracts.ModelCallRecoveryRequired:
 		default:
 			return contracts.ModelRequest{}, CallStart{}, ErrModelCallInFlight
 		}
@@ -300,11 +346,16 @@ func (g *Gateway) finishError(ctx context.Context, request contracts.ModelReques
 	if len(failureEvidence) == 0 {
 		failureEvidence = evidence
 	}
+	status := contracts.ModelCallFailed
+	var uncertain externalOutcomeUncertainty
+	if errors.As(err, &uncertain) && uncertain.UncertainExternalOutcome() {
+		status = contracts.ModelCallRecoveryRequired
+	}
 	if g.Recorder != nil {
 		finishErr := g.Recorder.Finish(ctx, contracts.ModelCallResult{
 			WorkspaceID:       request.WorkspaceID,
 			RequestID:         request.RequestID,
-			Status:            contracts.ModelCallFailed,
+			Status:            status,
 			AttemptCount:      attempts,
 			ContentEmitted:    failure.ContentEmitted,
 			ProviderRequestID: failure.ProviderRequestID,
@@ -372,6 +423,7 @@ func providerRefs(primary contracts.ProviderRef, fallbacks []contracts.ProviderR
 
 func cloneModelRequest(request contracts.ModelRequest) contracts.ModelRequest {
 	clone := request
+	clone.Provider.ExternalBoundary = contracts.CloneExternalBoundary(request.Provider.ExternalBoundary)
 	clone.Messages = append([]contracts.ModelMessage(nil), request.Messages...)
 	for i := range clone.Messages {
 		clone.Messages[i].ToolCalls = append([]contracts.ModelToolCall(nil), request.Messages[i].ToolCalls...)
@@ -392,6 +444,29 @@ func cloneModelRequest(request contracts.ModelRequest) contracts.ModelRequest {
 	clone.Task = cloneEntityRef(request.Task)
 	clone.Session = cloneEntityRef(request.Session)
 	return clone
+}
+
+func enrichProviderRef(registry *Registry, ref contracts.ProviderRef) (contracts.ProviderRef, error) {
+	if registry == nil {
+		return contracts.ProviderRef{}, ErrProviderNotFound
+	}
+	provider, ok := registry.Lookup(ref.Provider)
+	if !ok {
+		return contracts.ProviderRef{}, fmt.Errorf("%w: %s", ErrProviderNotFound, ref.Provider)
+	}
+	ref.Provider = strings.ToLower(strings.TrimSpace(ref.Provider))
+	ref.Endpoint = strings.TrimSpace(ref.Endpoint)
+	ref.Model = strings.TrimSpace(ref.Model)
+	if boundaryProvider, ok := provider.(BoundaryProvider); ok {
+		boundary := boundaryProvider.BoundaryAuthority()
+		if err := boundary.Normalize(); err != nil {
+			return contracts.ProviderRef{}, fmt.Errorf("provider boundary authority: %w", err)
+		}
+		ref.ExternalBoundary = &boundary
+	} else {
+		ref.ExternalBoundary = contracts.CloneExternalBoundary(ref.ExternalBoundary)
+	}
+	return ref, nil
 }
 
 func cloneEntityRef(ref *contracts.EntityRef) *contracts.EntityRef {
@@ -489,7 +564,21 @@ func replayExistingCall(record contracts.ModelCallRecord) (contracts.ModelRespon
 	if record.Status == contracts.ModelCallFailed && record.Failure != nil {
 		return contracts.ModelResponse{}, &FailureError{Failure: *record.Failure, Evidence: record.ResponseEvidence}
 	}
+	if record.Status == contracts.ModelCallRecoveryRequired {
+		if record.Failure != nil {
+			return contracts.ModelResponse{}, fmt.Errorf("%w: %s", ErrModelCallRecoveryRequired, record.Failure.Code)
+		}
+		return contracts.ModelResponse{}, ErrModelCallRecoveryRequired
+	}
 	return contracts.ModelResponse{}, ErrModelCallInFlight
+}
+
+// externalOutcomeUncertainty is implemented by the generic dispatch boundary
+// without coupling this provider package to the dispatcher package. It lets
+// the model ledger distinguish a known provider failure from an outcome that
+// may already have crossed the provider boundary.
+type externalOutcomeUncertainty interface {
+	UncertainExternalOutcome() bool
 }
 
 func responseEvidence(response contracts.ModelResponse) ([]byte, error) {
@@ -502,3 +591,22 @@ func responseEvidence(response contracts.ModelResponse) ([]byte, error) {
 	}
 	return RedactBytes(b), nil
 }
+
+func gatewayFailure(original error, failure contracts.ModelFailure, evidence []byte) error {
+	canonical := &FailureError{Failure: failure, Evidence: evidence}
+	var uncertain externalOutcomeUncertainty
+	if errors.As(original, &uncertain) && uncertain.UncertainExternalOutcome() {
+		return &uncertainFailureError{FailureError: canonical}
+	}
+	return canonical
+}
+
+// uncertainFailureError preserves the recovery classification while carrying
+// the same redacted provider failure shape used by ordinary gateway errors.
+// Retry and fallback logic still sees the normalized failure, but final
+// persistence cannot accidentally downgrade an uncertain outcome to failed.
+type uncertainFailureError struct {
+	*FailureError
+}
+
+func (e *uncertainFailureError) UncertainExternalOutcome() bool { return true }

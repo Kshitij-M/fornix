@@ -202,10 +202,21 @@ change service rejects:
   bytes.
 
 Path validation is performed on normalized lexical paths and again against
-the filesystem before each external mutation. Temporary files are created in
-the destination directory and renamed atomically where the host supports it.
-The implementation documents that atomic rename and directory durability
-semantics are operating-system dependent.
+the filesystem before each external mutation. The executor opens the configured
+root once, verifies that the handle refers to the checked directory, and uses
+that root handle for operation checks, reads, writes, and post-state hashing.
+It does not use an absolute host path for a later mutation. This prevents a
+symlink swap from redirecting an operation outside the opened root, but is not
+a kernel sandbox and does not block mount traversal or a concurrent writer
+redirecting work to a different location inside that same root.
+
+Temporary content is written exclusively beneath the opened root. Replacement
+uses a same-directory rename; create uses a no-overwrite hard link so a file
+created after precondition validation is not silently replaced. Rename uses a
+no-overwrite link followed by source unlink; a crash between those calls can
+leave both names and is an ambiguous filesystem effect for recovery to inspect.
+These operations are not a multi-file transaction, and filesystem durability
+semantics remain host-dependent.
 
 ### State machine and transitions
 

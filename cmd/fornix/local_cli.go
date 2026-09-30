@@ -1019,6 +1019,9 @@ func runLocalUninstall(ctx context.Context, opts localOptions) error {
 }
 
 func runLocalSupportBundle(ctx context.Context, opts localOptions) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	output := opts.output
 	if output == "" {
 		return errors.New("support requires --output PATH")
@@ -1031,22 +1034,25 @@ func runLocalSupportBundle(ctx context.Context, opts localOptions) error {
 	if err != nil {
 		return err
 	}
-	p, loadErr := store.Load()
-	bundle := map[string]any{"version": version.Current(), "profile_root": store.Root(), "generated_at": time.Now().UTC(), "redacted": true}
-	if loadErr == nil {
-		bundle["workspace_id"] = p.WorkspaceID
-		bundle["server_url"] = p.ServerURL
-		bundle["runtime_project"] = p.RuntimeProject
-		bundle["runtime_version"] = p.RuntimeVersion
+	p, loadErr := store.LoadReadOnly()
+	profileState := "initialized"
+	if loadErr != nil {
+		profileState = "invalid"
+		if errors.Is(loadErr, profile.ErrNotFound) {
+			profileState = "missing"
+		}
 	}
-	data, err := json.MarshalIndent(bundle, "", "  ")
+	bundle := newLocalSupportBundle(p, profileState, time.Now())
+	data, err := marshalLocalSupportBundle(bundle)
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(output, append(data, '\n'), 0o600); err != nil {
+	if err := ctx.Err(); err != nil {
 		return err
 	}
-	_ = ctx
+	if err := writeLocalSupportBundle(output, data); err != nil {
+		return err
+	}
 	return printLocalSummary("Redacted support bundle written; it was not uploaded", map[string]any{"path": output, "uploaded": false}, opts.json)
 }
 

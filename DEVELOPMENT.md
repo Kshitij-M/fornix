@@ -7,8 +7,9 @@ on the host.
 ## What this repository demonstrates
 
 Fornix is being built as **verifiable AI work infrastructure for long-running
-repository operations**. The development workflow is therefore organized
-around the product path:
+production-system operations**. Repository maintenance is the first adapter,
+not the product boundary. The development workflow is therefore organized
+around the universal product path:
 
 ```text
 admit a scoped task
@@ -19,7 +20,7 @@ admit a scoped task
 
 The current alpha demonstrates this path with a deterministic, read-only
 reference workflow. It is a control-plane showcase, not yet a finished
-unattended repository-change product. The Docker development composition keeps
+unattended production-system operations product. The Docker development composition keeps
 the workspace read-only and mounts only `fixtures/reference-repo` writable for
 the explicit change/validation smokes. Use the [product vision](docs/01-product-vision.md)
 to understand why each local command exists and the
@@ -105,6 +106,7 @@ make smoke-observability
 make smoke-retrieval-quality
 make smoke-retrieval-evaluation
 make smoke-reference-workflow
+make smoke-workflow
 make smoke-reference-openai
 make smoke-ingestion
 make smoke-validation
@@ -113,6 +115,10 @@ make smoke-local-cli
 make smoke-local-runtime
 make smoke-package
 make release-check
+FORNIX_RLS_TEST_DSN='postgres://APP_ROLE:APP_PASSWORD@HOST:PORT/RLS_DATABASE?sslmode=disable' make qualification-workspace-isolation
+FORNIX_CAPACITY_PG_DSN='postgres://USER:PASSWORD@HOST:PORT/DISPOSABLE_DATABASE?sslmode=disable' make qualification-capacity
+FORNIX_TEST_PG_DSN='postgres://USER:PASSWORD@HOST:PORT/DISPOSABLE_DATABASE?sslmode=disable' make test-operation-worker
+make test-operation-supervisor
 make operator-reference
 make dev-up
 make dev-run
@@ -534,6 +540,52 @@ Run the policy lifecycle smoke after rebuilding:
 ```sh
 make smoke-policy
 ```
+
+Loop 27 adds the first generic durable workflow runtime. It is intentionally
+domain-neutral: a plan can contain model, tool, connector, approval,
+human-input, callback, validation, compensation, retry, or wait steps. The
+linked generic operation remains the authority for workspace ownership,
+leases, fencing, and task fences. `make smoke-workflow` runs contract, store,
+crash/replay, duplicate-delivery, wait/resume, stale-owner, and fake-executor
+tests against `FORNIX_TEST_PG_DSN` (or the Makefile database default). The
+workflow runtime does not invoke an LLM or connector during replay, and the
+current branch does not yet expose a distributed workflow scheduler or generic
+operator route.
+
+```sh
+PROJECTION_PG_DSN='postgres://fornix:fornix-dev-only@127.0.0.1:55433/fornix?sslmode=disable' \
+  make smoke-workflow
+```
+
+### Loop 28: multi-domain incident reference workflow
+
+Loop 28 demonstrates the universal control-plane contract outside repository
+maintenance with a deterministic fake incident source, runbook connector,
+bounded investigation, approval/rejection gate, remediation record,
+verification, Work Receipt linkage, and inert replay. It is intentionally
+offline and does not enable live monitoring or remediation effects.
+
+Run the focused tests against a Postgres database:
+
+```sh
+FORNIX_TEST_PG_DSN='postgres://fornix:fornix-dev-only@127.0.0.1:55433/fornix?sslmode=disable' \
+  make smoke-multidomain
+```
+
+The operator surfaces are equivalent:
+
+```sh
+bin/fornix incident start --workspace reference-local \
+  --source monitor --external-id payment-1 \
+  --payload '{"service":"payments","status":"degraded"}'
+bin/fornix incident approve --workspace reference-local --run-id <run-id> --decision approve
+bin/fornix incident replay --workspace reference-local --run-id <run-id>
+```
+
+The workflow pauses before remediation. Its durable approval is bound to the
+workspace, run, waiting step, operation hash, plan hash, actor, and evidence
+hash. Replay reads committed history only and never invokes the fake connector,
+model gateway, tools, or external systems.
 
 ## Repository rules
 

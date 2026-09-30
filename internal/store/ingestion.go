@@ -32,11 +32,12 @@ var (
 // manifests, checkpoints, and indexed rows. A batch commits its indexed state
 // and checkpoint together so recovery can safely repeat the last batch.
 type IngestStore struct {
-	pool         *pgxpool.Pool
-	events       *EventStore
-	artifacts    *ArtifactStore
-	embedder     func(context.Context, string) ([]float32, error)
-	beforeCommit func() error
+	pool           *pgxpool.Pool
+	events         *EventStore
+	artifacts      *ArtifactStore
+	embeddingCalls *EmbeddingCallStore
+	embedder       func(context.Context, contracts.EmbeddingRequest) ([]float32, error)
+	beforeCommit   func() error
 }
 
 // IngestBatchResult reports the durable outcome of processing one bounded
@@ -59,9 +60,18 @@ func NewIngestStore(pool *pgxpool.Pool, events *EventStore, artifacts *ArtifactS
 
 // SetEmbedder attaches an optional embedding function. The offline ingestion
 // path remains valid when no provider is configured.
-func (s *IngestStore) SetEmbedder(embedder func(context.Context, string) ([]float32, error)) {
+func (s *IngestStore) SetEmbedder(embedder func(context.Context, contracts.EmbeddingRequest) ([]float32, error)) {
 	if s != nil {
 		s.embedder = embedder
+	}
+}
+
+// SetEmbeddingCallStore enables transactional lineage links for embedding
+// results attached to chunks. It is optional for offline compatibility tests;
+// production composition supplies the durable embedding authority.
+func (s *IngestStore) SetEmbeddingCallStore(calls *EmbeddingCallStore) {
+	if s != nil {
+		s.embeddingCalls = calls
 	}
 }
 
@@ -100,7 +110,7 @@ func (s *IngestStore) Submit(ctx context.Context, request contracts.IngestJobReq
 	actorJSON, _ := json.Marshal(normalized.Actor)
 	taskJSON := nullableJSON(normalized.Task)
 	sessionJSON := nullableJSON(normalized.Session)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, normalized.WorkspaceID)
 	if err != nil {
 		return contracts.IngestJob{}, false, fmt.Errorf("begin ingest submit: %w", err)
 	}
@@ -245,7 +255,8 @@ func (s *IngestStore) Submit(ctx context.Context, request contracts.IngestJobReq
 
 // Get reads one ingestion job within its workspace boundary.
 func (s *IngestStore) Get(ctx context.Context, workspaceID, id string) (contracts.IngestJob, bool, error) {
-	tx, err := s.pool.Begin(ctx)
+	workspaceID = strings.TrimSpace(workspaceID)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
 		return contracts.IngestJob{}, false, err
 	}
@@ -269,25 +280,27 @@ func (s *IngestStore) List(ctx context.Context, workspaceID, cursor string, limi
 	if limit > 100 {
 		limit = 100
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id FROM fornix.ingest_jobs WHERE workspace_id=$1 AND id>$2 ORDER BY id LIMIT $3`, strings.TrimSpace(workspaceID), strings.TrimSpace(cursor), limit+1)
+	page := contracts.IngestPage{Items: make([]contracts.IngestJob, 0)}
+	ids := make([]string, 0, limit+1)
+	err := workspaceQueryRows(ctx, s.pool, strings.TrimSpace(workspaceID), `SELECT id FROM fornix.ingest_jobs WHERE workspace_id=$1 AND id>$2 ORDER BY id LIMIT $3`, []any{strings.TrimSpace(workspaceID), strings.TrimSpace(cursor), limit + 1}, func(rows pgx.Rows) error {
+		for rows.Next() {
+			var id string
+			if err := rows.Scan(&id); err != nil {
+				return err
+			}
+			ids = append(ids, id)
+		}
+		return nil
+	})
 	if err != nil {
 		return contracts.IngestPage{}, err
 	}
-	defer rows.Close()
-	page := contracts.IngestPage{Items: make([]contracts.IngestJob, 0, limit)}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return contracts.IngestPage{}, err
-		}
+	for _, id := range ids {
 		job, _, err := s.Get(ctx, workspaceID, id)
 		if err != nil {
 			return contracts.IngestPage{}, err
 		}
 		page.Items = append(page.Items, job)
-	}
-	if err := rows.Err(); err != nil {
-		return contracts.IngestPage{}, err
 	}
 	if len(page.Items) > limit {
 		page.NextCursor = page.Items[limit-1].ID
@@ -338,7 +351,7 @@ func (s *IngestStore) ProcessBatch(ctx context.Context, request contracts.Ingest
 		return IngestBatchResult{}, fmt.Errorf("%w: %v", ErrIngestPathChanged, err)
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, request.WorkspaceID)
 	if err != nil {
 		return IngestBatchResult{}, err
 	}
@@ -444,7 +457,8 @@ func (s *IngestStore) ProcessBatch(ctx context.Context, request contracts.Ingest
 // Cancel records durable cancellation for a non-terminal job. Subsequent batch
 // processing observes the terminal state and performs no indexing work.
 func (s *IngestStore) Cancel(ctx context.Context, workspaceID, jobID string, actor contracts.ActorRef) (contracts.IngestJob, error) {
-	tx, err := s.pool.Begin(ctx)
+	workspaceID = strings.TrimSpace(workspaceID)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
 		return contracts.IngestJob{}, err
 	}
@@ -493,6 +507,7 @@ type preparedFile struct {
 type preparedChunk struct {
 	path, sourceRange, content, hash string
 	embedding                        []float32
+	embeddingRequestID               string
 }
 type batchStatsValue struct {
 	processed, removed, chunks, symbols int
@@ -502,20 +517,18 @@ type batchStatsValue struct {
 }
 
 func (s *IngestStore) batchFiles(ctx context.Context, job contracts.IngestJob, limit int) ([]contracts.IngestFile, error) {
-	rows, err := s.pool.Query(ctx, `SELECT id,job_id,workspace_id,ordinal,path,mode,byte_size,content_hash,state,supersedes_file_id,chunk_count,symbol_count,indexed_bytes,skipped_reason,created_at,indexed_at FROM fornix.ingest_files WHERE job_id=$1 AND ordinal >= $2 ORDER BY ordinal LIMIT $3`, job.ID, job.Checkpoint.NextOrdinal, limit)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	files := make([]contracts.IngestFile, 0, limit)
-	for rows.Next() {
-		file, err := scanIngestFile(rows)
-		if err != nil {
-			return nil, err
+	files := make([]contracts.IngestFile, 0)
+	err := workspaceQueryRows(ctx, s.pool, job.WorkspaceID, `SELECT id,job_id,workspace_id,ordinal,path,mode,byte_size,content_hash,state,supersedes_file_id,chunk_count,symbol_count,indexed_bytes,skipped_reason,created_at,indexed_at FROM fornix.ingest_files WHERE workspace_id=$1 AND job_id=$2 AND ordinal >= $3 ORDER BY ordinal LIMIT $4`, []any{job.WorkspaceID, job.ID, job.Checkpoint.NextOrdinal, limit}, func(rows pgx.Rows) error {
+		for rows.Next() {
+			file, err := scanIngestFile(rows)
+			if err != nil {
+				return err
+			}
+			files = append(files, file)
 		}
-		files = append(files, file)
-	}
-	return files, rows.Err()
+		return nil
+	})
+	return files, err
 }
 
 func (s *IngestStore) prepareFiles(ctx context.Context, job contracts.IngestJob, files []contracts.IngestFile) ([]preparedFile, error) {
@@ -550,9 +563,21 @@ func (s *IngestStore) prepareFiles(ctx context.Context, job contracts.IngestJob,
 					item.embeddingAttempts++
 					embeddingChunks++
 					embeddingBytes += int64(len(window.Text))
-					vector, embedErr := s.embedder(ctx, window.Text)
+					identity := contracts.HashStrings(job.ID, file.ID, rangeValue, chunk.hash)
+					embeddingRequest := contracts.EmbeddingRequest{
+						RequestID:      "ingest-embedding-" + identity[:40],
+						IdempotencyKey: "ingest-embedding-" + identity,
+						CausationID:    job.ID, CorrelationID: job.CorrelationID, WorkspaceID: job.WorkspaceID,
+						Actor: job.Actor, Task: job.Task, TaskOwnerID: job.TaskOwnerID, TaskFence: job.TaskFence, Session: job.Session,
+						SourceKind: "ingest_chunk", SourceID: file.ID + ":" + rangeValue, SourceHash: chunk.hash,
+						Text: window.Text, Budget: contracts.EmbeddingBudget{MaxInputBytes: contracts.MaxEmbeddingInputBytes, Dimension: contracts.EmbeddingDimension, TimeoutMS: 30_000},
+					}
+					vector, embedErr := s.embedder(ctx, embeddingRequest)
 					if embedErr == nil && len(vector) == 768 {
 						chunk.embedding = vector
+						chunk.embeddingRequestID = embeddingRequest.RequestID
+					} else if embedErr != nil && job.Source.Embedding.RequireProvider {
+						return nil, fmt.Errorf("required embedding failed for %s:%s: %w", file.Path, rangeValue, embedErr)
 					} else {
 						item.embeddingSkipped++
 					}
@@ -606,6 +631,19 @@ func (s *IngestStore) writePreparedFileTx(ctx context.Context, tx pgx.Tx, job co
 		if _, err := tx.Exec(ctx, `INSERT INTO fornix.ingest_lineage(workspace_id,job_id,file_id,source_kind,source_id,target_kind,target_id,relation,content_hash) VALUES($1,$2,$3,'repository_file',$4,'chunk',$5,'indexed',$6) ON CONFLICT DO NOTHING`, job.WorkspaceID, job.ID, file.ID, file.Path, strconv.FormatInt(id, 10), chunk.hash); err != nil {
 			return 0, err
 		}
+		if chunk.embeddingRequestID != "" && s.embeddingCalls != nil {
+			vectorHash, err := contracts.EmbeddingVectorHash(chunk.embedding)
+			if err != nil {
+				return 0, err
+			}
+			if err := s.embeddingCalls.AttachTx(ctx, tx, contracts.EmbeddingTargetAttachment{
+				WorkspaceID: job.WorkspaceID, RequestID: chunk.embeddingRequestID,
+				TargetKind: "chunk", TargetID: strconv.FormatInt(id, 10),
+				SourceHash: chunk.hash, VectorHash: vectorHash,
+			}); err != nil {
+				return 0, err
+			}
+		}
 	}
 	if len(prepared.symbols) > 0 {
 		if _, err := tx.Exec(ctx, `UPDATE fornix.symbols SET deleted_at=clock_timestamp() WHERE workspace_id=$1 AND repo=$2 AND file_path=$3 AND deleted_at IS NULL`, job.WorkspaceID, job.Repository, file.Path); err != nil {
@@ -634,7 +672,7 @@ func (s *IngestStore) finalizeEmpty(ctx context.Context, job contracts.IngestJob
 	if job.FileCount > job.Checkpoint.NextOrdinal {
 		return IngestBatchResult{}, ErrIngestCheckpoint
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, job.WorkspaceID)
 	if err != nil {
 		return IngestBatchResult{}, err
 	}

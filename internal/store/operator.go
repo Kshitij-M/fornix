@@ -81,7 +81,7 @@ func (s *OperatorStore) Bootstrap(ctx context.Context, request contracts.Workspa
 	if err != nil {
 		return contracts.WorkspaceBootstrapResult{}, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, normalized.WorkspaceID)
 	if err != nil {
 		return contracts.WorkspaceBootstrapResult{}, fmt.Errorf("begin workspace bootstrap: %w", err)
 	}
@@ -280,7 +280,12 @@ func (s *OperatorStore) UpsertRepositoryIngest(ctx context.Context, input contra
 	requestHash := normalized.RequestHash()
 	id := stableOperatorID("ingest", normalized.WorkspaceID, normalized.Repository, normalized.ManifestHash)
 	var record contracts.RepositoryIngest
-	err = s.pool.QueryRow(ctx, `
+	tx, err := beginWorkspaceTx(ctx, s.pool, normalized.WorkspaceID)
+	if err != nil {
+		return contracts.RepositoryIngest{}, false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	err = tx.QueryRow(ctx, `
 		INSERT INTO fornix.repository_ingests(id,workspace_id,repository,source_root,manifest_hash,request_hash,idempotency_key,status,file_count,chunk_count,symbol_count,byte_count,last_error)
 		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 		ON CONFLICT (workspace_id,idempotency_key) DO NOTHING
@@ -289,13 +294,16 @@ func (s *OperatorStore) UpsertRepositoryIngest(ctx context.Context, input contra
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			var existing contracts.RepositoryIngest
-			err = s.pool.QueryRow(ctx, `SELECT 1,id,workspace_id,repository,source_root,manifest_hash,request_hash,idempotency_key,status,file_count,chunk_count,symbol_count,byte_count,last_error,created_at,updated_at FROM fornix.repository_ingests WHERE workspace_id=$1 AND idempotency_key=$2`, normalized.WorkspaceID, normalized.IdempotencyKey).
+			err = tx.QueryRow(ctx, `SELECT 1,id,workspace_id,repository,source_root,manifest_hash,request_hash,idempotency_key,status,file_count,chunk_count,symbol_count,byte_count,last_error,created_at,updated_at FROM fornix.repository_ingests WHERE workspace_id=$1 AND idempotency_key=$2`, normalized.WorkspaceID, normalized.IdempotencyKey).
 				Scan(&existing.SchemaVersion, &existing.ID, &existing.WorkspaceID, &existing.Repository, &existing.SourceRoot, &existing.ManifestHash, &existing.RequestHash, &existing.IdempotencyKey, &existing.Status, &existing.FileCount, &existing.ChunkCount, &existing.SymbolCount, &existing.ByteCount, &existing.LastError, &existing.CreatedAt, &existing.UpdatedAt)
 			if err != nil {
 				return contracts.RepositoryIngest{}, false, err
 			}
 			if existing.RequestHash != requestHash {
 				return contracts.RepositoryIngest{}, false, fmt.Errorf("%w: ingest idempotency key reused with a different request", ErrOperatorConflict)
+			}
+			if err := tx.Commit(ctx); err != nil {
+				return contracts.RepositoryIngest{}, false, err
 			}
 			return existing, false, nil
 		}
@@ -304,13 +312,18 @@ func (s *OperatorStore) UpsertRepositoryIngest(ctx context.Context, input contra
 		}
 		return contracts.RepositoryIngest{}, false, err
 	}
+	if err := tx.Commit(ctx); err != nil {
+		return contracts.RepositoryIngest{}, false, err
+	}
 	return record, true, nil
 }
 
 // GetRepositoryIngest reads one compatibility record within workspaceID.
 func (s *OperatorStore) GetRepositoryIngest(ctx context.Context, workspaceID, id string) (contracts.RepositoryIngest, error) {
 	var record contracts.RepositoryIngest
-	err := s.pool.QueryRow(ctx, `SELECT 1,id,workspace_id,repository,source_root,manifest_hash,request_hash,idempotency_key,status,file_count,chunk_count,symbol_count,byte_count,last_error,created_at,updated_at FROM fornix.repository_ingests WHERE workspace_id=$1 AND id=$2`, strings.TrimSpace(workspaceID), strings.TrimSpace(id)).Scan(&record.SchemaVersion, &record.ID, &record.WorkspaceID, &record.Repository, &record.SourceRoot, &record.ManifestHash, &record.RequestHash, &record.IdempotencyKey, &record.Status, &record.FileCount, &record.ChunkCount, &record.SymbolCount, &record.ByteCount, &record.LastError, &record.CreatedAt, &record.UpdatedAt)
+	err := workspaceQueryRow(ctx, s.pool, strings.TrimSpace(workspaceID), `SELECT 1,id,workspace_id,repository,source_root,manifest_hash,request_hash,idempotency_key,status,file_count,chunk_count,symbol_count,byte_count,last_error,created_at,updated_at FROM fornix.repository_ingests WHERE workspace_id=$1 AND id=$2`, []any{strings.TrimSpace(workspaceID), strings.TrimSpace(id)}, func(row pgx.Row) error {
+		return row.Scan(&record.SchemaVersion, &record.ID, &record.WorkspaceID, &record.Repository, &record.SourceRoot, &record.ManifestHash, &record.RequestHash, &record.IdempotencyKey, &record.Status, &record.FileCount, &record.ChunkCount, &record.SymbolCount, &record.ByteCount, &record.LastError, &record.CreatedAt, &record.UpdatedAt)
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return contracts.RepositoryIngest{}, ErrIngestNotFound
 	}
@@ -321,24 +334,25 @@ func (s *OperatorStore) GetRepositoryIngest(ctx context.Context, workspaceID, id
 // workspace.
 func (s *OperatorStore) ListRepositoryIngests(ctx context.Context, workspaceID string, limit int, cursor string) (IngestPage, error) {
 	limit = boundedOperatorLimit(limit)
-	rows, err := s.pool.Query(ctx, `SELECT 1,id,workspace_id,repository,source_root,manifest_hash,request_hash,idempotency_key,status,file_count,chunk_count,symbol_count,byte_count,last_error,created_at,updated_at FROM fornix.repository_ingests WHERE workspace_id=$1 AND id > $2 ORDER BY id LIMIT $3`, strings.TrimSpace(workspaceID), strings.TrimSpace(cursor), limit+1)
+	page := IngestPage{Items: make([]contracts.RepositoryIngest, 0, limit)}
+	err := workspaceQueryRows(ctx, s.pool, strings.TrimSpace(workspaceID), `SELECT 1,id,workspace_id,repository,source_root,manifest_hash,request_hash,idempotency_key,status,file_count,chunk_count,symbol_count,byte_count,last_error,created_at,updated_at FROM fornix.repository_ingests WHERE workspace_id=$1 AND id > $2 ORDER BY id LIMIT $3`, []any{strings.TrimSpace(workspaceID), strings.TrimSpace(cursor), limit + 1}, func(rows pgx.Rows) error {
+		for rows.Next() {
+			var item contracts.RepositoryIngest
+			if err := rows.Scan(&item.SchemaVersion, &item.ID, &item.WorkspaceID, &item.Repository, &item.SourceRoot, &item.ManifestHash, &item.RequestHash, &item.IdempotencyKey, &item.Status, &item.FileCount, &item.ChunkCount, &item.SymbolCount, &item.ByteCount, &item.LastError, &item.CreatedAt, &item.UpdatedAt); err != nil {
+				return err
+			}
+			page.Items = append(page.Items, item)
+		}
+		return rows.Err()
+	})
 	if err != nil {
 		return IngestPage{}, err
-	}
-	defer rows.Close()
-	page := IngestPage{Items: make([]contracts.RepositoryIngest, 0, limit)}
-	for rows.Next() {
-		var item contracts.RepositoryIngest
-		if err := rows.Scan(&item.SchemaVersion, &item.ID, &item.WorkspaceID, &item.Repository, &item.SourceRoot, &item.ManifestHash, &item.RequestHash, &item.IdempotencyKey, &item.Status, &item.FileCount, &item.ChunkCount, &item.SymbolCount, &item.ByteCount, &item.LastError, &item.CreatedAt, &item.UpdatedAt); err != nil {
-			return IngestPage{}, err
-		}
-		page.Items = append(page.Items, item)
 	}
 	if len(page.Items) > limit {
 		page.NextCursor = page.Items[limit-1].ID
 		page.Items = page.Items[:limit]
 	}
-	return page, rows.Err()
+	return page, nil
 }
 
 func stableOperatorID(prefix string, parts ...string) string {

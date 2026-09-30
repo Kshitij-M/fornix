@@ -218,3 +218,56 @@ func TestModelCallResponseArtifactCrashRollsBackLedgerAndReference(t *testing.T)
 		t.Fatalf("crash left model artifact reference count=%d", count)
 	}
 }
+
+func TestModelCallStoreAgentRunFenceRejectsStaleWorker(t *testing.T) {
+	store, pool, workspace := newModelCallTestStore(t)
+	ctx := context.Background()
+	runs := NewAgentRunStore(pool, NewEventStore(pool))
+	run, _, err := runs.Reserve(ctx, durableAgentRequest(workspace, "model-agent-fence"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM fornix.agent_run_worker_leases WHERE workspace_id=$1`, workspace)
+		_, _ = pool.Exec(ctx, `DELETE FROM fornix.agent_runs WHERE workspace_id=$1`, workspace)
+		_, _ = pool.Exec(ctx, `DELETE FROM fornix.control_events WHERE workspace_id=$1`, workspace)
+	})
+	first, err := runs.AcquireAgentRunLease(ctx, workspace, run.ID, "worker-a", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := modelCallRequest(workspace, "model-agent-fence-effect")
+	request.AgentRun = &contracts.EntityRef{ID: run.ID, Kind: "agent_run", WorkspaceID: workspace}
+	request.AgentRunOwnerID, request.AgentRunFence = first.Lease.OwnerID, first.Lease.Fence
+	if _, err := store.Start(ctx, request, []byte(`{"prompt":"fenced"}`)); err != nil {
+		t.Fatal(err)
+	}
+	if err := runs.ReleaseAgentRunLease(ctx, first.Lease); err != nil {
+		t.Fatal(err)
+	}
+	second, err := runs.AcquireAgentRunLease(ctx, workspace, run.ID, "worker-b", time.Second)
+	if err != nil || second.Lease.Fence <= first.Lease.Fence {
+		t.Fatalf("takeover=%+v err=%v", second, err)
+	}
+	replayRequest := request
+	replayRequest.AgentRunOwnerID, replayRequest.AgentRunFence = second.Lease.OwnerID, second.Lease.Fence
+	replayed, err := store.Start(ctx, replayRequest, []byte(`{"prompt":"fenced"}`))
+	expectedHash, hashErr := request.RequestHash()
+	if err != nil || hashErr != nil || !replayed.Existing || replayed.Record.RequestHash != expectedHash {
+		t.Fatalf("takeover duplicate was not replayable: %+v err=%v", replayed, err)
+	}
+	if err := store.Attempt(ctx, workspace, request.RequestID); !errors.Is(err, ErrAgentRunLeaseFenced) {
+		t.Fatalf("stale model attempt error=%v", err)
+	}
+	response := contracts.ModelResponse{RequestID: request.RequestID, Provider: request.Provider, Content: "stale"}
+	if err := store.Finish(ctx, contracts.ModelCallResult{WorkspaceID: workspace, RequestID: request.RequestID, Status: contracts.ModelCallSucceeded, Response: &response, ResponseEvidence: []byte(`{"content":"stale"}`)}); !errors.Is(err, ErrAgentRunLeaseFenced) {
+		t.Fatalf("stale model finish error=%v", err)
+	}
+	recorded, err := store.Get(ctx, workspace, request.IdempotencyKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recorded.Status != contracts.ModelCallRunning || recorded.AgentRunFence != first.Lease.Fence {
+		t.Fatalf("stale worker changed model ledger: %+v", recorded)
+	}
+}

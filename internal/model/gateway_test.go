@@ -118,6 +118,100 @@ func TestFakeProviderIsDeterministicAndDurablyDeduplicated(t *testing.T) {
 	}
 }
 
+func TestGatewayPersistsRecoveryRequiredForUncertainExternalOutcome(t *testing.T) {
+	provider := &scriptedProvider{name: "external-test"}
+	registry := NewRegistry()
+	if err := registry.Register(provider); err != nil {
+		t.Fatal(err)
+	}
+	recorder := newMemoryCallRecorder()
+	gateway := NewGateway(registry, recorder)
+	gateway.Effects = uncertainModelEffects{}
+	request := modelTestRequest("external-test")
+	if _, err := gateway.Complete(context.Background(), request); err == nil {
+		t.Fatalf("uncertain call error = %v", err)
+	}
+	record := recorder.records[request.WorkspaceID+"\x00"+request.IdempotencyKey]
+	if record.Status != contracts.ModelCallRecoveryRequired {
+		t.Fatalf("model call status = %q, want recovery_required", record.Status)
+	}
+	provider.mu.Lock()
+	providerCalls := provider.completeN
+	provider.mu.Unlock()
+	if providerCalls != 0 {
+		t.Fatalf("provider calls = %d, want zero", providerCalls)
+	}
+	if _, err := gateway.Complete(context.Background(), request); !errors.Is(err, ErrModelCallRecoveryRequired) {
+		t.Fatalf("recovery replay error = %v", err)
+	}
+}
+
+func TestLocalOnlyFakeBypassesExternalEffectDispatchButRemainsRecorded(t *testing.T) {
+	provider := NewFakeProvider(FakeConfig{Response: "offline response"})
+	registry := NewRegistry()
+	if err := registry.Register(provider); err != nil {
+		t.Fatal(err)
+	}
+	recorder := newMemoryCallRecorder()
+	effects := &countingModelEffects{}
+	gateway := NewGateway(registry, recorder)
+	gateway.Effects = effects
+
+	completeRequest := modelTestRequest("fake")
+	if _, err := gateway.Complete(context.Background(), completeRequest); err != nil {
+		t.Fatalf("offline completion: %v", err)
+	}
+	streamRequest := modelTestRequest("fake")
+	streamRequest.RequestID = "model-request-stream"
+	streamRequest.IdempotencyKey = "model-idempotency-stream"
+	if _, err := gateway.Stream(context.Background(), streamRequest, func(contracts.ModelStreamEvent) {}); err != nil {
+		t.Fatalf("offline stream: %v", err)
+	}
+	if effects.completes != 0 || effects.streams != 0 {
+		t.Fatalf("offline calls crossed external boundary: completes=%d streams=%d", effects.completes, effects.streams)
+	}
+	if provider.Calls() != 2 {
+		t.Fatalf("fake provider calls=%d, want 2", provider.Calls())
+	}
+	for _, key := range []string{completeRequest.IdempotencyKey, streamRequest.IdempotencyKey} {
+		if recorder.records[completeRequest.WorkspaceID+"\x00"+key].Status != contracts.ModelCallSucceeded {
+			t.Fatalf("offline model call %q was not durably recorded", key)
+		}
+	}
+}
+
+type countingModelEffects struct {
+	completes int
+	streams   int
+}
+
+func (e *countingModelEffects) RunComplete(ctx context.Context, _ contracts.ModelRequest, _ contracts.ProviderRef, _ int, invoke func(context.Context) (contracts.ModelResponse, error)) (contracts.ModelResponse, error) {
+	e.completes++
+	return invoke(ctx)
+}
+
+func (e *countingModelEffects) RunStream(ctx context.Context, _ contracts.ModelRequest, _ contracts.ProviderRef, _ int, sink StreamSink, invoke func(context.Context, StreamSink) (contracts.ModelResponse, error)) (contracts.ModelResponse, error) {
+	e.streams++
+	return invoke(ctx, sink)
+}
+
+var ErrUncertainModelOutcome = errors.New("test model outcome uncertain")
+
+type uncertainModelEffects struct{}
+
+func (uncertainModelEffects) RunComplete(context.Context, contracts.ModelRequest, contracts.ProviderRef, int, func(context.Context) (contracts.ModelResponse, error)) (contracts.ModelResponse, error) {
+	return contracts.ModelResponse{}, uncertainModelError{}
+}
+
+func (uncertainModelEffects) RunStream(context.Context, contracts.ModelRequest, contracts.ProviderRef, int, StreamSink, func(context.Context, StreamSink) (contracts.ModelResponse, error)) (contracts.ModelResponse, error) {
+	return contracts.ModelResponse{}, uncertainModelError{}
+}
+
+type uncertainModelError struct{}
+
+func (uncertainModelError) Error() string                  { return ErrUncertainModelOutcome.Error() }
+func (uncertainModelError) UncertainExternalOutcome() bool { return true }
+
 func TestGatewayRetriesOnlyRetryableFailures(t *testing.T) {
 	registry := NewRegistry()
 	retryProvider := NewFakeProvider(FakeConfig{Response: "recovered", Failures: []contracts.ModelFailure{
@@ -150,6 +244,29 @@ func TestGatewayRetriesOnlyRetryableFailures(t *testing.T) {
 	}
 	if nonRetryProvider.Calls() != 1 {
 		t.Fatalf("non-retryable calls = %d, want 1", nonRetryProvider.Calls())
+	}
+}
+
+func TestGatewayRetainsRequestIdentityAcrossAmbiguousRetry(t *testing.T) {
+	var attemptKeys []string
+	provider := &scriptedProvider{name: "scripted", complete: func(request contracts.ModelRequest) (contracts.ModelResponse, error) {
+		attemptKeys = append(attemptKeys, request.IdempotencyKey)
+		if len(attemptKeys) == 1 {
+			return contracts.ModelResponse{}, &FailureError{Failure: contracts.ModelFailure{Code: contracts.ModelFailureTransport, Message: "response was lost after transmission", Retryable: true}}
+		}
+		return contracts.ModelResponse{Provider: contracts.ProviderRef{Provider: "scripted", Model: "scripted"}, Content: "recovered"}, nil
+	}}
+	registry := NewRegistry()
+	if err := registry.Register(provider); err != nil {
+		t.Fatal(err)
+	}
+	request := modelTestRequest("scripted")
+	response, err := NewGateway(registry, nil).Complete(context.Background(), request)
+	if err != nil || response.Content != "recovered" {
+		t.Fatalf("retry response=%+v err=%v", response, err)
+	}
+	if len(attemptKeys) != 2 || attemptKeys[0] != request.IdempotencyKey || attemptKeys[1] != request.IdempotencyKey {
+		t.Fatalf("retry changed request idempotency identity: expected %q, attempts=%v", request.IdempotencyKey, attemptKeys)
 	}
 }
 

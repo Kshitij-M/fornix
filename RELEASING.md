@@ -12,7 +12,8 @@ and `fornix-watcher` images to GitHub Container Registry.
 2. Update [`CHANGELOG.md`](CHANGELOG.md) and move verified items from
    `Unreleased` into a dated release section.
 3. Confirm the version follows semantic versioning. Use a prerelease suffix
-   such as `v0.11.0-alpha.1` while the project remains alpha.
+   while the project remains alpha; keep examples version-neutral in release
+   documentation.
 4. Review the generated release scope and confirm no credentials, private
    data, or model transcripts are present in artifacts or notes.
 
@@ -22,8 +23,8 @@ From a clean checkout of `main`:
 
 ```sh
 git fetch --tags origin
-git tag -a v0.11.0-alpha.1 -m "Release v0.11.0-alpha.1"
-git push origin v0.11.0-alpha.1
+git tag -a vX.Y.Z-alpha.N -m "Release vX.Y.Z-alpha.N"
+git push origin vX.Y.Z-alpha.N
 ```
 
 The tag starts both release workflows. GoReleaser cross-compiles the service,

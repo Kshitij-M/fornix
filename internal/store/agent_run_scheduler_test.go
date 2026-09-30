@@ -101,6 +101,45 @@ func TestAgentRunSchedulerExpiryTakeoverAndStaleWorkerFailsClosed(t *testing.T) 
 	}
 }
 
+func TestAgentRunSchedulerDirectLeaseIsIdempotentAndFenced(t *testing.T) {
+	runs, pool, workspace := newAgentRunTestStore(t)
+	ctx := context.Background()
+	run, _, err := runs.Reserve(ctx, durableAgentRequest(workspace, "direct-lease"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := runs.AcquireAgentRunLease(ctx, workspace, run.ID, "api-a", time.Minute)
+	if err != nil || first.Lease.Fence != 1 || first.Takeover {
+		t.Fatalf("first direct lease=%+v err=%v", first, err)
+	}
+	reused, err := runs.AcquireAgentRunLease(ctx, workspace, run.ID, "api-a", time.Second)
+	if err != nil || reused.Lease.Fence != first.Lease.Fence || reused.Lease.OwnerID != first.Lease.OwnerID {
+		t.Fatalf("same-owner lease was not reused: %+v err=%v", reused, err)
+	}
+	if _, err := runs.AcquireAgentRunLease(ctx, workspace, run.ID, "api-b", time.Second); !errors.Is(err, ErrAgentRunLeaseHeld) {
+		t.Fatalf("other owner acquired active lease: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE fornix.agent_run_worker_leases SET lease_until=clock_timestamp()-interval '1 second' WHERE workspace_id=$1 AND run_id=$2`, workspace, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	takeover, err := runs.AcquireAgentRunLease(ctx, workspace, run.ID, "api-b", time.Second)
+	if err != nil || !takeover.Takeover || takeover.Lease.Fence != first.Lease.Fence+1 {
+		t.Fatalf("direct takeover=%+v err=%v", takeover, err)
+	}
+	if _, err := runs.AcquireAgentRunLease(ctx, workspace, run.ID, "api-a", time.Second); !errors.Is(err, ErrAgentRunLeaseHeld) {
+		t.Fatalf("stale owner reacquired lease: %v", err)
+	}
+	if err := runs.ValidateAgentRunLease(ctx, run, first.Lease); !errors.Is(err, ErrAgentRunLeaseFenced) {
+		t.Fatalf("stale direct lease validated: %v", err)
+	}
+	if err := runs.ReleaseAgentRunLease(ctx, takeover.Lease); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM fornix.agent_run_worker_leases WHERE workspace_id=$1`, workspace); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestAgentRunSchedulerConcurrentClaimsHaveOneOwnerPerRun(t *testing.T) {
 	runs, _, workspace := newAgentRunTestStore(t)
 	ctx := context.Background()

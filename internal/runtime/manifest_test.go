@@ -31,6 +31,7 @@ func TestRenderManifestHasSafeDeterministicDefaults(t *testing.T) {
 		`image: "ghcr.io/kshitij-m/fornix:v0.10.1"`,
 		`image: "pgvector/pgvector@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f"`,
 		`FORNIX_AUTH_MODE: "workspace"`,
+		`FORNIX_ENV: "development"`,
 		`"127.0.0.1:8201:8201"`,
 		`fornix-postgres-data:/var/lib/postgresql/data`,
 		`condition: service_healthy`,
@@ -46,6 +47,7 @@ func TestRenderManifestHasSafeDeterministicDefaults(t *testing.T) {
 	forbidden := []string{
 		"5432:5432",
 		"0.0.0.0:8201",
+		"docker.sock",
 		"FORNIX_AUTH_MODE: \"development\"",
 		":latest",
 		"{{",
@@ -115,5 +117,15 @@ func TestManifestRejectsRepositoryPathTraversalAndMissingDirectory(t *testing.T)
 		if err := config.Validate(); !errors.Is(err, ErrInvalidManifestConfig) {
 			t.Errorf("repository path %q error = %v, want ErrInvalidManifestConfig", path, err)
 		}
+	}
+}
+
+func TestDevelopmentComposeDoesNotExposeDockerDaemonSocket(t *testing.T) {
+	compose, err := os.ReadFile(filepath.Join("..", "..", "compose.yaml"))
+	if err != nil {
+		t.Fatalf("read development Compose manifest: %v", err)
+	}
+	if strings.Contains(strings.ToLower(string(compose)), "docker.sock") {
+		t.Fatal("development Compose must not expose the Docker daemon socket to the control plane")
 	}
 }

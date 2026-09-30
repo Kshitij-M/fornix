@@ -92,7 +92,7 @@ func (s *ArtifactStore) Put(ctx context.Context, input ArtifactPutInput) (Artifa
 	if s == nil || s.pool == nil {
 		return ArtifactPutResult{}, fmt.Errorf("artifact store is not configured")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, input.WorkspaceID)
 	if err != nil {
 		return ArtifactPutResult{}, fmt.Errorf("begin artifact write: %w", err)
 	}
@@ -243,7 +243,20 @@ func (s *ArtifactStore) Get(ctx context.Context, workspaceID string, artifactID 
 	if s == nil || s.pool == nil {
 		return contracts.Artifact{}, fmt.Errorf("artifact store is not configured")
 	}
-	return readArtifact(ctx, s.pool, strings.TrimSpace(workspaceID), artifactID, false)
+	workspaceID = strings.TrimSpace(workspaceID)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
+	if err != nil {
+		return contracts.Artifact{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	artifact, err := readArtifactTx(ctx, tx, workspaceID, artifactID, false)
+	if err != nil {
+		return contracts.Artifact{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return contracts.Artifact{}, err
+	}
+	return artifact, nil
 }
 
 // GetByHash resolves an immutable artifact only inside the requested
@@ -252,7 +265,7 @@ func (s *ArtifactStore) GetByHash(ctx context.Context, workspaceID, contentHash 
 	if s == nil || s.pool == nil {
 		return contracts.Artifact{}, fmt.Errorf("artifact store is not configured")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, strings.TrimSpace(workspaceID))
 	if err != nil {
 		return contracts.Artifact{}, err
 	}
@@ -280,7 +293,7 @@ func (s *ArtifactStore) ReadRawByHash(ctx context.Context, workspaceID, contentH
 	if workspaceID == "" || contentHash == "" || maxBytes <= 0 || maxBytes > contracts.MaxArtifactBytes {
 		return nil, ErrArtifactInvalid
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
 		return nil, err
 	}
@@ -315,7 +328,7 @@ func (s *ArtifactStore) Disclose(ctx context.Context, request contracts.Artifact
 	if err != nil {
 		return contracts.ArtifactDisclosureResult{}, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, normalized.WorkspaceID)
 	if err != nil {
 		return contracts.ArtifactDisclosureResult{}, fmt.Errorf("begin artifact disclosure: %w", err)
 	}
@@ -403,7 +416,7 @@ func (s *ArtifactStore) Verify(ctx context.Context, workspaceID string, artifact
 	if s == nil || s.pool == nil {
 		return fmt.Errorf("artifact store is not configured")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, strings.TrimSpace(workspaceID))
 	if err != nil {
 		return err
 	}
@@ -441,7 +454,7 @@ func (s *ArtifactStore) Archive(ctx context.Context, workspaceID string, artifac
 	if s == nil || s.pool == nil {
 		return contracts.Artifact{}, fmt.Errorf("artifact store is not configured")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, strings.TrimSpace(workspaceID))
 	if err != nil {
 		return contracts.Artifact{}, err
 	}
@@ -476,7 +489,7 @@ func (s *ArtifactStore) Delete(ctx context.Context, workspaceID string, artifact
 	if s == nil || s.pool == nil {
 		return contracts.Artifact{}, fmt.Errorf("artifact store is not configured")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
 		return contracts.Artifact{}, err
 	}
@@ -523,7 +536,7 @@ func (s *ArtifactStore) AddProvenance(ctx context.Context, input ArtifactProvena
 	if s == nil || s.pool == nil {
 		return contracts.ArtifactProvenanceLink{}, false, fmt.Errorf("artifact store is not configured")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, input.WorkspaceID)
 	if err != nil {
 		return contracts.ArtifactProvenanceLink{}, false, err
 	}

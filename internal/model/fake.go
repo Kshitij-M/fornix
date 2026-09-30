@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/omaveda/fornix/internal/contracts"
 )
@@ -48,6 +49,7 @@ func NewFakeProvider(cfg FakeConfig) *FakeProvider {
 func (p *FakeProvider) Name() string                      { return "fake" }
 func (p *FakeProvider) Aliases() []string                 { return []string{"test", "mock"} }
 func (p *FakeProvider) Endpoint() contracts.ModelEndpoint { return p.endpoint }
+func (p *FakeProvider) LocalOnly() bool                   { return true }
 
 // Complete returns the configured or request-hash-derived fake response.
 func (p *FakeProvider) Complete(_ context.Context, request contracts.ModelRequest) (contracts.ModelResponse, error) {
@@ -128,6 +130,20 @@ func (p *FakeProvider) Embed(_ context.Context, request EmbeddingRequest) ([]flo
 		result[i] = float32((i%31)+1) / 31
 	}
 	return result, nil
+}
+
+// EmbedScoped exposes the fake provider through the explicit embedding
+// capability used by the durable gateway.
+func (p *FakeProvider) EmbedScoped(ctx context.Context, request contracts.EmbeddingRequest) (contracts.EmbeddingResponse, error) {
+	vector, err := p.Embed(ctx, EmbeddingRequest{Model: request.Model, Text: request.Text, MaxInputBytes: request.Budget.MaxInputBytes, Timeout: time.Duration(request.Budget.TimeoutMS) * time.Millisecond})
+	if err != nil {
+		return contracts.EmbeddingResponse{}, err
+	}
+	hash, err := contracts.EmbeddingVectorHash(vector)
+	if err != nil {
+		return contracts.EmbeddingResponse{}, err
+	}
+	return contracts.EmbeddingResponse{RequestID: request.RequestID, Provider: request.Provider, SourceHash: request.SourceHash, Vector: vector, VectorHash: hash, Dimension: len(vector), Usage: contracts.EmbeddingUsage{InputBytes: int64(len([]byte(request.Text))), Dimension: len(vector), Source: "fake", Measured: false}}, nil
 }
 
 // Calls returns the number of fake provider attempts observed so far.

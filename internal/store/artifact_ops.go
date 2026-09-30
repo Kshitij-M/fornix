@@ -30,7 +30,7 @@ func (s *ArtifactStore) Backfill(ctx context.Context, request contracts.Artifact
 	}
 	batch := normalizeArtifactBatch(request.BatchSize)
 	result := contracts.ArtifactBackfillResult{WorkspaceID: request.WorkspaceID, SourceKind: request.SourceKind, Cursor: request.Cursor, BatchSize: batch, DryRun: request.DryRun}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, request.WorkspaceID)
 	if err != nil {
 		return contracts.ArtifactBackfillResult{}, fmt.Errorf("begin artifact backfill: %w", err)
 	}
@@ -276,7 +276,7 @@ func (s *ArtifactStore) RetentionSweep(ctx context.Context, request contracts.Ar
 		now = time.Now().UTC()
 	}
 	result := contracts.ArtifactRetentionSweepResult{WorkspaceID: request.WorkspaceID, BatchSize: batch, DryRun: request.DryRun}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, request.WorkspaceID)
 	if err != nil {
 		return contracts.ArtifactRetentionSweepResult{}, err
 	}
@@ -431,7 +431,7 @@ func (s *ArtifactStore) VerifyBatch(ctx context.Context, request contracts.Artif
 	}
 	batch := normalizeArtifactBatch(request.BatchSize)
 	report := contracts.ArtifactIntegrityReport{WorkspaceID: request.WorkspaceID, Cursor: request.Cursor, BatchSize: batch, DryRun: request.DryRun}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, request.WorkspaceID)
 	if err != nil {
 		return report, err
 	}
@@ -517,22 +517,30 @@ func (s *ArtifactStore) Metrics(ctx context.Context, workspaceID string) (contra
 	}
 	var metrics contracts.ArtifactStorageMetrics
 	metrics.WorkspaceID = workspaceID
-	err := s.pool.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE status='active'),count(*) FILTER (WHERE status='archived'),count(*) FILTER (WHERE status='deleted'),COALESCE(sum(byte_size),0),COALESCE(sum(byte_size) FILTER (WHERE status<>'deleted'),0) FROM fornix.artifacts WHERE workspace_id=$1`, workspaceID).Scan(&metrics.Artifacts, &metrics.ActiveArtifacts, &metrics.ArchivedArtifacts, &metrics.DeletedArtifacts, &metrics.ArtifactBytes, &metrics.UniqueContentBytes)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
+	if err != nil {
+		return contracts.ArtifactStorageMetrics{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	err = tx.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE status='active'),count(*) FILTER (WHERE status='archived'),count(*) FILTER (WHERE status='deleted'),COALESCE(sum(byte_size),0),COALESCE(sum(byte_size) FILTER (WHERE status<>'deleted'),0) FROM fornix.artifacts WHERE workspace_id=$1`, workspaceID).Scan(&metrics.Artifacts, &metrics.ActiveArtifacts, &metrics.ArchivedArtifacts, &metrics.DeletedArtifacts, &metrics.ArtifactBytes, &metrics.UniqueContentBytes)
 	if err != nil {
 		return contracts.ArtifactStorageMetrics{}, err
 	}
 	metrics.LogicalBytes = metrics.UniqueContentBytes
-	if err := s.pool.QueryRow(ctx, `SELECT COALESCE(sum(a.byte_size),0) FROM fornix.artifact_refs r JOIN fornix.artifacts a ON a.workspace_id=r.workspace_id AND a.id=r.artifact_id WHERE r.workspace_id=$1`, workspaceID).Scan(&metrics.LogicalBytes); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(sum(a.byte_size),0) FROM fornix.artifact_refs r JOIN fornix.artifacts a ON a.workspace_id=r.workspace_id AND a.id=r.artifact_id WHERE r.workspace_id=$1`, workspaceID).Scan(&metrics.LogicalBytes); err != nil {
 		return contracts.ArtifactStorageMetrics{}, err
 	}
-	if err := s.pool.QueryRow(ctx, `SELECT COALESCE(sum(byte_size),0) FROM fornix.artifact_chunks WHERE workspace_id=$1`, workspaceID).Scan(&metrics.ChunkBytes); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT COALESCE(sum(byte_size),0) FROM fornix.artifact_chunks WHERE workspace_id=$1`, workspaceID).Scan(&metrics.ChunkBytes); err != nil {
 		return contracts.ArtifactStorageMetrics{}, err
 	}
-	if err := s.pool.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE authoritative) FROM fornix.artifact_refs WHERE workspace_id=$1`, workspaceID).Scan(&metrics.References, &metrics.AuthoritativeRefs); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT count(*),count(*) FILTER (WHERE authoritative) FROM fornix.artifact_refs WHERE workspace_id=$1`, workspaceID).Scan(&metrics.References, &metrics.AuthoritativeRefs); err != nil {
 		return contracts.ArtifactStorageMetrics{}, err
 	}
 	if metrics.LogicalBytes > 0 {
 		metrics.DedupRatio = float64(metrics.UniqueContentBytes) / float64(metrics.LogicalBytes)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return contracts.ArtifactStorageMetrics{}, err
 	}
 	return metrics, nil
 }

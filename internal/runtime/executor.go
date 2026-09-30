@@ -7,9 +7,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -62,12 +65,17 @@ type Executor interface {
 type CommandError struct {
 	Executable string
 	ExitCode   int
+	Diagnostic string
 }
 
 // Error implements error while keeping potentially sensitive command details
 // out of logs.
 func (e *CommandError) Error() string {
-	return fmt.Sprintf("runtime executable %q failed with exit code %d", e.Executable, e.ExitCode)
+	message := fmt.Sprintf("runtime executable %q failed with exit code %d", e.Executable, e.ExitCode)
+	if e.Diagnostic != "" {
+		return message + ": " + e.Diagnostic
+	}
+	return message
 }
 
 // OSExecutor runs structured commands on the host operating system.
@@ -118,9 +126,84 @@ func (OSExecutor) Execute(parent context.Context, command Command) (Result, erro
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
 		result.ExitCode = exitErr.ExitCode()
-		return result, &CommandError{Executable: command.Executable, ExitCode: result.ExitCode}
+		commandErr := &CommandError{Executable: command.Executable, ExitCode: result.ExitCode}
+		if strings.EqualFold(filepath.Base(command.Executable), "docker") {
+			commandErr.Diagnostic = safeDockerDiagnostic(result.Stderr, command.Environment)
+		}
+		return result, commandErr
 	}
 	return result, fmt.Errorf("execute runtime command: %w", err)
+}
+
+// safeDockerDiagnostic keeps one actionable line of Docker/Compose
+// failures while removing credential values passed through the child
+// environment. Diagnostics are bounded and never include stdout or command
+// arguments, both of which can contain application data.
+func safeDockerDiagnostic(stderr string, environment []string) string {
+	if environment == nil {
+		environment = os.Environ()
+	}
+	var sensitiveValues []string
+	for _, entry := range environment {
+		key, value, ok := strings.Cut(entry, "=")
+		if !ok || !isSensitiveEnvironmentKey(key) || len(value) < 4 {
+			continue
+		}
+		sensitiveValues = append(sensitiveValues, value)
+	}
+	sort.Slice(sensitiveValues, func(i, j int) bool {
+		return len(sensitiveValues[i]) > len(sensitiveValues[j])
+	})
+	for _, value := range sensitiveValues {
+		stderr = strings.ReplaceAll(stderr, value, "[redacted]")
+	}
+	lines := strings.Split(stderr, "\n")
+	line := ""
+	for index := len(lines) - 1; index >= 0; index-- {
+		candidate := lines[index]
+		candidate = strings.TrimSpace(strings.ToValidUTF8(candidate, "�"))
+		if candidate != "" {
+			if line == "" {
+				line = candidate
+			}
+			if isActionableDockerFailure(candidate) {
+				line = candidate
+				break
+			}
+		}
+	}
+	if len(line) > 240 {
+		var bounded strings.Builder
+		bounded.Grow(240)
+		for _, r := range line {
+			if bounded.Len()+utf8.RuneLen(r) > 240 {
+				break
+			}
+			bounded.WriteRune(r)
+		}
+		line = bounded.String()
+	}
+	return line
+}
+
+func isActionableDockerFailure(line string) bool {
+	line = strings.ToLower(line)
+	for _, marker := range []string{"error", "failed", "denied", "no such", "refused", "unauthorized", "timeout", "timed out", "cannot", "unable", "invalid", "canceled", "cancelled", "rate limit", "not found"} {
+		if strings.Contains(line, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func isSensitiveEnvironmentKey(key string) bool {
+	key = strings.ToUpper(key)
+	for _, marker := range []string{"KEY", "TOKEN", "PASSWORD", "SECRET", "CREDENTIAL", "DSN", "URL"} {
+		if strings.Contains(key, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (c Command) validate() error {

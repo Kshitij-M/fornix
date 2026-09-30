@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -63,6 +64,7 @@ func TestAgentRunStorePersistsExecutionMetadata(t *testing.T) {
 		"fornix.reference_workflow": "true",
 		"fornix.reference_workdir":  "/workspace/reference-repository",
 	}
+	request.Tools = []contracts.ModelToolDefinition{{Name: "fornix.repository.read", Description: "Read a bounded repository file", DefinitionHash: strings.Repeat("a", 64)}}
 	run, deduplicated, err := runs.Reserve(context.Background(), request)
 	if err != nil || deduplicated {
 		t.Fatalf("reserve=%+v deduplicated=%t err=%v", run, deduplicated, err)
@@ -73,6 +75,31 @@ func TestAgentRunStorePersistsExecutionMetadata(t *testing.T) {
 	}
 	if loaded.Metadata["fornix.reference_workflow"] != "true" || loaded.Metadata["fornix.reference_workdir"] != "/workspace/reference-repository" {
 		t.Fatalf("execution metadata was not persisted: %+v", loaded.Metadata)
+	}
+	if len(loaded.Tools) != 1 || loaded.Tools[0].Name != request.Tools[0].Name || loaded.Tools[0].Description != request.Tools[0].Description || loaded.Tools[0].DefinitionHash != request.Tools[0].DefinitionHash {
+		t.Fatalf("run tool catalog was not persisted: %+v", loaded.Tools)
+	}
+}
+
+func TestAgentRunStoreRejectsToolCatalogMutation(t *testing.T) {
+	runs, _, workspace := newAgentRunTestStore(t)
+	request := durableAgentRequest(workspace, "immutable-tool-catalog")
+	request.Tools = []contracts.ModelToolDefinition{{Name: "fornix.repository.read"}}
+	run, duplicate, err := runs.Reserve(context.Background(), request)
+	if err != nil || duplicate {
+		t.Fatalf("reserve=%+v duplicate=%t err=%v", run, duplicate, err)
+	}
+	next := run
+	next.Tools = []contracts.ModelToolDefinition{{Name: "fornix.repository.write"}}
+	if _, err := runs.Commit(context.Background(), run, next, contracts.AgentEventCheckpointed, map[string]any{"run_id": run.ID}); !errors.Is(err, ErrAgentRunImmutableInput) {
+		t.Fatalf("tool catalog mutation error=%v, want ErrAgentRunImmutableInput", err)
+	}
+	loaded, err := runs.Get(context.Background(), workspace, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(loaded.Tools) != 1 || loaded.Tools[0].Name != request.Tools[0].Name {
+		t.Fatalf("rejected tool catalog mutation changed persisted run: %+v", loaded.Tools)
 	}
 }
 

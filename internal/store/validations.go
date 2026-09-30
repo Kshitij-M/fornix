@@ -103,7 +103,7 @@ func (s *ValidationStore) SetFailureHook(hook func(string) error) {
 // inside the requested workspace. It is used by the read-only validator
 // runtime to avoid accepting caller-supplied packet contents as authority.
 func (s *ValidationStore) ChangeAuthority(ctx context.Context, workspaceID, applicationID, proposalID string) (contracts.ChangeApplication, contracts.ChangeProposal, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, strings.TrimSpace(workspaceID))
 	if err != nil {
 		return contracts.ChangeApplication{}, contracts.ChangeProposal{}, err
 	}
@@ -219,7 +219,7 @@ func (s *ValidationStore) Start(ctx context.Context, input StartValidationInput)
 		return contracts.ValidationRun{}, false, err
 	}
 	requestHash := request.RequestHash()
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, request.WorkspaceID)
 	if err != nil {
 		return contracts.ValidationRun{}, false, fmt.Errorf("begin validation start: %w", err)
 	}
@@ -330,7 +330,7 @@ func (s *ValidationStore) Commit(ctx context.Context, input ValidationCommitInpu
 	if s == nil || s.pool == nil || s.events == nil || s.evidence == nil {
 		return contracts.ValidationRun{}, nil, false, fmt.Errorf("validation store is not configured")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, strings.TrimSpace(input.WorkspaceID))
 	if err != nil {
 		return contracts.ValidationRun{}, nil, false, fmt.Errorf("begin validation commit: %w", err)
 	}
@@ -625,7 +625,7 @@ func validationObservationOutcome(status string) string {
 
 // Cancel durably stops a non-terminal validation run. It is idempotent.
 func (s *ValidationStore) Cancel(ctx context.Context, workspaceID, runID string, actor contracts.ActorRef) (contracts.ValidationRun, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, strings.TrimSpace(workspaceID))
 	if err != nil {
 		return contracts.ValidationRun{}, err
 	}
@@ -672,7 +672,7 @@ func (s *ValidationStore) Cancel(ctx context.Context, workspaceID, runID string,
 
 // Get reads one workspace-scoped validation run.
 func (s *ValidationStore) Get(ctx context.Context, workspaceID, runID string) (contracts.ValidationRun, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, strings.TrimSpace(workspaceID))
 	if err != nil {
 		return contracts.ValidationRun{}, err
 	}
@@ -706,23 +706,24 @@ func (s *ValidationStore) ListResults(ctx context.Context, workspaceID, runID st
 	if offset < 0 {
 		offset = 0
 	}
-	rows, err := s.pool.Query(ctx, `SELECT id,workspace_id,validation_run_id,ordinal,validator_id,validator_version,attempt,status,outcome,input_hash,result_hash,summary,failure,evidence,files,bytes,sql_queries,duration_ms,created_at FROM fornix.validation_check_results WHERE workspace_id=$1 AND validation_run_id=$2 ORDER BY ordinal,attempt LIMIT $3 OFFSET $4`, workspaceID, runID, limit, offset)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 	// Keep allocation capacity independent of the request. SQL still applies
 	// the normalized hard limit above, and append grows only for rows returned.
 	results := make([]contracts.ValidationResult, 0)
-	for rows.Next() {
-		result, scanErr := scanValidationResult(rows)
-		if scanErr != nil {
-			return nil, scanErr
+	err = workspaceQueryRows(ctx, s.pool, workspaceID, `SELECT id,workspace_id,validation_run_id,ordinal,validator_id,validator_version,attempt,status,outcome,input_hash,result_hash,summary,failure,evidence,files,bytes,sql_queries,duration_ms,created_at FROM fornix.validation_check_results WHERE workspace_id=$1 AND validation_run_id=$2 ORDER BY ordinal,attempt LIMIT $3 OFFSET $4`, []any{workspaceID, runID, limit, offset}, func(rows pgx.Rows) error {
+		for rows.Next() {
+			result, scanErr := scanValidationResult(rows)
+			if scanErr != nil {
+				return scanErr
+			}
+			result.Policy = contracts.ClonePolicyReference(run.Policy)
+			results = append(results, result)
 		}
-		result.Policy = contracts.ClonePolicyReference(run.Policy)
-		results = append(results, result)
+		return rows.Err()
+	})
+	if err != nil {
+		return nil, err
 	}
-	return results, rows.Err()
+	return results, nil
 }
 
 // Replay reconstructs a run from durable result rows and validation events.
@@ -876,7 +877,7 @@ func disclosureReportResults(r contracts.ValidationDisclosureResult) []contracts
 // GetHandoff reads a durable handoff. MountRoot is intentionally not stored;
 // an authenticated caller must resolve it again from workspace configuration.
 func (s *ValidationStore) GetHandoff(ctx context.Context, workspaceID, handoffID string) (contracts.ReindexHandoff, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, strings.TrimSpace(workspaceID))
 	if err != nil {
 		return contracts.ReindexHandoff{}, err
 	}
@@ -894,7 +895,7 @@ func (s *ValidationStore) GetHandoff(ctx context.Context, workspaceID, handoffID
 // MarkHandoffSubmitted records the idempotent ingest identity created by the
 // caller after it performs bounded discovery and submits to IngestStore.
 func (s *ValidationStore) MarkHandoffSubmitted(ctx context.Context, handoffID, workspaceID string, job contracts.IngestJob) (contracts.ReindexHandoff, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, strings.TrimSpace(workspaceID))
 	if err != nil {
 		return contracts.ReindexHandoff{}, err
 	}
@@ -946,7 +947,7 @@ func (s *ValidationStore) MarkHandoffFailed(ctx context.Context, workspaceID, ha
 	if err := failure.Normalize(); err != nil {
 		return contracts.ReindexHandoff{}, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, strings.TrimSpace(workspaceID))
 	if err != nil {
 		return contracts.ReindexHandoff{}, err
 	}

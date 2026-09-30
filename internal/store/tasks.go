@@ -205,7 +205,7 @@ func (s *TaskStore) Create(ctx context.Context, input TaskCreateInput) (Task, co
 	if err != nil {
 		return Task{}, contracts.EventEnvelope{}, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
 		return Task{}, contracts.EventEnvelope{}, fmt.Errorf("begin task create: %w", err)
 	}
@@ -365,7 +365,7 @@ func (s *TaskStore) ClaimNext(ctx context.Context, input TaskClaimInput) (TaskCl
 		return TaskClaimResult{}, errors.New("workspace_id and session_id are required")
 	}
 	ttl := boundedTaskLeaseTTL(input.LeaseTTL)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
 		return TaskClaimResult{}, fmt.Errorf("begin task claim: %w", err)
 	}
@@ -420,12 +420,20 @@ func (s *TaskStore) ClaimNext(ctx context.Context, input TaskClaimInput) (TaskCl
 			}
 			fence = oldLease.Fence + 1
 			takeover = true
+			databaseFence, err := databaseCounter(fence)
+			if err != nil {
+				return TaskClaimResult{}, err
+			}
+			previousFence, err := databaseCounter(oldLease.Fence)
+			if err != nil {
+				return TaskClaimResult{}, err
+			}
 			if _, err := tx.Exec(ctx, `
 				UPDATE fornix.task_execution_leases
 				SET owner_id=$3, fence=$4, lease_until=clock_timestamp() + ($5::double precision * interval '1 millisecond'),
 				    acquired_at=clock_timestamp(), renewed_at=clock_timestamp(), released_at=NULL
 				WHERE workspace_id=$1 AND task_id=$2 AND fence=$6`,
-				workspaceID, task.ID, sessionID, int64(fence), ttl.Milliseconds(), int64(oldLease.Fence)); err != nil {
+				workspaceID, task.ID, sessionID, databaseFence, ttl.Milliseconds(), previousFence); err != nil {
 				return TaskClaimResult{}, fmt.Errorf("take over task lease: %w", err)
 			}
 		} else {
@@ -443,13 +451,17 @@ func (s *TaskStore) ClaimNext(ctx context.Context, input TaskClaimInput) (TaskCl
 			}
 			return TaskClaimResult{}, ErrTaskLeaseExpired
 		}
+		databaseFence, err := databaseCounter(fence)
+		if err != nil {
+			return TaskClaimResult{}, err
+		}
 		if _, err := tx.Exec(ctx, `
 			UPDATE fornix.tasks
 			SET status=$3, assigned_session=$4, claimed_at=clock_timestamp(), attempts=attempts+1,
 			    execution_fence=$5, next_attempt_at=clock_timestamp(), completed_at=NULL,
 			    cancelled_at=NULL
 			WHERE workspace_id=$1 AND id=$2`, workspaceID, task.ID, contracts.TaskStatusClaimed,
-			sessionID, int64(fence)); err != nil {
+			sessionID, databaseFence); err != nil {
 			return TaskClaimResult{}, fmt.Errorf("update claimed task: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `
@@ -499,7 +511,7 @@ func (s *TaskStore) Renew(ctx context.Context, workspaceID string, taskID int64,
 		}
 		return TaskRenewResult{}, ErrTaskLeaseFenced
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
 		return TaskRenewResult{}, fmt.Errorf("begin task lease renewal: %w", err)
 	}
@@ -512,12 +524,16 @@ func (s *TaskStore) Renew(ctx context.Context, workspaceID string, taskID int64,
 	if err != nil {
 		return TaskRenewResult{}, err
 	}
+	databaseFence, err := databaseCounter(fence)
+	if err != nil {
+		return TaskRenewResult{}, err
+	}
 	ttl = boundedTaskLeaseTTL(ttl)
 	if _, err := tx.Exec(ctx, `
 		UPDATE fornix.task_execution_leases
 		SET lease_until=clock_timestamp() + ($5::double precision * interval '1 millisecond'), renewed_at=clock_timestamp()
 		WHERE workspace_id=$1 AND task_id=$2 AND owner_id=$3 AND fence=$4`,
-		workspaceID, taskID, ownerID, int64(fence), ttl.Milliseconds()); err != nil {
+		workspaceID, taskID, ownerID, databaseFence, ttl.Milliseconds()); err != nil {
 		return TaskRenewResult{}, fmt.Errorf("renew task lease: %w", err)
 	}
 	lease, _, active, err := readTaskLeaseTx(ctx, tx, workspaceID, taskID, true)
@@ -562,7 +578,7 @@ func (s *TaskStore) Complete(ctx context.Context, input TaskOutcomeInput) (TaskM
 
 func (s *TaskStore) completeOrProgress(ctx context.Context, input TaskOutcomeInput, status string) (TaskMutationResult, error) {
 	workspaceID := normalizeWorkspace(input.WorkspaceID)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
 		return TaskMutationResult{}, fmt.Errorf("begin task completion: %w", err)
 	}
@@ -647,7 +663,7 @@ func (s *TaskStore) Fail(ctx context.Context, input TaskFailureInput) (TaskMutat
 	if input.Retryable == nil {
 		retryable = class == contracts.FailureTransient || class == contracts.FailureTimeout || class == contracts.FailureRateLimited
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
 		return TaskMutationResult{}, fmt.Errorf("begin task failure: %w", err)
 	}
@@ -740,7 +756,7 @@ func (s *TaskStore) Fail(ctx context.Context, input TaskFailureInput) (TaskMutat
 // worker mutations from proceeding.
 func (s *TaskStore) Cancel(ctx context.Context, input TaskCancelInput) (TaskMutationResult, error) {
 	workspaceID := normalizeWorkspace(input.WorkspaceID)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
 		return TaskMutationResult{}, fmt.Errorf("begin task cancellation: %w", err)
 	}
@@ -802,11 +818,23 @@ func (s *TaskStore) Cancel(ctx context.Context, input TaskCancelInput) (TaskMuta
 
 // Get reads one task from the workspace-scoped compatibility read model.
 func (s *TaskStore) Get(ctx context.Context, workspaceID string, taskID int64) (Task, error) {
-	task, err := readTask(ctx, s.pool, normalizeWorkspace(workspaceID), taskID)
+	workspaceID = normalizeWorkspace(workspaceID)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
+	if err != nil {
+		return Task{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	task, err := readTaskTx(ctx, tx, workspaceID, taskID, false)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Task{}, ErrTaskNotFound
 	}
-	return task, err
+	if err != nil {
+		return Task{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Task{}, err
+	}
+	return task, nil
 }
 
 // List returns a bounded deterministic task view filtered within one
@@ -832,21 +860,20 @@ func (s *TaskStore) List(ctx context.Context, workspaceID, status, assigned, sin
 	}
 	args = append(args, limit)
 	query += fmt.Sprintf(" ORDER BY t.created_at DESC, t.id DESC LIMIT $%d", len(args))
-	rows, err := s.pool.Query(ctx, query, args...)
+	var result []Task
+	err := workspaceQueryRows(ctx, s.pool, workspaceID, query, args, func(rows pgx.Rows) error {
+		result = make([]Task, 0)
+		for rows.Next() {
+			task, err := scanTask(rows)
+			if err != nil {
+				return fmt.Errorf("scan task: %w", err)
+			}
+			result = append(result, task)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, fmt.Errorf("list tasks: %w", err)
-	}
-	defer rows.Close()
-	result := make([]Task, 0)
-	for rows.Next() {
-		task, err := scanTask(rows)
-		if err != nil {
-			return nil, fmt.Errorf("scan task: %w", err)
-		}
-		result = append(result, task)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate tasks: %w", err)
 	}
 	return result, nil
 }

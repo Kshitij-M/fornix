@@ -23,11 +23,12 @@ import (
 )
 
 var (
-	ErrAgentRunMissing   = errors.New("agent run not found")
-	ErrAgentRunConflict  = errors.New("agent run state version conflict")
-	ErrAgentRunTerminal  = errors.New("agent run is already terminal")
-	ErrAgentRunCancelled = errors.New("agent run is cancelled")
-	ErrAgentRunStale     = errors.New("agent run task fence is stale")
+	ErrAgentRunMissing        = errors.New("agent run not found")
+	ErrAgentRunConflict       = errors.New("agent run state version conflict")
+	ErrAgentRunTerminal       = errors.New("agent run is already terminal")
+	ErrAgentRunCancelled      = errors.New("agent run is cancelled")
+	ErrAgentRunStale          = errors.New("agent run task fence is stale")
+	ErrAgentRunImmutableInput = errors.New("agent run immutable input changed")
 )
 
 // AgentRunStore is the Postgres checkpoint boundary for the bounded agent
@@ -125,7 +126,7 @@ func (s *AgentRunStore) Reserve(ctx context.Context, request contracts.AgentRunR
 	}
 	run.StateHash = run.ComputeStateHash()
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, request.WorkspaceID)
 	if err != nil {
 		return contracts.AgentRun{}, false, fmt.Errorf("begin agent run reserve: %w", err)
 	}
@@ -179,11 +180,23 @@ func (s *AgentRunStore) Get(ctx context.Context, workspaceID, runID string) (con
 	if s == nil || s.pool == nil {
 		return contracts.AgentRun{}, fmt.Errorf("agent run store is not configured")
 	}
-	run, err := readAgentRun(ctx, s.pool, strings.TrimSpace(workspaceID), strings.TrimSpace(runID), false)
+	workspaceID, runID = strings.TrimSpace(workspaceID), strings.TrimSpace(runID)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
+	if err != nil {
+		return contracts.AgentRun{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	run, err := readAgentRunTx(ctx, tx, workspaceID, runID, false)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return contracts.AgentRun{}, ErrAgentRunMissing
 	}
-	return run, err
+	if err != nil {
+		return contracts.AgentRun{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return contracts.AgentRun{}, err
+	}
+	return run, nil
 }
 
 // List returns a bounded, deterministic summary view within one workspace.
@@ -199,27 +212,26 @@ func (s *AgentRunStore) List(ctx context.Context, workspaceID string, limit int)
 	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
-	rows, err := s.pool.Query(ctx, `
+	var result []contracts.AgentRunSummary
+	err := workspaceQueryRows(ctx, s.pool, workspaceID, `
 		SELECT id, workspace_id, state, phase, turn, step, context_hash,
 		       termination, state_hash, created_at, updated_at, finished_at
 		FROM fornix.agent_runs
 		WHERE workspace_id=$1
 		ORDER BY created_at DESC, id DESC
-		LIMIT $2`, workspaceID, limit)
+		LIMIT $2`, []any{workspaceID, limit}, func(rows pgx.Rows) error {
+		result = make([]contracts.AgentRunSummary, 0)
+		for rows.Next() {
+			var summary contracts.AgentRunSummary
+			if err := rows.Scan(&summary.ID, &summary.WorkspaceID, &summary.State, &summary.Phase, &summary.Turn, &summary.Step, &summary.ContextHash, &summary.Termination, &summary.StateHash, &summary.CreatedAt, &summary.UpdatedAt, &summary.FinishedAt); err != nil {
+				return fmt.Errorf("scan agent run summary: %w", err)
+			}
+			result = append(result, summary)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, fmt.Errorf("list agent runs: %w", err)
-	}
-	defer rows.Close()
-	result := make([]contracts.AgentRunSummary, 0)
-	for rows.Next() {
-		var summary contracts.AgentRunSummary
-		if err := rows.Scan(&summary.ID, &summary.WorkspaceID, &summary.State, &summary.Phase, &summary.Turn, &summary.Step, &summary.ContextHash, &summary.Termination, &summary.StateHash, &summary.CreatedAt, &summary.UpdatedAt, &summary.FinishedAt); err != nil {
-			return nil, fmt.Errorf("scan agent run summary: %w", err)
-		}
-		result = append(result, summary)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate agent run summaries: %w", err)
 	}
 	return result, nil
 }
@@ -346,7 +358,7 @@ func (s *AgentRunStore) commit(ctx context.Context, current, next contracts.Agen
 		}
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, current.WorkspaceID)
 	if err != nil {
 		return contracts.AgentRun{}, fmt.Errorf("begin agent run commit: %w", err)
 	}
@@ -357,6 +369,9 @@ func (s *AgentRunStore) commit(ctx context.Context, current, next contracts.Agen
 	}
 	if locked.StateVersion != current.StateVersion {
 		return contracts.AgentRun{}, ErrAgentRunConflict
+	}
+	if locked.RequestHash != next.RequestHash || !sameAgentToolCatalog(locked.Tools, next.Tools) {
+		return contracts.AgentRun{}, ErrAgentRunImmutableInput
 	}
 	if locked.TaskOwnerID != next.TaskOwnerID || locked.TaskFence != next.TaskFence || !sameEntityRef(locked.Task, next.Task) {
 		return contracts.AgentRun{}, ErrAgentRunStale
@@ -557,7 +572,10 @@ func validateTaskFence(ctx context.Context, pool *pgxpool.Pool, workspaceID, tas
 	var currentOwner string
 	var currentFence int64
 	var assigned *string
-	if err := pool.QueryRow(ctx, `SELECT l.owner_id, l.fence, t.assigned_session FROM fornix.task_execution_leases l JOIN fornix.tasks t ON t.workspace_id=l.workspace_id AND t.id=l.task_id WHERE l.workspace_id=$1 AND l.task_id=$2 AND l.released_at IS NULL AND l.lease_until > clock_timestamp()`, workspaceID, parsed).Scan(&currentOwner, &currentFence, &assigned); err != nil {
+	err = workspaceQueryRow(ctx, pool, strings.TrimSpace(workspaceID), `SELECT l.owner_id, l.fence, t.assigned_session FROM fornix.task_execution_leases l JOIN fornix.tasks t ON t.workspace_id=l.workspace_id AND t.id=l.task_id WHERE l.workspace_id=$1 AND l.task_id=$2 AND l.released_at IS NULL AND l.lease_until > clock_timestamp()`, []any{strings.TrimSpace(workspaceID), parsed}, func(row pgx.Row) error {
+		return row.Scan(&currentOwner, &currentFence, &assigned)
+	})
+	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrAgentRunStale
 		}
@@ -618,6 +636,12 @@ func normalizeRunForCommit(run *contracts.AgentRun) error {
 		}
 	}
 	return nil
+}
+
+func sameAgentToolCatalog(left, right []contracts.ModelToolDefinition) bool {
+	leftJSON, leftErr := json.Marshal(left)
+	rightJSON, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftJSON, rightJSON)
 }
 
 func agentEvent(eventType string, run contracts.AgentRun, payload any) (contracts.EventEnvelope, error) {

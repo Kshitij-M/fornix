@@ -12,6 +12,7 @@ var (
 	ErrApprovalRequired = errors.New("tool approval required")
 	ErrApprovalDenied   = errors.New("tool approval denied")
 	ErrRunInProgress    = errors.New("tool run is already in progress")
+	ErrRunRecovery      = errors.New("tool run requires external outcome recovery")
 	ErrRunConflict      = errors.New("tool run request conflicts with existing idempotency record")
 	ErrStaleTaskFence   = errors.New("tool task fence is stale")
 )
@@ -40,6 +41,8 @@ func (e *FailureError) Unwrap() error {
 		return ErrApprovalDenied
 	case contracts.ToolFailureInProgress:
 		return ErrRunInProgress
+	case contracts.ToolFailureExternalUncertain:
+		return ErrRunRecovery
 	case contracts.ToolFailureStaleFence:
 		return ErrStaleTaskFence
 	default:

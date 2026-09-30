@@ -109,10 +109,12 @@ tool hot path.
 
 The direct local executor can bound time, argv, environment, working
 directory, and output, but cannot provide kernel-level network isolation or a
-complete filesystem sandbox on every host. Definitions requiring those
-guarantees are rejected in this slice. A future sandbox provider may replace
-the local executor behind the same contract after measured need and a host
-enforcement qualification.
+complete filesystem sandbox on every host. The backend registry reports those
+missing capabilities explicitly and rejects a profile that requires them.
+Only `local-process` is registered by default; selecting an unavailable OCI,
+gVisor, or microVM backend fails closed. Runtime-backed execution, durable
+runtime identity/reconciliation, and host enforcement qualification remain
+open under Issue #28.
 
 ## Acceptance tests
 
@@ -129,3 +131,16 @@ enforcement qualification.
   append-only lifecycle event ordering;
 - fresh/existing migrations, unit/integration tests, smoke, CI, and measured
   latency/database/storage impact.
+
+## Qualification update
+
+[`248-sandbox-backend-qualification-foundation.md`](248-sandbox-backend-qualification-foundation.md)
+adds the signed, deployment-authorized evidence required before a future
+non-local provider may register. The proof binds provider/runtime/configuration
+hashes, an immutable image digest, control report, expiry, and the tested
+numeric budget envelope; request and recovery identities carry its hash.
+Workspace-pinned trust is checked at resolution. This is an admission
+substrate—not a shipped sandbox implementation or proof that a real runtime
+enforces isolation. The default remains the bounded, explicitly limited
+`local-process` provider, and OCI/gVisor/microVM remain unavailable until a
+real provider and deployment-owned conformance evidence exist.

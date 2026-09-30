@@ -19,14 +19,18 @@ The product path is:
 install → start → prompt → inspect a verified result
 ```
 
-The first supported workflow is:
+The intended workflow is:
 
 ```sh
-curl -fsSL https://get.fornix.dev/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Kshitij-M/fornix/main/scripts/install.sh | sh
 cd my-repository
 fornix start
 fornix run --repo . "Review this repository and identify the highest-risk issues"
 ```
+
+The raw GitHub installer is the current public-alpha path. The shorter
+`get.fornix.dev` URL is planned convenience hosting and must not be advertised
+as supported until its DNS, hosting, and release-version pinning are verified.
 
 The default provider is the deterministic fake provider. A model provider is
 never enabled implicitly. OpenAI-compatible execution remains explicit,

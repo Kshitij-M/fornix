@@ -86,6 +86,24 @@ records each model-facing tool result after the durable tool ledger settles.
 Approval is owned by the existing tool approval table and is resumed by the
 same deterministic tool-call identity.
 
+Retrieved evidence stays in a non-privileged `user` message, and the persisted
+run catalog is an execution-time allowlist rather than an authorization grant.
+Model-visible tool descriptions and argument schemas are projected from the
+registered definition and structured executor contract. Requester-supplied
+metadata drift fails before reservation; a per-run fingerprint rejects
+registry changes before resumed execution. Provider adapters serialize only
+the provider-standard fields. Registry text is still model input, not policy,
+so workspace authorization, approvals, fences, and effect controls remain
+independent authority boundaries.
+
+Retrieved context is appended as an explicitly framed `user` message, never as
+a privileged system instruction. The persisted run tool catalog is a hard
+allowlist: creation rejects unregistered names, dispatch rechecks exact
+function-name membership before calling the tool executor, and the Postgres
+commit boundary rejects catalog mutation. This is defense in depth, not a
+claim that prompt injection can be eliminated; current workspace policy,
+approval, fencing, and effect reservations remain the execution authority.
+
 ## Budgets and cost policy
 
 Defaults are deliberately conservative: 8 turns, 32 model steps, 64 tool

@@ -108,7 +108,7 @@ func (s *EvidenceStore) ResolveEvidenceHashes(ctx context.Context, workspaceID s
 	if len(wanted) == 0 {
 		return nil, nil
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("begin evidence resolution: %w", err)
 	}
@@ -193,7 +193,7 @@ func (s *EvidenceStore) Put(ctx context.Context, input EvidencePutInput) (Eviden
 	if s == nil || s.pool == nil {
 		return EvidencePutResult{}, fmt.Errorf("evidence store is not configured")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, input.WorkspaceID)
 	if err != nil {
 		return EvidencePutResult{}, fmt.Errorf("begin evidence write: %w", err)
 	}
@@ -347,7 +347,7 @@ func (s *EvidenceStore) AddEdge(ctx context.Context, input contracts.ProvenanceE
 	if s == nil || s.pool == nil {
 		return ProvenanceEdgeResult{}, fmt.Errorf("evidence store is not configured")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, input.WorkspaceID)
 	if err != nil {
 		return ProvenanceEdgeResult{}, fmt.Errorf("begin provenance edge: %w", err)
 	}
@@ -444,7 +444,7 @@ func (s *EvidenceStore) Traverse(ctx context.Context, request contracts.Provenan
 	if err != nil {
 		return nil, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("begin provenance traversal: %w", err)
 	}
@@ -472,7 +472,7 @@ func (s *EvidenceStore) Disclose(ctx context.Context, request contracts.Disclosu
 	if err != nil {
 		return contracts.DisclosureResult{}, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, normalized.WorkspaceID)
 	if err != nil {
 		return contracts.DisclosureResult{}, fmt.Errorf("begin disclosure: %w", err)
 	}
@@ -588,6 +588,9 @@ func normalizeEvidenceInput(input EvidencePutInput) (EvidencePutInput, string, e
 		return EvidencePutInput{}, "", fmt.Errorf("%w: identity field is too large", ErrInvalidEvidence)
 	}
 	input.RawPayload = append([]byte(nil), input.RawPayload...)
+	// The digest authenticates immutable evidence bytes for replay and
+	// integrity checks; it is not a password/token verifier.
+	// codeql[go/weak-sensitive-data-hashing]
 	digest := sha256.Sum256(input.RawPayload)
 	return input, hex.EncodeToString(digest[:]), nil
 }
@@ -786,7 +789,7 @@ func traverseTx(ctx context.Context, tx pgx.Tx, workspaceID string, root int64, 
 		if err != nil {
 			return nil, queries, truncated, err
 		}
-		next := make([]int64, 0, maxNodes)
+		next := make([]int64, 0)
 		nextSet := make(map[int64]bool)
 		rowCount := 0
 		for rows.Next() {

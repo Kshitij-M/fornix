@@ -65,7 +65,7 @@ func (s *RetrievalSurfaceStore) Capture(ctx context.Context, surface contracts.R
 	trace, _ := json.Marshal(surface.Trace)
 	references, _ := json.Marshal(surface.References)
 	actor, _ := json.Marshal(surface.Actor)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, surface.WorkspaceID)
 	if err != nil {
 		return contracts.RetrievalSurface{}, false, fmt.Errorf("begin retrieval surface capture: %w", err)
 	}
@@ -111,7 +111,9 @@ func (s *RetrievalSurfaceStore) Get(ctx context.Context, workspaceID, id string)
 	}
 	var surface contracts.RetrievalSurface
 	var budget, trace, references, actor []byte
-	err := s.pool.QueryRow(ctx, retrievalSurfaceSelect+` WHERE workspace_id=$1 AND id=$2`, strings.TrimSpace(workspaceID), strings.TrimSpace(id)).Scan(retrievalSurfaceArgs(&surface, &budget, &trace, &references, &actor)...)
+	err := workspaceQueryRow(ctx, s.pool, strings.TrimSpace(workspaceID), retrievalSurfaceSelect+` WHERE workspace_id=$1 AND id=$2`, []any{strings.TrimSpace(workspaceID), strings.TrimSpace(id)}, func(row pgx.Row) error {
+		return row.Scan(retrievalSurfaceArgs(&surface, &budget, &trace, &references, &actor)...)
+	})
 	if errors.Is(err, pgx.ErrNoRows) {
 		return contracts.RetrievalSurface{}, ErrRetrievalSurfaceNotFound
 	}
@@ -138,24 +140,22 @@ func (s *RetrievalSurfaceStore) GetMany(ctx context.Context, workspaceID string,
 	if len(ids) > contracts.MaxEvalCases {
 		return nil, fmt.Errorf("retrieval surface batch exceeds %d", contracts.MaxEvalCases)
 	}
-	rows, err := s.pool.Query(ctx, retrievalSurfaceSelect+` WHERE workspace_id=$1 AND id=ANY($2) ORDER BY captured_at,id`, workspaceID, ids)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
 	result := make(map[string]contracts.RetrievalSurface, len(ids))
-	for rows.Next() {
-		var surface contracts.RetrievalSurface
-		var budget, trace, references, actor []byte
-		if err := rows.Scan(retrievalSurfaceArgs(&surface, &budget, &trace, &references, &actor)...); err != nil {
-			return nil, err
+	err := workspaceQueryRows(ctx, s.pool, workspaceID, retrievalSurfaceSelect+` WHERE workspace_id=$1 AND id=ANY($2) ORDER BY captured_at,id`, []any{workspaceID, ids}, func(rows pgx.Rows) error {
+		for rows.Next() {
+			var surface contracts.RetrievalSurface
+			var budget, trace, references, actor []byte
+			if err := rows.Scan(retrievalSurfaceArgs(&surface, &budget, &trace, &references, &actor)...); err != nil {
+				return err
+			}
+			if err := decodeRetrievalSurface(&surface, budget, trace, references, actor); err != nil {
+				return err
+			}
+			result[surface.ID] = surface
 		}
-		if err := decodeRetrievalSurface(&surface, budget, trace, references, actor); err != nil {
-			return nil, err
-		}
-		result[surface.ID] = surface
-	}
-	if err := rows.Err(); err != nil {
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
 	if len(result) != len(ids) {
@@ -177,34 +177,35 @@ func (s *RetrievalSurfaceStore) List(ctx context.Context, workspaceID string, li
 		limit = MaxRetrievalSurfacePageSize
 	}
 	workspaceID = strings.TrimSpace(workspaceID)
-	var rows pgx.Rows
-	var err error
+	var query string
+	var args []any
 	if cursor == "" {
-		rows, err = s.pool.Query(ctx, retrievalSurfaceSelect+` WHERE workspace_id=$1 ORDER BY captured_at,id LIMIT $2`, workspaceID, limit+1)
+		query = retrievalSurfaceSelect + ` WHERE workspace_id=$1 ORDER BY captured_at,id LIMIT $2`
+		args = []any{workspaceID, limit + 1}
 	} else {
 		value, parseErr := decodeRetrievalSurfaceCursor(cursor)
 		if parseErr != nil {
 			return contracts.RetrievalSurfacePage{}, parseErr
 		}
-		rows, err = s.pool.Query(ctx, retrievalSurfaceSelect+` WHERE workspace_id=$1 AND (captured_at,id) > ($2,$3) ORDER BY captured_at,id LIMIT $4`, workspaceID, value.CapturedAt, value.ID, limit+1)
+		query = retrievalSurfaceSelect + ` WHERE workspace_id=$1 AND (captured_at,id) > ($2,$3) ORDER BY captured_at,id LIMIT $4`
+		args = []any{workspaceID, value.CapturedAt, value.ID, limit + 1}
 	}
+	page := contracts.RetrievalSurfacePage{Items: make([]contracts.RetrievalSurface, 0)}
+	err := workspaceQueryRows(ctx, s.pool, workspaceID, query, args, func(rows pgx.Rows) error {
+		for rows.Next() {
+			var surface contracts.RetrievalSurface
+			var budget, trace, references, actor []byte
+			if err := rows.Scan(retrievalSurfaceArgs(&surface, &budget, &trace, &references, &actor)...); err != nil {
+				return err
+			}
+			if err := decodeRetrievalSurface(&surface, budget, trace, references, actor); err != nil {
+				return err
+			}
+			page.Items = append(page.Items, surface)
+		}
+		return nil
+	})
 	if err != nil {
-		return contracts.RetrievalSurfacePage{}, err
-	}
-	defer rows.Close()
-	page := contracts.RetrievalSurfacePage{Items: make([]contracts.RetrievalSurface, 0, limit)}
-	for rows.Next() {
-		var surface contracts.RetrievalSurface
-		var budget, trace, references, actor []byte
-		if err := rows.Scan(retrievalSurfaceArgs(&surface, &budget, &trace, &references, &actor)...); err != nil {
-			return contracts.RetrievalSurfacePage{}, err
-		}
-		if err := decodeRetrievalSurface(&surface, budget, trace, references, actor); err != nil {
-			return contracts.RetrievalSurfacePage{}, err
-		}
-		page.Items = append(page.Items, surface)
-	}
-	if err := rows.Err(); err != nil {
 		return contracts.RetrievalSurfacePage{}, err
 	}
 	if len(page.Items) > limit {

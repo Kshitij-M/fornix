@@ -37,11 +37,14 @@ func (s *AgentRunStore) ClaimNextAgentRun(
 		return contracts.AgentRunClaim{}, false, fmt.Errorf("agent run store is not configured")
 	}
 	workspaceID, ownerID = strings.TrimSpace(workspaceID), strings.TrimSpace(ownerID)
+	if workspaceID == "" {
+		return contracts.AgentRunClaim{}, false, fmt.Errorf("workspace_id is required for RLS-safe agent-run scheduling")
+	}
 	if ownerID == "" {
 		return contracts.AgentRunClaim{}, false, errors.New("owner_id is required")
 	}
 	ttl = contracts.NormalizeAgentRunLeaseTTL(ttl)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
 		return contracts.AgentRunClaim{}, false, fmt.Errorf("begin agent run claim: %w", err)
 	}
@@ -168,6 +171,94 @@ func (s *AgentRunStore) ClaimNextAgentRun(
 	return contracts.AgentRunClaim{Run: run, Lease: lease, Takeover: takeover}, true, nil
 }
 
+// AcquireAgentRunLease acquires ownership for one known run without selecting
+// from the scheduler queue. It is used by authenticated direct API mutations
+// so they share the exact same fenced authority as background workers. A
+// terminal run returns without a lease because no mutation is required.
+func (s *AgentRunStore) AcquireAgentRunLease(ctx context.Context, workspaceID, runID, ownerID string, ttl time.Duration) (contracts.AgentRunClaim, error) {
+	if s == nil || s.pool == nil {
+		return contracts.AgentRunClaim{}, fmt.Errorf("agent run store is not configured")
+	}
+	workspaceID, runID, ownerID = strings.TrimSpace(workspaceID), strings.TrimSpace(runID), strings.TrimSpace(ownerID)
+	if err := contracts.ValidateAgentRunLeaseIdentity(workspaceID, runID, ownerID); err != nil {
+		return contracts.AgentRunClaim{}, err
+	}
+	ttl = contracts.NormalizeAgentRunLeaseTTL(ttl)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
+	if err != nil {
+		return contracts.AgentRunClaim{}, fmt.Errorf("begin direct agent run lease: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	run, err := readAgentRunTx(ctx, tx, workspaceID, runID, true)
+	if err != nil {
+		return contracts.AgentRunClaim{}, err
+	}
+	if contracts.IsAgentTerminal(run.State) {
+		if err := tx.Commit(ctx); err != nil {
+			return contracts.AgentRunClaim{}, fmt.Errorf("commit terminal direct agent run lease: %w", err)
+		}
+		return contracts.AgentRunClaim{Run: run}, nil
+	}
+	current, active, readErr := readAgentRunLeaseTx(ctx, tx, workspaceID, runID, true)
+	if readErr != nil && !errors.Is(readErr, ErrAgentRunLeaseMissing) {
+		return contracts.AgentRunClaim{}, readErr
+	}
+	if readErr == nil && active {
+		if current.OwnerID != ownerID {
+			return contracts.AgentRunClaim{}, ErrAgentRunLeaseHeld
+		}
+		current.LeaseTTLMS = ttl.Milliseconds()
+		if err := tx.Commit(ctx); err != nil {
+			return contracts.AgentRunClaim{}, fmt.Errorf("commit existing direct agent run lease: %w", err)
+		}
+		return contracts.AgentRunClaim{Run: run, Lease: current}, nil
+	}
+	takeover := readErr == nil
+	if !takeover {
+		if _, err := tx.Exec(ctx, `
+			INSERT INTO fornix.agent_run_worker_leases(
+				workspace_id, run_id, owner_id, fence, lease_until,
+				acquired_at, renewed_at, released_at, updated_at
+			) VALUES($1,$2,$3,1,clock_timestamp() + ($4::double precision * interval '1 millisecond'),clock_timestamp(),clock_timestamp(),NULL,clock_timestamp())`, workspaceID, runID, ownerID, ttl.Milliseconds()); err != nil {
+			return contracts.AgentRunClaim{}, fmt.Errorf("insert direct agent run lease: %w", err)
+		}
+	} else {
+		if current.Fence >= maxAgentRunFence {
+			return contracts.AgentRunClaim{}, ErrAgentRunFenceExhausted
+		}
+		if _, err := tx.Exec(ctx, `
+			UPDATE fornix.agent_run_worker_leases
+			SET owner_id=$3, fence=fence+1,
+				lease_until=clock_timestamp() + ($4::double precision * interval '1 millisecond'),
+				acquired_at=clock_timestamp(), renewed_at=clock_timestamp(),
+				released_at=NULL, updated_at=clock_timestamp()
+			WHERE workspace_id=$1 AND run_id=$2 AND fence=$5`, workspaceID, runID, ownerID, ttl.Milliseconds(), int64(current.Fence)); err != nil {
+			return contracts.AgentRunClaim{}, fmt.Errorf("take over direct agent run lease: %w", err)
+		}
+	}
+	lease, leaseActive, err := readAgentRunLeaseTx(ctx, tx, workspaceID, runID, true)
+	if err != nil {
+		return contracts.AgentRunClaim{}, err
+	}
+	if !leaseActive || lease.OwnerID != ownerID || lease.Fence == 0 {
+		return contracts.AgentRunClaim{}, errors.New("direct agent run lease acquisition did not produce an active owner")
+	}
+	lease.LeaseTTLMS = ttl.Milliseconds()
+	if s.observability != nil {
+		op := "direct_acquire"
+		if takeover {
+			op = "direct_takeover"
+		}
+		if err := s.observability.recordObservationTx(ctx, tx, contracts.RunObservation{WorkspaceID: workspaceID, IdempotencyKey: fmt.Sprintf("scheduler-observation:%s:%d", runID, lease.Fence), Kind: contracts.ObservationScheduler, Component: "agent_scheduler", Operation: op, Outcome: contracts.OutcomeSucceeded, Actor: contracts.ActorRef{ID: ownerID, Kind: "api_worker", WorkspaceID: workspaceID}, SourceKind: "agent_run_lease", SourceID: runID, StartedAt: time.Now().UTC(), Metadata: map[string]string{"fence": fmt.Sprintf("%d", lease.Fence)}}); err != nil {
+			return contracts.AgentRunClaim{}, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return contracts.AgentRunClaim{}, fmt.Errorf("commit direct agent run lease: %w", err)
+	}
+	return contracts.AgentRunClaim{Run: run, Lease: lease, Takeover: takeover}, nil
+}
+
 // GetAgentRunLease reads ownership without authorizing a mutation.
 func (s *AgentRunStore) GetAgentRunLease(ctx context.Context, workspaceID, runID string) (contracts.AgentRunLease, bool, error) {
 	if s == nil || s.pool == nil {
@@ -177,11 +268,22 @@ func (s *AgentRunStore) GetAgentRunLease(ctx context.Context, workspaceID, runID
 	if err := contracts.ValidateAgentRunLeaseIdentity(workspaceID, runID, "read"); err != nil {
 		return contracts.AgentRunLease{}, false, err
 	}
-	lease, active, err := readAgentRunLease(ctx, s.pool, workspaceID, runID, false)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
+	if err != nil {
+		return contracts.AgentRunLease{}, false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	lease, active, err := readAgentRunLeaseTx(ctx, tx, workspaceID, runID, false)
 	if errors.Is(err, ErrAgentRunLeaseMissing) {
 		return contracts.AgentRunLease{}, false, nil
 	}
-	return lease, active, err
+	if err != nil {
+		return contracts.AgentRunLease{}, false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return contracts.AgentRunLease{}, false, err
+	}
+	return lease, active, nil
 }
 
 // ValidateAgentRunLease is a non-locking admission check. CommitOwned repeats
@@ -194,7 +296,12 @@ func (s *AgentRunStore) ValidateAgentRunLease(ctx context.Context, run contracts
 	if err := contracts.ValidateAgentRunLeaseIdentity(lease.WorkspaceID, lease.RunID, lease.OwnerID); err != nil {
 		return err
 	}
-	current, active, err := readAgentRunLease(ctx, s.pool, lease.WorkspaceID, lease.RunID, false)
+	tx, err := beginWorkspaceTx(ctx, s.pool, lease.WorkspaceID)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	current, active, err := readAgentRunLeaseTx(ctx, tx, lease.WorkspaceID, lease.RunID, false)
 	if err != nil {
 		return err
 	}
@@ -210,7 +317,7 @@ func (s *AgentRunStore) ValidateAgentRunLease(ctx context.Context, run contracts
 	if !active {
 		return ErrAgentRunLeaseExpired
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 // RenewAgentRunLease extends the exact live owner/fence. Expired or stale
@@ -223,7 +330,7 @@ func (s *AgentRunStore) RenewAgentRunLease(ctx context.Context, lease contracts.
 		return contracts.AgentRunLease{}, err
 	}
 	ttl = contracts.NormalizeAgentRunLeaseTTL(ttl)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, lease.WorkspaceID)
 	if err != nil {
 		return contracts.AgentRunLease{}, fmt.Errorf("begin agent run lease renewal: %w", err)
 	}
@@ -263,7 +370,7 @@ func (s *AgentRunStore) ReleaseAgentRunLease(ctx context.Context, lease contract
 	if s == nil || s.pool == nil {
 		return fmt.Errorf("agent run store is not configured")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, lease.WorkspaceID)
 	if err != nil {
 		return fmt.Errorf("begin agent run lease release: %w", err)
 	}

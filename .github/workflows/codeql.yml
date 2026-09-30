@@ -57,6 +57,9 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
+          # Source-level justifications have no effect unless CodeQL runs its
+          # language-specific suppression query and records them in SARIF.
+          packs: ${{ matrix.language == 'go' && 'codeql/go-queries:AlertSuppression.ql' || '' }}
 
       - name: Autobuild Go
         if: matrix.language == 'go'

@@ -68,16 +68,21 @@ func ObservePacketState(ctx context.Context, root string, packet contracts.Chang
 	if packet.WorkspaceID == "" {
 		return PacketStateObservation{}, fmt.Errorf("packet workspace_id is required")
 	}
+	repositoryRoot, err := openChangeRoot(root)
+	if err != nil {
+		return PacketStateObservation{}, err
+	}
+	defer repositoryRoot.Close()
 	operations := sortedOperations(packet.Operations)
 	for _, operation := range operations {
 		if err := ctx.Err(); err != nil {
 			return PacketStateObservation{}, err
 		}
-		if conflict := checkPrecondition(root, operation); conflict != nil {
+		if conflict := checkPrecondition(repositoryRoot, operation); conflict != nil {
 			return PacketStateObservation{Conflict: conflict}, fmt.Errorf("%w: %s", ErrSourceConflict, conflict.Path)
 		}
 	}
-	hash, err := observedTreeHashFull(root, packet.Source, operations)
+	hash, err := observedTreeHashFull(repositoryRoot, packet.Source, operations)
 	if err != nil {
 		return PacketStateObservation{}, err
 	}
@@ -94,11 +99,7 @@ func ObservePacketState(ctx context.Context, root string, packet contracts.Chang
 		}
 	}
 	for path := range paths {
-		absolute, joinErr := SafeJoin(root, path)
-		if joinErr != nil {
-			return PacketStateObservation{}, joinErr
-		}
-		info, statErr := os.Lstat(absolute)
+		info, statErr := lstatChangePath(repositoryRoot, path)
 		if errors.Is(statErr, os.ErrNotExist) {
 			continue
 		}
@@ -108,7 +109,7 @@ func ObservePacketState(ctx context.Context, root string, packet contracts.Chang
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return PacketStateObservation{}, fmt.Errorf("%w: %s", ErrUnsafePath, path)
 		}
-		data, readErr := os.ReadFile(absolute)
+		data, readErr := repositoryRoot.ReadFile(filepath.FromSlash(path))
 		if readErr != nil {
 			return PacketStateObservation{}, readErr
 		}
@@ -132,15 +133,15 @@ func ObserveAppliedPacketState(ctx context.Context, root string, packet contract
 	if err := ctx.Err(); err != nil {
 		return PacketStateObservation{}, err
 	}
-	hash, err := observedTreeHashFull(root, packet.Source, packet.Operations)
+	repositoryRoot, err := openChangeRoot(root)
 	if err != nil {
 		return PacketStateObservation{}, err
 	}
-	repositoryRoot, err := os.OpenRoot(root)
-	if err != nil {
-		return PacketStateObservation{}, fmt.Errorf("open repository root: %w", err)
-	}
 	defer repositoryRoot.Close()
+	hash, err := observedTreeHashFull(repositoryRoot, packet.Source, packet.Operations)
+	if err != nil {
+		return PacketStateObservation{}, err
+	}
 	var files int
 	var bytes int64
 	paths := make(map[string]struct{}, len(packet.Source.Files)+len(packet.Operations)*2)
@@ -157,11 +158,7 @@ func ObserveAppliedPacketState(ctx context.Context, root string, packet contract
 		if err := ctx.Err(); err != nil {
 			return PacketStateObservation{}, err
 		}
-		if _, joinErr := SafeJoin(root, path); joinErr != nil {
-			return PacketStateObservation{}, joinErr
-		}
-		relative := filepath.FromSlash(path)
-		info, statErr := repositoryRoot.Lstat(relative)
+		info, statErr := lstatChangePath(repositoryRoot, path)
 		if errors.Is(statErr, os.ErrNotExist) {
 			continue
 		}
@@ -171,7 +168,7 @@ func ObserveAppliedPacketState(ctx context.Context, root string, packet contract
 		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 			return PacketStateObservation{}, fmt.Errorf("%w: %s", ErrUnsafePath, path)
 		}
-		data, readErr := repositoryRoot.ReadFile(relative)
+		data, readErr := repositoryRoot.ReadFile(filepath.FromSlash(path))
 		if readErr != nil {
 			return PacketStateObservation{}, readErr
 		}
@@ -184,8 +181,8 @@ func ObserveAppliedPacketState(ctx context.Context, root string, packet contract
 // ContentResolver supplies immutable content artifacts to the executor.
 type ContentResolver func(context.Context, string, string) ([]byte, error)
 
-// Executor applies a packet through direct filesystem APIs. Hooks exist only
-// for deterministic crash tests and are nil in production.
+// Executor applies a packet through one opened filesystem root. Hooks exist
+// only for deterministic crash tests and are nil in production.
 type Executor struct {
 	BeforeOperation func(contracts.ChangeOperation) error
 	AfterOperation  func(contracts.ChangeOperation) error
@@ -213,38 +210,97 @@ func NormalizeRelativePath(value string) (string, error) {
 	return clean, nil
 }
 
-// SafeJoin resolves a normalized relative path inside root without following
-// a symlink component. A missing final component is allowed for create.
+// SafeJoin is a compatibility path validator. Its returned host path must not
+// be used for a later mutation; use the root-handle executor instead.
 func SafeJoin(root, relative string) (string, error) {
 	root = filepath.Clean(strings.TrimSpace(root))
-	if root == "" || !filepath.IsAbs(root) {
-		return "", fmt.Errorf("%w: repository root must be absolute", ErrUnsafePath)
-	}
 	path, err := NormalizeRelativePath(relative)
 	if err != nil {
 		return "", err
 	}
-	joined := filepath.Join(root, filepath.FromSlash(path))
-	rel, err := filepath.Rel(root, joined)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("%w: path escapes root", ErrUnsafePath)
+	repositoryRoot, err := openChangeRoot(root)
+	if err != nil {
+		return "", err
 	}
-	current := root
-	parts := strings.Split(filepath.ToSlash(rel), "/")
+	defer repositoryRoot.Close()
+	if _, err := lstatChangePath(repositoryRoot, path); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return "", err
+	}
+	return filepath.Join(root, filepath.FromSlash(path)), nil
+}
+
+// openChangeRoot pins one validated repository directory for an entire
+// observation or application. Subsequent path operations must use this handle
+// rather than rebuilding absolute host paths.
+func openChangeRoot(path string) (*os.Root, error) {
+	path = filepath.Clean(strings.TrimSpace(path))
+	if path == "" || !filepath.IsAbs(path) {
+		return nil, fmt.Errorf("%w: repository root must be absolute", ErrUnsafePath)
+	}
+	filesystemRoot, err := os.OpenRoot(string(filepath.Separator))
+	if err != nil {
+		return nil, fmt.Errorf("open filesystem root: %w", err)
+	}
+	defer filesystemRoot.Close()
+	relative, err := filepath.Rel(string(filepath.Separator), path)
+	if err != nil || !filepath.IsLocal(relative) {
+		return nil, fmt.Errorf("%w: repository root is not local to the filesystem root", ErrUnsafePath)
+	}
+	info, err := filesystemRoot.Lstat(relative)
+	if err != nil {
+		return nil, fmt.Errorf("stat repository root: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%w: repository root must be a non-symlink directory", ErrUnsafePath)
+	}
+	repositoryRoot, err := filesystemRoot.OpenRoot(relative)
+	if err != nil {
+		return nil, fmt.Errorf("open repository root: %w", err)
+	}
+	openedInfo, err := repositoryRoot.Stat(".")
+	if err != nil || !os.SameFile(info, openedInfo) {
+		_ = repositoryRoot.Close()
+		if err == nil {
+			err = fmt.Errorf("repository root changed while opening")
+		}
+		return nil, fmt.Errorf("%w: %v", ErrUnsafePath, err)
+	}
+	return repositoryRoot, nil
+}
+
+// lstatChangePath checks each normalized component through an opened root.
+// It rejects observed symlinks and non-directory parents. Rooted operations
+// still enforce containment if the tree changes after this inspection.
+func lstatChangePath(root *os.Root, relative string) (os.FileInfo, error) {
+	if root == nil {
+		return nil, fmt.Errorf("%w: repository root is unavailable", ErrUnsafePath)
+	}
+	normalized, err := NormalizeRelativePath(relative)
+	if err != nil {
+		return nil, err
+	}
+	parts := strings.Split(normalized, "/")
+	current := ""
+	var finalInfo os.FileInfo
 	for index, part := range parts {
-		current = filepath.Join(current, part)
-		info, statErr := os.Lstat(current)
-		if statErr != nil {
-			if errors.Is(statErr, os.ErrNotExist) && index == len(parts)-1 {
-				break
-			}
-			return "", fmt.Errorf("stat change path: %w", statErr)
+		if current == "" {
+			current = part
+		} else {
+			current = filepath.Join(current, part)
+		}
+		info, err := root.Lstat(current)
+		if err != nil {
+			return nil, err
 		}
 		if info.Mode()&os.ModeSymlink != 0 {
-			return "", fmt.Errorf("%w: symlink component %s", ErrUnsafePath, part)
+			return nil, fmt.Errorf("%w: symlink component %s", ErrUnsafePath, part)
 		}
+		if index < len(parts)-1 && !info.IsDir() {
+			return nil, fmt.Errorf("%w: non-directory parent %s", ErrUnsafePath, part)
+		}
+		finalInfo = info
 	}
-	return joined, nil
+	return finalInfo, nil
 }
 
 // CaptureSnapshot reads only the affected paths in stable order. It rejects
@@ -258,17 +314,11 @@ func CaptureSnapshot(ctx context.Context, workspaceID, repository, root string, 
 	if !filepath.IsAbs(root) {
 		return contracts.ChangeSourceSnapshot{}, fmt.Errorf("repository root must be absolute")
 	}
-	if info, err := os.Lstat(root); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-		if err == nil {
-			err = fmt.Errorf("not a directory")
-		}
-		return contracts.ChangeSourceSnapshot{}, fmt.Errorf("stat repository root: %w", err)
-	}
 	normalized, err := normalizePaths(paths)
 	if err != nil {
 		return contracts.ChangeSourceSnapshot{}, err
 	}
-	repositoryRoot, err := os.OpenRoot(root)
+	repositoryRoot, err := openChangeRoot(root)
 	if err != nil {
 		return contracts.ChangeSourceSnapshot{}, fmt.Errorf("open repository root: %w", err)
 	}
@@ -278,11 +328,8 @@ func CaptureSnapshot(ctx context.Context, workspaceID, repository, root string, 
 		if err := ctx.Err(); err != nil {
 			return contracts.ChangeSourceSnapshot{}, err
 		}
-		if _, err := SafeJoin(root, path); err != nil {
-			return contracts.ChangeSourceSnapshot{}, err
-		}
 		relative := filepath.FromSlash(path)
-		info, statErr := repositoryRoot.Lstat(relative)
+		info, statErr := lstatChangePath(repositoryRoot, path)
 		if errors.Is(statErr, os.ErrNotExist) {
 			files = append(files, contracts.ChangeSourceFile{Path: path, Exists: false})
 			continue
@@ -434,6 +481,11 @@ func (e Executor) Apply(ctx context.Context, root string, packet contracts.Chang
 	if packet.WorkspaceID == "" {
 		return AppliedChange{}, fmt.Errorf("packet workspace_id is required")
 	}
+	repositoryRoot, err := openChangeRoot(root)
+	if err != nil {
+		return AppliedChange{}, err
+	}
+	defer repositoryRoot.Close()
 	result := AppliedChange{ExpectedTreeHash: predictedTreeHash(packet.Source, packet.Operations), Operations: append([]contracts.ChangeOperation(nil), packet.Operations...)}
 	for _, operation := range sortedOperations(packet.Operations) {
 		if err := ctx.Err(); err != nil {
@@ -444,12 +496,12 @@ func (e Executor) Apply(ctx context.Context, root string, packet contracts.Chang
 				return result, err
 			}
 		}
-		if conflict := checkPrecondition(root, operation); conflict != nil {
+		if conflict := checkPrecondition(repositoryRoot, operation); conflict != nil {
 			result.Conflict = conflict
 			return result, fmt.Errorf("%w: %s", ErrSourceConflict, conflict.Path)
 		}
 		if !dryRun {
-			if err := e.applyOne(ctx, packet.WorkspaceID, root, operation, resolve); err != nil {
+			if err := e.applyOne(ctx, packet.WorkspaceID, repositoryRoot, operation, resolve); err != nil {
 				return result, err
 			}
 			result.AppliedOperations++
@@ -464,7 +516,10 @@ func (e Executor) Apply(ctx context.Context, root string, packet contracts.Chang
 		result.ResultTreeHash = result.ExpectedTreeHash
 		return result, nil
 	}
-	result.ResultTreeHash, _ = observedTreeHashFull(root, packet.Source, packet.Operations)
+	result.ResultTreeHash, err = observedTreeHashFull(repositoryRoot, packet.Source, packet.Operations)
+	if err != nil {
+		return result, fmt.Errorf("%w: post-state observation: %w", ErrRecovery, err)
+	}
 	result.Changed = !dryRun
 	if result.ResultTreeHash != result.ExpectedTreeHash {
 		return result, fmt.Errorf("%w: resulting tree hash mismatch", ErrRecovery)
@@ -472,8 +527,8 @@ func (e Executor) Apply(ctx context.Context, root string, packet contracts.Chang
 	return result, nil
 }
 
-func (e Executor) applyOne(ctx context.Context, workspaceID, root string, operation contracts.ChangeOperation, resolve ContentResolver) error {
-	target, err := SafeJoin(root, operation.Path)
+func (e Executor) applyOne(ctx context.Context, workspaceID string, root *os.Root, operation contracts.ChangeOperation, resolve ContentResolver) error {
+	target, err := NormalizeRelativePath(operation.Path)
 	if err != nil {
 		return err
 	}
@@ -489,15 +544,19 @@ func (e Executor) applyOne(ctx context.Context, workspaceID, root string, operat
 		if contracts.ArtifactContentHash(content) != operation.NewContentHash {
 			return fmt.Errorf("%w: content hash mismatch", ErrRecovery)
 		}
-		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
+		parent := filepath.Dir(filepath.FromSlash(target))
+		if err := root.MkdirAll(parent, 0o755); err != nil {
 			return err
 		}
-		temporary, err := os.CreateTemp(filepath.Dir(target), ".fornix-change-*")
+		temporaryName := filepath.Join(parent, ".fornix-change-"+contracts.NewID("tmp"))
+		temporary, err := root.OpenFile(temporaryName, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		if err != nil {
 			return err
 		}
-		temporaryName := temporary.Name()
-		defer os.Remove(temporaryName)
+		defer func() {
+			_ = temporary.Close()
+			_ = root.Remove(temporaryName)
+		}()
 		if err := temporary.Chmod(os.FileMode(operation.NewMode)); err != nil && operation.NewMode != 0 {
 			_ = temporary.Close()
 			return err
@@ -513,26 +572,53 @@ func (e Executor) applyOne(ctx context.Context, workspaceID, root string, operat
 		if err := temporary.Close(); err != nil {
 			return err
 		}
-		if err := os.Rename(temporaryName, target); err != nil {
+		if operation.Type == contracts.ChangeOpCreate {
+			// Link creates the destination only if it is still absent. Unlike a
+			// rename, it cannot replace a file created after precondition checking.
+			if err := root.Link(temporaryName, filepath.FromSlash(target)); err != nil {
+				return err
+			}
+			if err := root.Remove(temporaryName); err != nil {
+				return fmt.Errorf("remove temporary create link: %w", err)
+			}
+		} else if err := root.Rename(temporaryName, filepath.FromSlash(target)); err != nil {
 			return err
 		}
 	case contracts.ChangeOpDelete:
-		if err := os.Remove(target); err != nil {
+		if err := root.Remove(filepath.FromSlash(target)); err != nil {
 			return err
 		}
 	case contracts.ChangeOpRename:
-		destination, err := SafeJoin(root, operation.Destination)
+		destination, err := NormalizeRelativePath(operation.Destination)
 		if err != nil {
 			return err
 		}
-		if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
+		if err := root.MkdirAll(filepath.Dir(filepath.FromSlash(destination)), 0o755); err != nil {
 			return err
 		}
-		if err := os.Rename(target, destination); err != nil {
+		// Create a no-overwrite destination link first. If a crash interrupts
+		// the following unlink, recovery observes both names and fails closed
+		// rather than silently replacing a concurrently-created destination.
+		if err := root.Link(filepath.FromSlash(target), filepath.FromSlash(destination)); err != nil {
 			return err
+		}
+		if err := root.Remove(filepath.FromSlash(target)); err != nil {
+			return fmt.Errorf("remove renamed source link: %w", err)
 		}
 	case contracts.ChangeOpChmod:
-		if err := os.Chmod(target, os.FileMode(operation.NewMode)); err != nil {
+		file, err := root.OpenFile(filepath.FromSlash(target), os.O_RDONLY, 0)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		info, err := file.Stat()
+		if err != nil {
+			return err
+		}
+		if !info.Mode().IsRegular() {
+			return fmt.Errorf("%w: chmod target is not a regular file", ErrUnsafePath)
+		}
+		if err := file.Chmod(os.FileMode(operation.NewMode)); err != nil {
 			return err
 		}
 	default:
@@ -541,12 +627,12 @@ func (e Executor) applyOne(ctx context.Context, workspaceID, root string, operat
 	return nil
 }
 
-func checkPrecondition(root string, operation contracts.ChangeOperation) *contracts.ChangeConflict {
-	path, err := SafeJoin(root, operation.Path)
+func checkPrecondition(root *os.Root, operation contracts.ChangeOperation) *contracts.ChangeConflict {
+	path, err := NormalizeRelativePath(operation.Path)
 	if err != nil {
 		return &contracts.ChangeConflict{Path: operation.Path, Reason: err.Error()}
 	}
-	info, statErr := os.Lstat(path)
+	info, statErr := lstatChangePath(root, path)
 	if statErr != nil && !errors.Is(statErr, os.ErrNotExist) {
 		return &contracts.ChangeConflict{Path: operation.Path, ExpectedHash: operation.ExpectedHash, Reason: statErr.Error()}
 	}
@@ -556,7 +642,7 @@ func checkPrecondition(root string, operation contracts.ChangeOperation) *contra
 	}
 	observed := ""
 	if exists && info.Mode().IsRegular() {
-		data, readErr := os.ReadFile(path)
+		data, readErr := root.ReadFile(filepath.FromSlash(path))
 		if readErr != nil {
 			return &contracts.ChangeConflict{Path: operation.Path, ExpectedHash: operation.ExpectedHash, ObservedExists: true, Reason: readErr.Error()}
 		}
@@ -567,10 +653,14 @@ func checkPrecondition(root string, operation contracts.ChangeOperation) *contra
 		return &contracts.ChangeConflict{Path: operation.Path, ExpectedHash: operation.ExpectedHash, ObservedHash: observed, ExpectedExists: expectedExists, ObservedExists: exists, Reason: "source precondition mismatch"}
 	}
 	if operation.Type == contracts.ChangeOpRename {
-		if destination, err := SafeJoin(root, operation.Destination); err == nil {
-			if _, err := os.Lstat(destination); err == nil {
-				return &contracts.ChangeConflict{Path: operation.Destination, ObservedExists: true, Reason: "rename destination exists"}
-			}
+		destination, err := NormalizeRelativePath(operation.Destination)
+		if err != nil {
+			return &contracts.ChangeConflict{Path: operation.Destination, Reason: err.Error()}
+		}
+		if _, err := lstatChangePath(root, destination); err == nil {
+			return &contracts.ChangeConflict{Path: operation.Destination, ObservedExists: true, Reason: "rename destination exists"}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return &contracts.ChangeConflict{Path: operation.Destination, Reason: err.Error()}
 		}
 	}
 	return nil
@@ -655,48 +745,7 @@ func predictedTreeHash(source contracts.ChangeSourceSnapshot, operations []contr
 	return hex.EncodeToString(sum[:])
 }
 
-func observedTreeHash(root string, operations []contracts.ChangeOperation) (string, error) {
-	files := make([]contracts.ChangeSourceFile, 0, len(operations))
-	seen := map[string]struct{}{}
-	for _, op := range operations {
-		paths := []string{op.Path}
-		if op.Type == contracts.ChangeOpRename {
-			paths = append(paths, op.Destination)
-		}
-		for _, raw := range paths {
-			if _, ok := seen[raw]; ok {
-				continue
-			}
-			seen[raw] = struct{}{}
-			path, err := SafeJoin(root, raw)
-			if err != nil {
-				return "", err
-			}
-			info, err := os.Lstat(path)
-			if errors.Is(err, os.ErrNotExist) {
-				files = append(files, contracts.ChangeSourceFile{Path: raw, Exists: false})
-				continue
-			}
-			if err != nil {
-				return "", err
-			}
-			if info.Mode()&os.ModeSymlink != 0 {
-				return "", ErrUnsafePath
-			}
-			data, err := os.ReadFile(path)
-			if err != nil {
-				return "", err
-			}
-			files = append(files, contracts.ChangeSourceFile{Path: raw, Mode: uint32(info.Mode().Perm()), ByteSize: int64(len(data)), ContentHash: contracts.ArtifactContentHash(data), Exists: true})
-		}
-	}
-	sort.Slice(files, func(i, j int) bool { return files[i].Path < files[j].Path })
-	raw, _ := json.Marshal(files)
-	sum := sha256.Sum256(raw)
-	return hex.EncodeToString(sum[:]), nil
-}
-
-func observedTreeHashFull(root string, source contracts.ChangeSourceSnapshot, operations []contracts.ChangeOperation) (string, error) {
+func observedTreeHashFull(repositoryRoot *os.Root, source contracts.ChangeSourceSnapshot, operations []contracts.ChangeOperation) (string, error) {
 	paths := make(map[string]struct{}, len(source.Files)+len(operations)*2)
 	for _, file := range source.Files {
 		paths[file.Path] = struct{}{}
@@ -707,11 +756,6 @@ func observedTreeHashFull(root string, source contracts.ChangeSourceSnapshot, op
 			paths[operation.Destination] = struct{}{}
 		}
 	}
-	repositoryRoot, err := os.OpenRoot(root)
-	if err != nil {
-		return "", fmt.Errorf("open repository root: %w", err)
-	}
-	defer repositoryRoot.Close()
 	orderedPaths := make([]string, 0, len(paths))
 	for path := range paths {
 		orderedPaths = append(orderedPaths, path)
@@ -719,13 +763,9 @@ func observedTreeHashFull(root string, source contracts.ChangeSourceSnapshot, op
 	sort.Strings(orderedPaths)
 	files := make([]contracts.ChangeSourceFile, 0, len(orderedPaths))
 	for _, raw := range orderedPaths {
-		if _, err := SafeJoin(root, raw); err != nil {
-			return "", err
-		}
 		relative := filepath.FromSlash(raw)
-		info, err := repositoryRoot.Lstat(relative)
+		info, err := lstatChangePath(repositoryRoot, raw)
 		if errors.Is(err, os.ErrNotExist) {
-			files = append(files, contracts.ChangeSourceFile{Path: raw, Exists: false})
 			continue
 		}
 		if err != nil {

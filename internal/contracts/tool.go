@@ -26,10 +26,19 @@ const (
 	MaxToolEnvCount         = 128
 	DefaultToolEnvBytes     = 32 << 10
 	MaxToolEnvBytes         = 128 << 10
+	MaxToolCPUQuotaMilli    = 8_000
+	MaxToolMemoryBytes      = 8 << 30
+	MaxToolProcessCount     = 4_096
+	MaxToolScratchBytes     = 8 << 30
 	MaxToolEvidenceBytes    = 64 << 10
 	MaxToolWorkdirLength    = 4096
 	MaxToolCapabilityLength = 128
+	MaxToolEnvKeyLength     = 128
+	MaxToolDescriptionBytes = 4 << 10
 )
+
+var immutableImageDigestPattern = regexp.MustCompile(`^sha256:[a-f0-9]{64}$`)
+var immutableHexHashPattern = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 const (
 	ToolRunPending          = "pending"
@@ -37,6 +46,7 @@ const (
 	ToolRunRunning          = "running"
 	ToolRunSucceeded        = "succeeded"
 	ToolRunFailed           = "failed"
+	ToolRunRecoveryRequired = "recovery_required"
 	ToolRunDenied           = "denied"
 	ToolRunCancelled        = "cancelled"
 )
@@ -49,24 +59,27 @@ const (
 )
 
 const (
-	ToolFailureInvalidRequest   = "invalid_request"
-	ToolFailureUnknownTool      = "unknown_tool"
-	ToolFailureUnauthorized     = "unauthorized"
-	ToolFailureApprovalRequired = "approval_required"
-	ToolFailureApprovalDenied   = "approval_denied"
-	ToolFailureApprovalExpired  = "approval_expired"
-	ToolFailureTimeout          = "timeout"
-	ToolFailureOutputLimit      = "output_limit"
-	ToolFailureArgumentLimit    = "argument_limit"
-	ToolFailureEnvironmentLimit = "environment_limit"
-	ToolFailureWorkdirDenied    = "workdir_denied"
-	ToolFailureExecution        = "execution"
-	ToolFailureTransport        = "transport"
-	ToolFailureStaleFence       = "stale_fence"
-	ToolFailureInProgress       = "in_progress"
-	ToolFailureBudget           = "budget"
-	ToolFailureCancelled        = "cancelled"
-	ToolFailureConflict         = "conflict"
+	ToolFailureInvalidRequest     = "invalid_request"
+	ToolFailureUnknownTool        = "unknown_tool"
+	ToolFailureUnauthorized       = "unauthorized"
+	ToolFailureApprovalRequired   = "approval_required"
+	ToolFailureApprovalDenied     = "approval_denied"
+	ToolFailureApprovalExpired    = "approval_expired"
+	ToolFailureTimeout            = "timeout"
+	ToolFailureOutputLimit        = "output_limit"
+	ToolFailureArgumentLimit      = "argument_limit"
+	ToolFailureEnvironmentLimit   = "environment_limit"
+	ToolFailureWorkdirDenied      = "workdir_denied"
+	ToolFailureExecution          = "execution"
+	ToolFailureTransport          = "transport"
+	ToolFailureStaleFence         = "stale_fence"
+	ToolFailureInProgress         = "in_progress"
+	ToolFailureBudget             = "budget"
+	ToolFailureCancelled          = "cancelled"
+	ToolFailureConflict           = "conflict"
+	ToolFailureExternalUncertain  = "external_uncertain"
+	ToolFailureSandboxUnavailable = "sandbox_unavailable"
+	ToolFailureSandboxCapability  = "sandbox_capability_unavailable"
 )
 
 const (
@@ -83,47 +96,69 @@ const (
 	ToolEventStarted           = "tool.started"
 	ToolEventSucceeded         = "tool.succeeded"
 	ToolEventFailed            = "tool.failed"
+	ToolEventRecoveryRequired  = "tool.recovery_required"
 	ToolEventDenied            = "tool.denied"
 )
 
 var envKeyPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
-// SandboxProfile is the local executor's bounded, per-call process policy.
-// It intentionally describes limits, not an unsupported claim of kernel
-// isolation. Network and filesystem enforcement are explicit capabilities of
-// a future provider, not silently implied by this profile.
+// SandboxProfile selects one execution backend and its bounded, per-call
+// requirements. A named backend is not proof of enforcement; admission must
+// resolve it through a provider capability report. The local-process backend
+// only provides same-host process limits and path preflight.
 type SandboxProfile struct {
-	Backend            string `json:"backend"`
-	TimeoutMS          int    `json:"timeout_ms"`
-	MaxStdoutBytes     int    `json:"max_stdout_bytes"`
-	MaxStderrBytes     int    `json:"max_stderr_bytes"`
-	MaxArgCount        int    `json:"max_arg_count"`
-	MaxArgBytes        int    `json:"max_arg_bytes"`
-	MaxEnvEntries      int    `json:"max_env_entries"`
-	MaxEnvBytes        int    `json:"max_env_bytes"`
-	AllowedWorkdirRoot string `json:"allowed_workdir_root,omitempty"`
-	AllowNetwork       bool   `json:"allow_network"`
-	InheritEnvironment bool   `json:"inherit_environment"`
-	ReadOnlyWorkdir    bool   `json:"read_only_workdir"`
+	Backend              string               `json:"backend"`
+	TimeoutMS            int                  `json:"timeout_ms"`
+	MaxStdoutBytes       int                  `json:"max_stdout_bytes"`
+	MaxStderrBytes       int                  `json:"max_stderr_bytes"`
+	MaxArgCount          int                  `json:"max_arg_count"`
+	MaxArgBytes          int                  `json:"max_arg_bytes"`
+	MaxEnvEntries        int                  `json:"max_env_entries"`
+	MaxEnvBytes          int                  `json:"max_env_bytes"`
+	CPUQuotaMilli        int                  `json:"cpu_quota_milli,omitempty"`
+	MemoryBytes          int64                `json:"memory_bytes,omitempty"`
+	PIDsLimit            int                  `json:"pids_limit,omitempty"`
+	ScratchBytes         int64                `json:"scratch_bytes,omitempty"`
+	ImageDigest          string               `json:"image_digest,omitempty"`
+	ImagePlatform        SandboxImagePlatform `json:"image_platform,omitzero"`
+	AllowedWorkdirRoot   string               `json:"allowed_workdir_root,omitempty"`
+	AllowNetwork         bool                 `json:"allow_network"`
+	InheritEnvironment   bool                 `json:"inherit_environment"`
+	ReadOnlyWorkdir      bool                 `json:"read_only_workdir"`
+	ReadOnlyRootFS       bool                 `json:"read_only_rootfs,omitempty"`
+	RequiredCapabilities []SandboxCapability  `json:"required_capabilities,omitempty"`
 }
 
 // DefaultSandboxProfile returns the bounded local-process defaults. It does
 // not claim kernel isolation or network control.
 func DefaultSandboxProfile() SandboxProfile {
 	return SandboxProfile{
-		Backend: "local-process", TimeoutMS: int(DefaultToolTimeout / time.Millisecond),
+		Backend: string(SandboxBackendLocalProcess), TimeoutMS: int(DefaultToolTimeout / time.Millisecond),
 		MaxStdoutBytes: DefaultToolOutputBytes, MaxStderrBytes: DefaultToolOutputBytes,
 		MaxArgCount: DefaultToolArgCount, MaxArgBytes: DefaultToolArgBytes,
 		MaxEnvEntries: DefaultToolEnvCount, MaxEnvBytes: DefaultToolEnvBytes,
 	}
 }
 
-// Normalize validates process limits and rejects settings the local executor
-// cannot enforce safely.
+// Normalize validates backend identity, portable budgets, and the explicit
+// image/resource requirements for runtime-backed profiles.
 func (p *SandboxProfile) Normalize() error {
-	if p.Backend == "" {
-		p.Backend = "local-process"
+	if p == nil {
+		return fmt.Errorf("sandbox profile is nil")
 	}
+	if p.Backend == "" {
+		p.Backend = string(SandboxBackendLocalProcess)
+	}
+	p.Backend = strings.ToLower(strings.TrimSpace(p.Backend))
+	if !knownSandboxBackend(SandboxBackend(p.Backend)) {
+		return fmt.Errorf("unsupported sandbox backend %q", p.Backend)
+	}
+	required, err := normalizeSandboxCapabilities(p.RequiredCapabilities)
+	if err != nil {
+		return err
+	}
+	p.ImageDigest = strings.ToLower(strings.TrimSpace(p.ImageDigest))
+	p.RequiredCapabilities = required
 	if p.TimeoutMS == 0 {
 		p.TimeoutMS = int(DefaultToolTimeout / time.Millisecond)
 	}
@@ -157,15 +192,36 @@ func (p *SandboxProfile) Normalize() error {
 	if p.MaxEnvEntries < 0 || p.MaxEnvEntries > MaxToolEnvCount || p.MaxEnvBytes < 0 || p.MaxEnvBytes > MaxToolEnvBytes {
 		return fmt.Errorf("tool environment budget exceeds bounds")
 	}
+	if p.CPUQuotaMilli < 0 || p.CPUQuotaMilli > MaxToolCPUQuotaMilli || p.MemoryBytes < 0 || p.MemoryBytes > MaxToolMemoryBytes || p.PIDsLimit < 0 || p.PIDsLimit > MaxToolProcessCount || p.ScratchBytes < 0 || p.ScratchBytes > MaxToolScratchBytes {
+		return fmt.Errorf("sandbox resource budget exceeds bounds")
+	}
 	p.AllowedWorkdirRoot = strings.TrimSpace(p.AllowedWorkdirRoot)
 	if p.AllowedWorkdirRoot != "" && !filepath.IsAbs(p.AllowedWorkdirRoot) {
 		return fmt.Errorf("allowed_workdir_root must be absolute")
 	}
-	if p.AllowNetwork {
-		return fmt.Errorf("local-process profile cannot claim network isolation")
-	}
 	if p.InheritEnvironment {
 		return fmt.Errorf("inherited environment is not permitted")
+	}
+	if p.Backend == string(SandboxBackendLocalProcess) && p.AllowNetwork {
+		return fmt.Errorf("local-process profile cannot enforce network policy")
+	}
+	if p.Backend == string(SandboxBackendLocalProcess) {
+		if p.ImageDigest != "" || !p.ImagePlatform.IsZero() || p.ReadOnlyRootFS {
+			return fmt.Errorf("local-process profile cannot apply container image or root filesystem settings")
+		}
+	} else {
+		if !immutableImageDigestPattern.MatchString(p.ImageDigest) {
+			return fmt.Errorf("sandbox image_digest must be an immutable sha256 digest")
+		}
+		if err := p.ImagePlatform.Normalize(); err != nil {
+			return fmt.Errorf("sandbox image_platform is invalid: %w", err)
+		}
+		if !p.ReadOnlyRootFS || !p.ReadOnlyWorkdir || p.CPUQuotaMilli == 0 || p.MemoryBytes == 0 || p.PIDsLimit == 0 || p.ScratchBytes == 0 {
+			return fmt.Errorf("container and microVM profiles require read-only root/workspace mounts and explicit CPU, memory, PID, and scratch budgets")
+		}
+		if p.AllowNetwork {
+			return fmt.Errorf("network access requires a separately qualified egress policy")
+		}
 	}
 	return nil
 }
@@ -197,9 +253,16 @@ func (d *ToolDefinition) Normalize() error {
 	if d.ID == "" || d.Name == "" || d.Version == "" || d.Capability == "" {
 		return fmt.Errorf("tool id, name, version, and capability are required")
 	}
+	if len(d.ID) > 128 || len(d.Name) > 128 || len(d.Version) > 128 || len(d.Capability) > MaxToolCapabilityLength {
+		return fmt.Errorf("tool identity metadata exceeds its size limit")
+	}
 	d.ID, d.Capability = strings.ToLower(d.ID), strings.ToLower(d.Capability)
+	d.Description = strings.TrimSpace(d.Description)
+	if len(d.Description) > MaxToolDescriptionBytes {
+		return fmt.Errorf("tool description exceeds %d bytes", MaxToolDescriptionBytes)
+	}
 	d.Executable = strings.TrimSpace(d.Executable)
-	if !filepath.IsAbs(d.Executable) {
+	if len(d.Executable) > MaxToolWorkdirLength || !filepath.IsAbs(d.Executable) {
 		return fmt.Errorf("tool executable must be absolute")
 	}
 	if isShellExecutable(d.Executable) {
@@ -212,7 +275,7 @@ func (d *ToolDefinition) Normalize() error {
 		return fmt.Errorf("tool path argv indexes are too large")
 	}
 	for _, index := range d.PathArgvIndexes {
-		if index < 0 || index >= MaxToolArgCount {
+		if index < 1 || index >= MaxToolArgCount {
 			return fmt.Errorf("tool path argv index is out of bounds")
 		}
 	}
@@ -222,18 +285,26 @@ func (d *ToolDefinition) Normalize() error {
 		}
 	}
 	d.WorkdirRoot = strings.TrimSpace(d.WorkdirRoot)
-	if d.WorkdirRoot != "" && !filepath.IsAbs(d.WorkdirRoot) {
+	if len(d.WorkdirRoot) > MaxToolWorkdirLength || (d.WorkdirRoot != "" && !filepath.IsAbs(d.WorkdirRoot)) {
 		return fmt.Errorf("tool workdir_root must be absolute")
+	}
+	if len(d.AllowedEnvKeys) > MaxToolEnvCount {
+		return fmt.Errorf("tool allowed environment key catalog exceeds %d entries", MaxToolEnvCount)
 	}
 	for i := range d.AllowedEnvKeys {
 		d.AllowedEnvKeys[i] = strings.TrimSpace(d.AllowedEnvKeys[i])
-		if !envKeyPattern.MatchString(d.AllowedEnvKeys[i]) {
+		if len(d.AllowedEnvKeys[i]) > MaxToolEnvKeyLength || !envKeyPattern.MatchString(d.AllowedEnvKeys[i]) {
 			return fmt.Errorf("invalid allowed environment key")
 		}
 	}
 	d.AllowedEnvKeys = uniqueSorted(d.AllowedEnvKeys)
 	if err := d.Sandbox.Normalize(); err != nil {
 		return err
+	}
+	for _, index := range d.PathArgvIndexes {
+		if index >= d.Sandbox.MaxArgCount {
+			return fmt.Errorf("tool path argv index exceeds the registered argument budget")
+		}
 	}
 	if d.Sandbox.AllowedWorkdirRoot == "" {
 		d.Sandbox.AllowedWorkdirRoot = d.WorkdirRoot
@@ -313,26 +384,34 @@ func (r *ToolPolicyRule) Normalize() error {
 // ToolRequest is the structured, authenticated request to run one registered
 // capability. Argv is passed directly to the executable; no shell is implied.
 type ToolRequest struct {
-	SchemaVersion  int               `json:"schema_version"`
-	RequestID      string            `json:"request_id"`
-	IdempotencyKey string            `json:"idempotency_key"`
-	CausationID    string            `json:"causation_id,omitempty"`
-	CorrelationID  string            `json:"correlation_id,omitempty"`
-	WorkspaceID    string            `json:"workspace_id"`
-	Actor          ActorRef          `json:"actor,omitempty"`
-	Task           *EntityRef        `json:"task,omitempty"`
-	Session        *EntityRef        `json:"session,omitempty"`
-	TaskOwnerID    string            `json:"task_owner_id,omitempty"`
-	TaskFence      uint64            `json:"task_fence,omitempty"`
-	ToolID         string            `json:"tool_id"`
-	Capability     string            `json:"capability,omitempty"`
-	Argv           []string          `json:"argv"`
-	Environment    map[string]string `json:"environment,omitempty"`
-	Workdir        string            `json:"workdir,omitempty"`
-	Mode           string            `json:"mode,omitempty"`
-	ApprovalID     string            `json:"approval_id,omitempty"`
-	Budget         SandboxProfile    `json:"budget"`
-	Metadata       map[string]string `json:"metadata,omitempty"`
+	SchemaVersion      int        `json:"schema_version"`
+	RequestID          string     `json:"request_id"`
+	IdempotencyKey     string     `json:"idempotency_key"`
+	CausationID        string     `json:"causation_id,omitempty"`
+	CorrelationID      string     `json:"correlation_id,omitempty"`
+	WorkspaceID        string     `json:"workspace_id"`
+	Actor              ActorRef   `json:"actor,omitempty"`
+	Task               *EntityRef `json:"task,omitempty"`
+	Session            *EntityRef `json:"session,omitempty"`
+	TaskOwnerID        string     `json:"task_owner_id,omitempty"`
+	TaskFence          uint64     `json:"task_fence,omitempty"`
+	AgentRun           *EntityRef `json:"agent_run,omitempty"`
+	AgentRunOwnerID    string     `json:"agent_run_owner_id,omitempty"`
+	AgentRunFence      uint64     `json:"agent_run_fence,omitempty"`
+	ToolID             string     `json:"tool_id"`
+	Capability         string     `json:"capability,omitempty"`
+	ToolDefinitionHash string     `json:"tool_definition_hash,omitempty"`
+	SandboxProfileHash string     `json:"sandbox_profile_hash,omitempty"`
+	// SandboxQualificationHash identifies the trusted runtime proof selected for
+	// this non-local execution. It is part of durable request identity.
+	SandboxQualificationHash string            `json:"sandbox_qualification_hash,omitempty"`
+	Argv                     []string          `json:"argv"`
+	Environment              map[string]string `json:"environment,omitempty"`
+	Workdir                  string            `json:"workdir,omitempty"`
+	Mode                     string            `json:"mode,omitempty"`
+	ApprovalID               string            `json:"approval_id,omitempty"`
+	Budget                   SandboxProfile    `json:"budget"`
+	Metadata                 map[string]string `json:"metadata,omitempty"`
 }
 
 // Normalize validates workspace/entity scope, argv, environment, and all
@@ -361,15 +440,43 @@ func (r *ToolRequest) Normalize() error {
 	if r.WorkspaceID == "" || r.ToolID == "" {
 		return fmt.Errorf("workspace_id and tool_id are required")
 	}
+	r.ToolDefinitionHash = strings.ToLower(strings.TrimSpace(r.ToolDefinitionHash))
+	r.SandboxProfileHash = strings.ToLower(strings.TrimSpace(r.SandboxProfileHash))
+	r.SandboxQualificationHash = strings.ToLower(strings.TrimSpace(r.SandboxQualificationHash))
+	if (r.ToolDefinitionHash != "" && !immutableHexHashPattern.MatchString(r.ToolDefinitionHash)) || (r.SandboxProfileHash != "" && !immutableHexHashPattern.MatchString(r.SandboxProfileHash)) || (r.SandboxQualificationHash != "" && !immutableHexHashPattern.MatchString(r.SandboxQualificationHash)) {
+		return fmt.Errorf("tool definition, sandbox profile, and sandbox qualification identities must be lowercase SHA-256 hashes")
+	}
 	if r.Task != nil {
 		if err := validateModelEntityRef(r.Task, "task", r.WorkspaceID); err != nil {
 			return err
 		}
+		if (r.TaskOwnerID == "") != (r.TaskFence == 0) {
+			return fmt.Errorf("tool task owner and fence must be supplied together")
+		}
+	} else if r.TaskOwnerID != "" || r.TaskFence != 0 {
+		return fmt.Errorf("tool task fence requires a task")
 	}
 	if r.Session != nil {
 		if err := validateModelEntityRef(r.Session, "session", r.WorkspaceID); err != nil {
 			return err
 		}
+	}
+	r.AgentRunOwnerID = strings.TrimSpace(r.AgentRunOwnerID)
+	if r.AgentRun != nil {
+		if err := validateModelEntityRef(r.AgentRun, "agent_run", r.WorkspaceID); err != nil {
+			return err
+		}
+		if r.AgentRunOwnerID == "" || r.AgentRunFence == 0 {
+			return fmt.Errorf("tool agent run owner and fence are required")
+		}
+		if r.AgentRunFence > uint64(1<<63-1) {
+			return fmt.Errorf("tool agent run fence exceeds database range")
+		}
+	} else if r.AgentRunOwnerID != "" || r.AgentRunFence != 0 {
+		return fmt.Errorf("tool agent run fence requires an agent run")
+	}
+	if err := r.Budget.Normalize(); err != nil {
+		return err
 	}
 	if len(r.Argv) == 0 {
 		return fmt.Errorf("argv is required")
@@ -377,9 +484,15 @@ func (r *ToolRequest) Normalize() error {
 	if len(r.Argv) > MaxToolArgCount {
 		return fmt.Errorf("argv exceeds %d arguments", MaxToolArgCount)
 	}
+	if len(r.Argv) > r.Budget.MaxArgCount {
+		return fmt.Errorf("argv exceeds request argument-count budget")
+	}
 	for _, arg := range r.Argv {
 		if len(arg) > MaxToolArgBytes {
 			return fmt.Errorf("argv argument exceeds %d bytes", MaxToolArgBytes)
+		}
+		if len(arg) > r.Budget.MaxArgBytes {
+			return fmt.Errorf("argv argument exceeds request argument-byte budget")
 		}
 	}
 	if !filepath.IsAbs(r.Argv[0]) || isShellExecutable(r.Argv[0]) {
@@ -398,18 +511,16 @@ func (r *ToolRequest) Normalize() error {
 	default:
 		return fmt.Errorf("unsupported tool mode %q", r.Mode)
 	}
-	if err := r.Budget.Normalize(); err != nil {
-		return err
-	}
 	if len(r.Environment) > r.Budget.MaxEnvEntries {
 		return fmt.Errorf("environment exceeds entry budget")
 	}
 	envBytes := 0
 	for key, value := range r.Environment {
-		if !envKeyPattern.MatchString(key) || len(key)+len(value) > r.Budget.MaxEnvBytes {
+		entryBytes := len(key) + 1 + len(value)
+		if !envKeyPattern.MatchString(key) || entryBytes > r.Budget.MaxEnvBytes {
 			return fmt.Errorf("environment entry is invalid or too large")
 		}
-		envBytes += len(key) + len(value)
+		envBytes += entryBytes
 	}
 	if envBytes > r.Budget.MaxEnvBytes {
 		return fmt.Errorf("environment exceeds byte budget")
@@ -421,18 +532,54 @@ func (r *ToolRequest) Normalize() error {
 }
 
 // RequestHash identifies logical tool input while excluding retry, approval,
-// and transport identities.
+// transport, and delivery-ownership identities. Task/run fences are live
+// authority proofs and must not make a takeover look like a new tool effect.
 func (r ToolRequest) RequestHash() (string, error) {
 	clone := r
 	clone.RequestID = ""
 	clone.IdempotencyKey = ""
 	clone.CausationID = ""
 	clone.CorrelationID = ""
+	clone.ToolDefinitionHash = ""
+	clone.SandboxProfileHash = ""
+	clone.TaskOwnerID = ""
+	clone.TaskFence = 0
+	clone.AgentRunOwnerID = ""
+	clone.AgentRunFence = 0
 	clone.Mode = ""
 	clone.ApprovalID = ""
 	raw, err := json.Marshal(clone)
 	if err != nil {
 		return "", fmt.Errorf("marshal tool request hash: %w", err)
+	}
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+// Hash returns the stable identity of the normalized registered tool
+// definition, including executable, version, environment allow-list, and
+// sandbox profile.
+func (d ToolDefinition) Hash() (string, error) {
+	if err := d.Normalize(); err != nil {
+		return "", fmt.Errorf("normalize tool definition for hash: %w", err)
+	}
+	raw, err := json.Marshal(d)
+	if err != nil {
+		return "", fmt.Errorf("marshal tool definition for hash: %w", err)
+	}
+	digest := sha256.Sum256(raw)
+	return hex.EncodeToString(digest[:]), nil
+}
+
+// Hash returns the stable identity of the normalized effective sandbox
+// profile. It contains policy and request budgets but never secret values.
+func (p SandboxProfile) Hash() (string, error) {
+	if err := p.Normalize(); err != nil {
+		return "", fmt.Errorf("normalize sandbox profile for hash: %w", err)
+	}
+	raw, err := json.Marshal(p)
+	if err != nil {
+		return "", fmt.Errorf("marshal sandbox profile for hash: %w", err)
 	}
 	digest := sha256.Sum256(raw)
 	return hex.EncodeToString(digest[:]), nil
@@ -522,6 +669,9 @@ type ToolRun struct {
 	Session          *EntityRef   `json:"session,omitempty"`
 	TaskOwnerID      string       `json:"task_owner_id,omitempty"`
 	TaskFence        uint64       `json:"task_fence,omitempty"`
+	AgentRun         *EntityRef   `json:"agent_run,omitempty"`
+	AgentRunOwnerID  string       `json:"agent_run_owner_id,omitempty"`
+	AgentRunFence    uint64       `json:"agent_run_fence,omitempty"`
 	Mode             string       `json:"mode"`
 	Status           string       `json:"status"`
 	ApprovalID       string       `json:"approval_id,omitempty"`

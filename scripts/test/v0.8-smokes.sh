@@ -7,6 +7,11 @@ FORNIX_URL="${FORNIX_URL:-http://localhost:8201}"
 KEY=${FORNIX_KEY:?FORNIX_KEY env var required}
 H=(-H "Authorization: Bearer ${KEY}" -H "Content-Type: application/json")
 
+if [[ "${FORNIX_ENABLE_LEGACY_GLOBAL_SURFACES:-false}" != "true" ]]; then
+  echo "legacy v0.8 router surfaces are disabled; set FORNIX_ENABLE_LEGACY_GLOBAL_SURFACES=true for compatibility qualification"
+  exit 0
+fi
+
 pass() { printf "  \033[32mPASS\033[0m %s\n" "$1"; }
 fail() { printf "  \033[31mFAIL\033[0m %s\n" "$1"; exit 1; }
 

@@ -7,5 +7,7 @@
 // redaction marker. The file fallback stores raw bytes in owner-only files,
 // publishes replacements atomically, and shares the profile-wide process lock.
 // It is a local fallback, not a control-plane credential authority or a
-// replacement for an operating-system credential service.
+// replacement for an operating-system credential service. Managed resolvers
+// carry workspace identity and an opaque source version so the Postgres lease
+// authority can fence and audit secret use without storing secret bytes.
 package credentials

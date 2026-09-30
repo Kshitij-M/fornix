@@ -230,10 +230,16 @@ func (r *AgentRunRequest) Normalize() error {
 	if err := r.Budget.Normalize(); err != nil {
 		return err
 	}
+	toolNames := make(map[string]struct{}, len(r.Tools))
 	for i := range r.Tools {
 		if err := r.Tools[i].Normalize(); err != nil {
 			return fmt.Errorf("tools[%d]: %w", i, err)
 		}
+		name := strings.ToLower(r.Tools[i].Name)
+		if _, exists := toolNames[name]; exists {
+			return fmt.Errorf("agent tool catalog contains duplicate function names")
+		}
+		toolNames[name] = struct{}{}
 	}
 	if len(r.Tools) > MaxAgentPendingTools {
 		return fmt.Errorf("too many agent tools")
@@ -487,10 +493,12 @@ func (r AgentRun) ComputeStateHash() string {
 			PendingTools []PendingToolCall `json:"pending_tools,omitempty"`
 			Termination  string            `json:"termination,omitempty"`
 		} `json:"state"`
-		History []ModelMessage `json:"history"`
-		Output  string         `json:"output"`
-		Tokens  int            `json:"tokens"`
-		Cost    ModelCost      `json:"cost"`
+		RequestHash string                `json:"request_hash"`
+		Tools       []ModelToolDefinition `json:"tools,omitempty"`
+		History     []ModelMessage        `json:"history"`
+		Output      string                `json:"output"`
+		Tokens      int                   `json:"tokens"`
+		Cost        ModelCost             `json:"cost"`
 	}{struct {
 		RunID        string            `json:"run_id"`
 		WorkspaceID  string            `json:"workspace_id"`
@@ -501,7 +509,7 @@ func (r AgentRun) ComputeStateHash() string {
 		ContextHash  string            `json:"context_hash,omitempty"`
 		PendingTools []PendingToolCall `json:"pending_tools,omitempty"`
 		Termination  string            `json:"termination,omitempty"`
-	}{r.ID, r.WorkspaceID, r.State, r.Phase, r.Turn, r.Step, r.ContextHash, clonePendingTools(r.PendingTools), r.Termination}, r.History, r.LastOutput, r.TotalTokens, r.Cost})
+	}{r.ID, r.WorkspaceID, r.State, r.Phase, r.Turn, r.Step, r.ContextHash, clonePendingTools(r.PendingTools), r.Termination}, r.RequestHash, r.Tools, r.History, r.LastOutput, r.TotalTokens, r.Cost})
 	d := sha256.Sum256(canonical)
 	return hex.EncodeToString(d[:])
 }

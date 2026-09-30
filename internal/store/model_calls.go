@@ -83,24 +83,29 @@ func (s *ModelCallStore) Start(ctx context.Context, request contracts.ModelReque
 		return model.CallStart{}, err
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, request.WorkspaceID)
 	if err != nil {
 		return model.CallStart{}, fmt.Errorf("begin model call start: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	if request.AgentRun != nil {
+		if err := validateAgentRunEffectFenceTx(ctx, tx, request.WorkspaceID, request.AgentRun.ID, request.AgentRunOwnerID, int64(request.AgentRunFence)); err != nil {
+			return model.CallStart{}, fmt.Errorf("validate model agent-run lease: %w", err)
+		}
+	}
 	inserted, err := tx.Exec(ctx, `
 		INSERT INTO fornix.model_calls(
 			workspace_id, request_id, idempotency_key, request_hash, schema_version,
 			causation_id, correlation_id, provider, endpoint, model, metadata,
-			actor, task_ref, session_ref, status,
+			actor, task_ref, session_ref, agent_run_id, agent_run_owner_id, agent_run_fence, status,
 			request_evidence
-		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,$15,$16::jsonb)
+		) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12::jsonb,$13::jsonb,$14::jsonb,$15,$16,$17,$18,$19::jsonb)
 		ON CONFLICT DO NOTHING`,
 		request.WorkspaceID, request.RequestID, request.IdempotencyKey,
 		requestHash, request.SchemaVersion, request.CausationID, request.CorrelationID,
 		request.Provider.Provider, request.Provider.Endpoint, request.Provider.Model,
-		metadataJSON, actorJSON, taskJSON, sessionJSON,
-		contracts.ModelCallRunning, requestEvidence)
+		metadataJSON, actorJSON, taskJSON, sessionJSON, agentRunID(request.AgentRun),
+		request.AgentRunOwnerID, int64(request.AgentRunFence), contracts.ModelCallRunning, requestEvidence)
 	if err != nil {
 		return model.CallStart{}, fmt.Errorf("reserve model call: %w", err)
 	}
@@ -156,9 +161,25 @@ func (s *ModelCallStore) Attempt(ctx context.Context, workspaceID, requestID str
 	if workspaceID == "" || requestID == "" {
 		return fmt.Errorf("workspace_id and request_id are required")
 	}
-	result, err := s.pool.Exec(ctx, `
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
+	if err != nil {
+		return fmt.Errorf("begin model call attempt: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var runID, ownerID string
+	var fence int64
+	if err := tx.QueryRow(ctx, `SELECT agent_run_id,agent_run_owner_id,agent_run_fence FROM fornix.model_calls WHERE workspace_id=$1 AND request_id=$2 AND status='running' FOR UPDATE`, workspaceID, requestID).Scan(&runID, &ownerID, &fence); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("record model call attempt: %w", ErrModelCallMissing)
+		}
+		return fmt.Errorf("lock model call attempt: %w", err)
+	}
+	if err := validateAgentRunEffectFenceTx(ctx, tx, workspaceID, runID, ownerID, fence); err != nil {
+		return fmt.Errorf("validate model agent-run lease for attempt: %w", err)
+	}
+	result, err := tx.Exec(ctx, `
 		UPDATE fornix.model_calls
-		SET attempt_count=attempt_count+1, started_at=COALESCE(started_at, now())
+		SET attempt_count=attempt_count+1, started_at=COALESCE(started_at, clock_timestamp())
 		WHERE workspace_id=$1 AND request_id=$2 AND status='running'`, workspaceID, requestID)
 	if err != nil {
 		return fmt.Errorf("record model call attempt: %w", err)
@@ -166,7 +187,7 @@ func (s *ModelCallStore) Attempt(ctx context.Context, workspaceID, requestID str
 	if result.RowsAffected() != 1 {
 		return fmt.Errorf("record model call attempt: %w", ErrModelCallMissing)
 	}
-	return nil
+	return tx.Commit(ctx)
 }
 
 // Finish commits the terminal model result, redacted evidence, artifact link,
@@ -180,7 +201,7 @@ func (s *ModelCallStore) Finish(ctx context.Context, result contracts.ModelCallR
 	if result.RequestID == "" || result.WorkspaceID == "" {
 		return fmt.Errorf("workspace_id and request_id are required")
 	}
-	if result.Status != contracts.ModelCallSucceeded && result.Status != contracts.ModelCallFailed {
+	if result.Status != contracts.ModelCallSucceeded && result.Status != contracts.ModelCallFailed && result.Status != contracts.ModelCallRecoveryRequired {
 		return fmt.Errorf("invalid terminal model call status %q", result.Status)
 	}
 	usageJSON, err := json.Marshal(result.Usage)
@@ -209,7 +230,7 @@ func (s *ModelCallStore) Finish(ctx context.Context, result contracts.ModelCallR
 	if len(responseEvidence) == 0 {
 		responseEvidence = []byte(`{}`)
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, result.WorkspaceID)
 	if err != nil {
 		return fmt.Errorf("begin model call finish: %w", err)
 	}
@@ -217,8 +238,10 @@ func (s *ModelCallStore) Finish(ctx context.Context, result contracts.ModelCallR
 	var callID int64
 	var currentStatus, provider, modelName string
 	var actorJSON, taskJSON, sessionJSON []byte
+	var agentRunID, agentRunOwnerID string
+	var agentRunFence int64
 	var startedAt *time.Time
-	err = tx.QueryRow(ctx, `SELECT id,status,provider,model,actor,task_ref,session_ref,started_at FROM fornix.model_calls WHERE workspace_id=$1 AND request_id=$2 FOR UPDATE`, result.WorkspaceID, result.RequestID).Scan(&callID, &currentStatus, &provider, &modelName, &actorJSON, &taskJSON, &sessionJSON, &startedAt)
+	err = tx.QueryRow(ctx, `SELECT id,status,provider,model,actor,task_ref,session_ref,agent_run_id,agent_run_owner_id,agent_run_fence,started_at FROM fornix.model_calls WHERE workspace_id=$1 AND request_id=$2 FOR UPDATE`, result.WorkspaceID, result.RequestID).Scan(&callID, &currentStatus, &provider, &modelName, &actorJSON, &taskJSON, &sessionJSON, &agentRunID, &agentRunOwnerID, &agentRunFence, &startedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrModelCallMissing
 	}
@@ -230,6 +253,9 @@ func (s *ModelCallStore) Finish(ctx context.Context, result contracts.ModelCallR
 			return nil
 		}
 		return fmt.Errorf("model call is already terminal with status %q", currentStatus)
+	}
+	if err := validateAgentRunEffectFenceTx(ctx, tx, result.WorkspaceID, agentRunID, agentRunOwnerID, agentRunFence); err != nil {
+		return fmt.Errorf("validate model agent-run lease for finish: %w", err)
 	}
 	var actor contracts.ActorRef
 	if len(actorJSON) > 0 && string(actorJSON) != "null" {
@@ -318,8 +344,17 @@ func (s *ModelCallStore) Get(ctx context.Context, workspaceID, idempotencyKey st
 	if s == nil || s.pool == nil {
 		return contracts.ModelCallRecord{}, fmt.Errorf("model call store is not configured")
 	}
-	record, err := readModelCall(ctx, s.pool, workspaceID, idempotencyKey)
+	workspaceID, idempotencyKey = strings.TrimSpace(workspaceID), strings.TrimSpace(idempotencyKey)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
+		return contracts.ModelCallRecord{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	record, err := readModelCallTx(ctx, tx, workspaceID, idempotencyKey)
+	if err != nil {
+		return contracts.ModelCallRecord{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return contracts.ModelCallRecord{}, err
 	}
 	return record, nil
@@ -344,13 +379,16 @@ func readModelCallWithQuery(ctx context.Context, queryer interface {
 	var startedAt, finishedAt *time.Time
 	var provider, endpoint, modelName, status, providerRequestID string
 	var causationID, correlationID string
+	var agentRunID, agentRunOwnerID string
+	var agentRunFence int64
 	var attemptCount int
 	var contentEmitted bool
 	var durationMS int64
 	err := queryer.QueryRow(ctx, `
 		SELECT id, workspace_id, request_id, idempotency_key, request_hash,
 		       schema_version, causation_id, correlation_id,
-		       provider, endpoint, model, metadata, actor, task_ref, session_ref, status,
+		       provider, endpoint, model, metadata, actor, task_ref, session_ref,
+		       agent_run_id, agent_run_owner_id, agent_run_fence, status,
 		       attempt_count, content_emitted, provider_request_id, usage, cost,
 		       failure, response, request_evidence, response_evidence, response_artifact_id,
 		       created_at, started_at, finished_at, duration_ms
@@ -359,7 +397,8 @@ func readModelCallWithQuery(ctx context.Context, queryer interface {
 		FOR UPDATE`, workspaceID, idempotencyKey).Scan(
 		&record.ID, &record.WorkspaceID, &record.RequestID, &record.IdempotencyKey, &record.RequestHash,
 		&record.SchemaVersion, &causationID, &correlationID,
-		&provider, &endpoint, &modelName, &metadataJSON, &actorJSON, &taskJSON, &sessionJSON, &status,
+		&provider, &endpoint, &modelName, &metadataJSON, &actorJSON, &taskJSON, &sessionJSON,
+		&agentRunID, &agentRunOwnerID, &agentRunFence, &status,
 		&attemptCount, &contentEmitted, &providerRequestID, &usageJSON, &costJSON,
 		&failureJSON, &responseJSON, &requestEvidence, &responseEvidence, &responseArtifactID,
 		&record.CreatedAt, &startedAt, &finishedAt, &durationMS)
@@ -372,6 +411,11 @@ func readModelCallWithQuery(ctx context.Context, queryer interface {
 	record.Provider = contracts.ProviderRef{Provider: provider, Endpoint: endpoint, Model: modelName}
 	record.CausationID = causationID
 	record.CorrelationID = correlationID
+	if agentRunID != "" {
+		record.AgentRun = &contracts.EntityRef{ID: agentRunID, Kind: "agent_run", WorkspaceID: record.WorkspaceID}
+	}
+	record.AgentRunOwnerID = agentRunOwnerID
+	record.AgentRunFence = uint64(agentRunFence)
 	if err := json.Unmarshal(metadataJSON, &record.Metadata); err != nil {
 		return contracts.ModelCallRecord{}, fmt.Errorf("decode model metadata: %w", err)
 	}

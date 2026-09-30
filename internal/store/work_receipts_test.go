@@ -43,6 +43,8 @@ func newWorkReceiptTestStore(t *testing.T) (*WorkReceiptStore, *pgxpool.Pool, st
 		_, _ = pool.Exec(cleanup, `DELETE FROM fornix.work_receipt_references WHERE workspace_id=$1`, workspace)
 		_, _ = pool.Exec(cleanup, `DELETE FROM fornix.work_receipt_steps WHERE workspace_id=$1`, workspace)
 		_, _ = pool.Exec(cleanup, `DELETE FROM fornix.work_receipts WHERE workspace_id=$1`, workspace)
+		_, _ = pool.Exec(cleanup, `DELETE FROM fornix.operation_authority_links WHERE workspace_id=$1`, workspace)
+		_, _ = pool.Exec(cleanup, `DELETE FROM fornix.operations WHERE workspace_id=$1`, workspace)
 		_, _ = pool.Exec(cleanup, `DELETE FROM fornix.artifact_refs WHERE workspace_id=$1`, workspace)
 		_, _ = pool.Exec(cleanup, `DELETE FROM fornix.artifact_chunks WHERE workspace_id=$1`, workspace)
 		_, _ = pool.Exec(cleanup, `DELETE FROM fornix.artifacts WHERE workspace_id=$1`, workspace)
@@ -51,6 +53,34 @@ func newWorkReceiptTestStore(t *testing.T) (*WorkReceiptStore, *pgxpool.Pool, st
 		pool.Close()
 	})
 	return NewWorkReceiptStore(pool), pool, workspace
+}
+
+func TestWorkReceiptOperationLinkCommitsWithReceipt(t *testing.T) {
+	receipts, pool, workspace := newWorkReceiptTestStore(t)
+	taskID := insertCompletedReceiptTask(t, pool, workspace, 9)
+	operations := NewOperationStore(pool, NewEventStore(pool))
+	request := operationTestRequest(t, workspace, "receipt-authority-operation")
+	created, err := operations.Create(context.Background(), OperationCreateInput{Request: request})
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptRequest := testReceiptRequest(workspace, taskID, 9)
+	receiptRequest.Operation = &contracts.OperationReference{WorkspaceID: workspace, ID: created.Operation.ID, Hash: created.Operation.OperationHash}
+	receipt, inserted, err := receipts.Finalize(context.Background(), receiptRequest)
+	if err != nil || !inserted {
+		t.Fatalf("receipt finalize inserted=%v err=%v", inserted, err)
+	}
+	var count int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM fornix.operation_authority_links WHERE workspace_id=$1 AND operation_id=$2 AND stage='receipt'`, workspace, created.Operation.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("receipt authority link count=%d, want 1", count)
+	}
+	links, err := operations.AuthorityLinks(context.Background(), workspace, created.Operation.ID, 10)
+	if err != nil || len(links) != 1 || links[0].ReceiptHash != receipt.CanonicalHash {
+		t.Fatalf("receipt authority inspection links=%+v err=%v", links, err)
+	}
 }
 
 func insertCompletedReceiptTask(t *testing.T, pool *pgxpool.Pool, workspace string, fence int64) int64 {

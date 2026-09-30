@@ -149,13 +149,28 @@ func (s *server) changeRoot(ctx context.Context, workspaceID, requested string) 
 	if err != nil {
 		return "", err
 	}
-	configured := filepath.Clean(strings.TrimSpace(workspace.ToolRoot))
+	return resolveChangeRoot(workspace.ToolRoot, requested)
+}
+
+func resolveChangeRoot(configured, requested string) (string, error) {
+	configured = filepath.Clean(strings.TrimSpace(configured))
 	if configured == "." || configured == "" || !filepath.IsAbs(configured) {
 		return "", fmt.Errorf("workspace has no configured repository mount")
+	}
+	configured, err := filepath.EvalSymlinks(configured)
+	if err != nil {
+		return "", fmt.Errorf("resolve configured repository mount: %w", err)
 	}
 	root := configured
 	if strings.TrimSpace(requested) != "" {
 		root = filepath.Clean(strings.TrimSpace(requested))
+		if !filepath.IsAbs(root) {
+			return "", fmt.Errorf("repository root must be absolute")
+		}
+		root, err = filepath.EvalSymlinks(root)
+		if err != nil {
+			return "", fmt.Errorf("resolve requested repository root: %w", err)
+		}
 	}
 	relative, err := filepath.Rel(configured, root)
 	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
