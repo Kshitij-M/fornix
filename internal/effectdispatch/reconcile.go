@@ -153,12 +153,14 @@ func (d *Dispatcher) Reconcile(ctx context.Context, request ReconcileRequest) (R
 	var finalState store.EffectState
 	var finalLink contracts.DomainEffectLink
 	var finalLinkVersion int64
+	var finalDuplicate bool
 	err = d.Admission.WithWorkspaceTx(ctx, request.WorkspaceID, func(tx pgx.Tx) error {
 		updated, updateErr := d.Admission.UpdateEffectTx(ctx, tx, finalUpdate)
 		if updateErr != nil {
 			return updateErr
 		}
 		finalState = updated.State
+		finalDuplicate = updated.Duplicate
 		current, linkErr := d.Links.CurrentTx(ctx, tx, request.WorkspaceID, request.LinkID)
 		if linkErr != nil {
 			return linkErr
@@ -205,7 +207,7 @@ func (d *Dispatcher) Reconcile(ctx context.Context, request ReconcileRequest) (R
 	if err != nil {
 		return ReconcileResult{}, err
 	}
-	return ReconcileResult{State: finalState, Link: finalLink, LinkVersion: finalLinkVersion}, nil
+	return ReconcileResult{State: finalState, Link: finalLink, LinkVersion: finalLinkVersion, Duplicate: finalDuplicate}, nil
 }
 
 func reconcileStates(outcome contracts.EffectVerificationResult) (effectState, linkStatus, failureCode string) {
