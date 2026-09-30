@@ -420,7 +420,7 @@ func (s *Service) finalizeReceipt(ctx context.Context, run contracts.WorkflowRun
 	artifacts := make([]contracts.WorkReceiptArtifact, 0)
 	steps := make([]contracts.WorkReceiptStep, 0, len(run.Steps))
 	for _, state := range run.Steps {
-		roles := make([]string, 0, len(state.Evidence)+len(state.Artifacts))
+		roles := make([]string, 0)
 		for _, evidence := range state.Evidence {
 			hashes = append(hashes, evidence.EvidenceHash)
 			roles = append(roles, evidence.Role)

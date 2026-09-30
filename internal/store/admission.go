@@ -331,7 +331,7 @@ func (s *AdmissionStore) ListRecoverableEffects(ctx context.Context, workspaceID
 		return nil, fmt.Errorf("list recoverable effects: %w", err)
 	}
 	defer rows.Close()
-	items := make([]RecoverableEffect, 0, limit)
+	items := make([]RecoverableEffect, 0)
 	for rows.Next() {
 		var item RecoverableEffect
 		if err := rows.Scan(
@@ -429,12 +429,16 @@ func (s *AdmissionStore) AcquireEffectLeaseTx(ctx context.Context, tx pgx.Tx, wo
 	if lease.Fence >= maxOperationFence {
 		return EffectLeaseResult{}, ErrEffectFenceExhausted
 	}
+	priorFence, err := databaseCounter(lease.Fence)
+	if err != nil {
+		return EffectLeaseResult{}, err
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE fornix.operation_effect_leases
 		SET owner_id=$3,fence=fence+1,
 		    lease_until=clock_timestamp()+($4::double precision * interval '1 millisecond'),
 		    acquired_at=clock_timestamp(),renewed_at=clock_timestamp(),released_at=NULL
-		WHERE workspace_id=$1 AND effect_id=$2 AND fence=$5`, workspaceID, effectID, ownerID, ttl.Milliseconds(), int64(lease.Fence)); err != nil {
+		WHERE workspace_id=$1 AND effect_id=$2 AND fence=$5`, workspaceID, effectID, ownerID, ttl.Milliseconds(), priorFence); err != nil {
 		return EffectLeaseResult{}, fmt.Errorf("take over effect lease: %w", err)
 	}
 	updated, updatedActive, err := readEffectLease(ctx, tx, workspaceID, effectID, true)
@@ -462,8 +466,12 @@ func (s *AdmissionStore) RenewEffectLease(ctx context.Context, lease EffectLease
 	if _, err := validateEffectLease(ctx, tx, lease); err != nil {
 		return EffectLease{}, err
 	}
+	fence, err := databaseCounter(lease.Fence)
+	if err != nil {
+		return EffectLease{}, err
+	}
 	ttl = boundedLeaseTTL(ttl)
-	if _, err := tx.Exec(ctx, `UPDATE fornix.operation_effect_leases SET lease_until=clock_timestamp()+($3::double precision * interval '1 millisecond'),renewed_at=clock_timestamp() WHERE workspace_id=$1 AND effect_id=$2 AND owner_id=$4 AND fence=$5`, lease.WorkspaceID, lease.EffectID, ttl.Milliseconds(), lease.OwnerID, int64(lease.Fence)); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE fornix.operation_effect_leases SET lease_until=clock_timestamp()+($3::double precision * interval '1 millisecond'),renewed_at=clock_timestamp() WHERE workspace_id=$1 AND effect_id=$2 AND owner_id=$4 AND fence=$5`, lease.WorkspaceID, lease.EffectID, ttl.Milliseconds(), lease.OwnerID, fence); err != nil {
 		return EffectLease{}, err
 	}
 	updated, active, err := readEffectLease(ctx, tx, lease.WorkspaceID, lease.EffectID, true)
@@ -517,7 +525,11 @@ func (s *AdmissionStore) ReleaseEffectLease(ctx context.Context, lease EffectLea
 	if _, err := validateEffectLease(ctx, tx, lease); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE fornix.operation_effect_leases SET released_at=clock_timestamp(),lease_until=clock_timestamp() WHERE workspace_id=$1 AND effect_id=$2 AND owner_id=$3 AND fence=$4`, lease.WorkspaceID, lease.EffectID, lease.OwnerID, int64(lease.Fence)); err != nil {
+	fence, err := databaseCounter(lease.Fence)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `UPDATE fornix.operation_effect_leases SET released_at=clock_timestamp(),lease_until=clock_timestamp() WHERE workspace_id=$1 AND effect_id=$2 AND owner_id=$3 AND fence=$4`, lease.WorkspaceID, lease.EffectID, lease.OwnerID, fence); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
@@ -979,6 +991,10 @@ func (s *AdmissionStore) UpdateEffectTx(ctx context.Context, tx pgx.Tx, update c
 		}
 		return EffectStateResult{}, fmt.Errorf("%w: %s -> %s", ErrAdmissionEffect, state.State, update.State)
 	}
+	fence, err := databaseCounter(update.Fence)
+	if err != nil {
+		return EffectStateResult{}, err
+	}
 	nextVersion := state.Version + 1
 	leaseKind := update.LeaseKind
 	if leaseKind == "" {
@@ -989,7 +1005,7 @@ func (s *AdmissionStore) UpdateEffectTx(ctx context.Context, tx pgx.Tx, update c
 		 workspace_id,effect_id,operation_id,version,from_state,to_state,request_id,idempotency_key,owner_id,fence,lease_kind,command_hash,provider_request_id,response_hash,verification_hash,compensation_hash,failure_code)
 		VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
 		ON CONFLICT (workspace_id,effect_id,idempotency_key) DO NOTHING`,
-		update.WorkspaceID, update.EffectID, update.OperationID, nextVersion, state.State, update.State, update.RequestID, update.IdempotencyKey, update.OwnerID, int64(update.Fence), leaseKind, commandHash, update.ProviderRequestID, update.ResponseHash, update.VerificationHash, update.CompensationHash, update.FailureCode)
+		update.WorkspaceID, update.EffectID, update.OperationID, nextVersion, state.State, update.State, update.RequestID, update.IdempotencyKey, update.OwnerID, fence, leaseKind, commandHash, update.ProviderRequestID, update.ResponseHash, update.VerificationHash, update.CompensationHash, update.FailureCode)
 	if err != nil {
 		return EffectStateResult{}, err
 	}
@@ -1209,11 +1225,15 @@ func ensureEffectState(ctx context.Context, tx pgx.Tx, workspaceID, effectID, op
 	if !errors.Is(err, pgx.ErrNoRows) {
 		return EffectState{}, err
 	}
+	databaseFence, err := databaseCounter(fence)
+	if err != nil {
+		return EffectState{}, err
+	}
 	if _, err := tx.Exec(ctx, `INSERT INTO fornix.operation_effect_state(workspace_id,effect_id,operation_id,state,version) VALUES($1,$2,$3,'reserved',1) ON CONFLICT DO NOTHING`, workspaceID, effectID, operationID); err != nil {
 		return EffectState{}, err
 	}
 	commandHash := hashString("effect-reserved:" + effectID)
-	if _, err := tx.Exec(ctx, `INSERT INTO fornix.operation_effect_transitions(workspace_id,effect_id,operation_id,version,from_state,to_state,request_id,idempotency_key,owner_id,fence,lease_kind,command_hash) VALUES($1,$2,$3,1,'reserved','reserved',$4,$5,$6,$7,'operation',$8) ON CONFLICT DO NOTHING`, workspaceID, effectID, operationID, "effect-reserved:"+effectID, "effect-reserved:"+effectID, owner, int64(fence), commandHash); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO fornix.operation_effect_transitions(workspace_id,effect_id,operation_id,version,from_state,to_state,request_id,idempotency_key,owner_id,fence,lease_kind,command_hash) VALUES($1,$2,$3,1,'reserved','reserved',$4,$5,$6,$7,'operation',$8) ON CONFLICT DO NOTHING`, workspaceID, effectID, operationID, "effect-reserved:"+effectID, "effect-reserved:"+effectID, owner, databaseFence, commandHash); err != nil {
 		return EffectState{}, err
 	}
 	return readEffectState(ctx, tx, workspaceID, effectID)

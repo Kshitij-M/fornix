@@ -333,6 +333,22 @@ func appendAuthorityLinkTx(ctx context.Context, tx pgx.Tx, link contracts.Operat
 	if err != nil {
 		return contracts.OperationAuthorityLink{}, false, err
 	}
+	credentialFence, err := databaseCounter(link.CredentialLeaseFence)
+	if err != nil {
+		return contracts.OperationAuthorityLink{}, false, err
+	}
+	credentialEpoch, err := databaseCounter(link.CredentialRevocationEpoch)
+	if err != nil {
+		return contracts.OperationAuthorityLink{}, false, err
+	}
+	operationFence, err := databaseCounter(link.OperationFence)
+	if err != nil {
+		return contracts.OperationAuthorityLink{}, false, err
+	}
+	taskFence, err := databaseCounter(link.TaskFence)
+	if err != nil {
+		return contracts.OperationAuthorityLink{}, false, err
+	}
 	inserted, err := tx.Exec(ctx, `
 		INSERT INTO fornix.operation_authority_links(
 		 workspace_id,link_id,stage,operation_id,operation_hash,idempotency_key,
@@ -347,9 +363,9 @@ func appendAuthorityLinkTx(ctx context.Context, tx pgx.Tx, link contracts.Operat
 		link.WorkspaceID, link.ID, link.Stage, link.OperationID, link.OperationHash, link.IdempotencyKey,
 		link.AdmissionDecisionID, link.AdmissionInputHash, link.TrustPolicyHash, link.TrustPolicyRevision, link.SchemaCatalogHash, link.SchemaCatalogRevision,
 		link.ConnectorHash, link.CapabilityHash, link.PolicyID, link.PolicyVersion, link.PolicyHash,
-		link.CredentialLeaseID, int64(link.CredentialLeaseFence), int64(link.CredentialRevocationEpoch),
+		link.CredentialLeaseID, credentialFence, credentialEpoch,
 		link.CredentialSourceVersion, link.CredentialSourceExpiresAt, egressHash, destinationHash, networkBoundary, networkHash,
-		link.OperationOwnerID, int64(link.OperationFence), link.TaskOwnerID, int64(link.TaskFence), link.EffectReservationHash, effectJSON,
+		link.OperationOwnerID, operationFence, link.TaskOwnerID, taskFence, link.EffectReservationHash, effectJSON,
 		link.ResultID, link.ResultHash, link.ReceiptID, link.ReceiptHash, evidenceJSON, artifactJSON, actorJSON, link.RequestID, link.CausationID, link.CorrelationID, link.LinkHash, link.CreatedAt)
 	if err != nil {
 		return contracts.OperationAuthorityLink{}, false, fmt.Errorf("insert operation authority link: %w", err)

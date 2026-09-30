@@ -157,6 +157,22 @@ func (s *DomainEffectLinkStore) BindTx(ctx context.Context, tx pgx.Tx, link cont
 	if err != nil {
 		return DomainEffectLinkBindResult{}, err
 	}
+	operationFence, err := databaseCounter(link.OperationFence)
+	if err != nil {
+		return DomainEffectLinkBindResult{}, err
+	}
+	taskFence, err := databaseCounter(link.TaskFence)
+	if err != nil {
+		return DomainEffectLinkBindResult{}, err
+	}
+	credentialFence, err := databaseCounter(link.CredentialLeaseFence)
+	if err != nil {
+		return DomainEffectLinkBindResult{}, err
+	}
+	credentialEpoch, err := databaseCounter(link.CredentialRevocationEpoch)
+	if err != nil {
+		return DomainEffectLinkBindResult{}, err
+	}
 	command, err := tx.Exec(ctx, `
 		INSERT INTO fornix.domain_effect_links(
 		 workspace_id,link_id,schema_version,operation_id,operation_hash,step_id,attempt_id,effect_id,effect_reservation_hash,
@@ -168,8 +184,8 @@ func (s *DomainEffectLinkStore) BindTx(ctx context.Context, tx pgx.Tx, link cont
 		ON CONFLICT DO NOTHING`,
 		link.WorkspaceID, link.ID, link.SchemaVersion, link.OperationID, link.OperationHash, link.StepID, link.AttemptID, link.EffectID, link.EffectReservationHash,
 		link.DomainKind, link.DomainID, link.DomainHash, link.LinkRole, link.RequestHash, link.ResultHash, link.Boundary, link.EffectClass, link.DeliveryGuarantee,
-		link.ProviderIdempotency, link.ProviderRequestID, link.VerificationStatus, link.Status, link.OperationOwnerID, int64(link.OperationFence), link.TaskOwnerID, int64(link.TaskFence),
-		link.SchemaCatalogHash, link.SchemaCatalogRevision, link.CredentialLeaseID, int64(link.CredentialLeaseFence), int64(link.CredentialRevocationEpoch), link.CredentialSourceVersion, link.CredentialSourceExpiresAt,
+		link.ProviderIdempotency, link.ProviderRequestID, link.VerificationStatus, link.Status, link.OperationOwnerID, operationFence, link.TaskOwnerID, taskFence,
+		link.SchemaCatalogHash, link.SchemaCatalogRevision, link.CredentialLeaseID, credentialFence, credentialEpoch, link.CredentialSourceVersion, link.CredentialSourceExpiresAt,
 		actorJSON, link.RequestID, link.IdempotencyKey, link.CausationID, link.CorrelationID, metadataJSON, link.LinkHash, link.CreatedAt, egressHash, destinationHash, networkBoundary, networkHash)
 	if err != nil {
 		return DomainEffectLinkBindResult{}, fmt.Errorf("insert domain effect link: %w", err)

@@ -219,7 +219,7 @@ func (s *FederationStore) ListPeers(ctx context.Context, workspaceID string, lim
 		return nil, err
 	}
 	defer rows.Close()
-	peers := make([]contracts.FederationPeer, 0, limit)
+	peers := make([]contracts.FederationPeer, 0)
 	for rows.Next() {
 		peer, scanErr := scanFederationPeer(rows)
 		if scanErr != nil {

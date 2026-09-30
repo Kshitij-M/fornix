@@ -786,7 +786,7 @@ func traverseTx(ctx context.Context, tx pgx.Tx, workspaceID string, root int64, 
 		if err != nil {
 			return nil, queries, truncated, err
 		}
-		next := make([]int64, 0, maxNodes)
+		next := make([]int64, 0)
 		nextSet := make(map[int64]bool)
 		rowCount := 0
 		for rows.Next() {

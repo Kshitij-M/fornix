@@ -97,7 +97,7 @@ func (s *FederationStore) QuarantineLegacyPeers(ctx context.Context, request con
 		lastPullAt *time.Time
 		highWater  int64
 	}
-	legacyPeers := make([]legacyPeer, 0, request.Limit)
+	legacyPeers := make([]legacyPeer, 0)
 	for rows.Next() {
 		var legacyID, sourceURL string
 		var lastPullAt *time.Time
@@ -186,7 +186,7 @@ func (s *FederationStore) ListLegacyQuarantine(ctx context.Context, workspaceID,
 		return contracts.FederationLegacyQuarantinePage{}, err
 	}
 	defer rows.Close()
-	page := contracts.FederationLegacyQuarantinePage{Items: make([]contracts.FederationLegacyQuarantineRecord, 0, limit)}
+	page := contracts.FederationLegacyQuarantinePage{Items: make([]contracts.FederationLegacyQuarantineRecord, 0)}
 	for rows.Next() {
 		record, scanErr := scanFederationQuarantine(rows)
 		if scanErr != nil {

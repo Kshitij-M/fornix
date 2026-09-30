@@ -280,7 +280,7 @@ func (s *IngestStore) List(ctx context.Context, workspaceID, cursor string, limi
 	if limit > 100 {
 		limit = 100
 	}
-	page := contracts.IngestPage{Items: make([]contracts.IngestJob, 0, limit)}
+	page := contracts.IngestPage{Items: make([]contracts.IngestJob, 0)}
 	ids := make([]string, 0, limit+1)
 	err := workspaceQueryRows(ctx, s.pool, strings.TrimSpace(workspaceID), `SELECT id FROM fornix.ingest_jobs WHERE workspace_id=$1 AND id>$2 ORDER BY id LIMIT $3`, []any{strings.TrimSpace(workspaceID), strings.TrimSpace(cursor), limit + 1}, func(rows pgx.Rows) error {
 		for rows.Next() {
@@ -517,7 +517,7 @@ type batchStatsValue struct {
 }
 
 func (s *IngestStore) batchFiles(ctx context.Context, job contracts.IngestJob, limit int) ([]contracts.IngestFile, error) {
-	files := make([]contracts.IngestFile, 0, limit)
+	files := make([]contracts.IngestFile, 0)
 	err := workspaceQueryRows(ctx, s.pool, job.WorkspaceID, `SELECT id,job_id,workspace_id,ordinal,path,mode,byte_size,content_hash,state,supersedes_file_id,chunk_count,symbol_count,indexed_bytes,skipped_reason,created_at,indexed_at FROM fornix.ingest_files WHERE workspace_id=$1 AND job_id=$2 AND ordinal >= $3 ORDER BY ordinal LIMIT $4`, []any{job.WorkspaceID, job.ID, job.Checkpoint.NextOrdinal, limit}, func(rows pgx.Rows) error {
 		for rows.Next() {
 			file, err := scanIngestFile(rows)

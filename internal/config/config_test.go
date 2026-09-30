@@ -272,6 +272,21 @@ func TestLoadOperationWorkerBoundsAndOverrides(t *testing.T) {
 	}
 }
 
+func TestOptionalBoundedIntRejectsHugeValuesBeforeConversion(t *testing.T) {
+	t.Setenv("FORNIX_TEST_BOUNDED_INT", "9223372036854775807")
+	if _, _, err := optionalBoundedInt("FORNIX_TEST_BOUNDED_INT", 1, 1000); err == nil {
+		t.Fatal("expected signed maximum to be rejected by the configured bound")
+	}
+	t.Setenv("FORNIX_TEST_BOUNDED_INT", "1001")
+	if _, _, err := optionalBoundedInt("FORNIX_TEST_BOUNDED_INT", 1, 1000); err == nil {
+		t.Fatal("expected out-of-range value to be rejected")
+	}
+	t.Setenv("FORNIX_TEST_BOUNDED_INT", "12")
+	if got, present, err := optionalBoundedInt("FORNIX_TEST_BOUNDED_INT", 1, 1000); err != nil || !present || got != 12 {
+		t.Fatalf("bounded value = %d, present=%t, error=%v", got, present, err)
+	}
+}
+
 func TestLoadLegacyGlobalSurfacesRequireExplicitNonProductionOptIn(t *testing.T) {
 	clearConfigEnv(t)
 	t.Setenv("FORNIX_AUTH_MODE", "development")

@@ -1267,6 +1267,10 @@ func readResourceLeasesTx(ctx context.Context, tx pgx.Tx, workspaceID, operation
 }
 
 func validateResourceLeasesForRenewalTx(ctx context.Context, tx pgx.Tx, lease OperationLease) error {
+	databaseFence, err := databaseCounter(lease.Fence)
+	if err != nil {
+		return err
+	}
 	var expected, total, valid int
 	if err := tx.QueryRow(ctx, `
 		SELECT count(DISTINCT btrim(resource_kind) || ':' || btrim(resource_id))
@@ -1278,7 +1282,7 @@ func validateResourceLeasesForRenewalTx(ctx context.Context, tx pgx.Tx, lease Op
 		SELECT count(*)::int,
 		       count(*) FILTER (WHERE owner_id=$3 AND operation_fence=$4 AND released_at IS NULL AND lease_until > clock_timestamp())::int
 		FROM fornix.operation_resource_leases
-		WHERE workspace_id=$1 AND operation_id=$2`, lease.WorkspaceID, lease.OperationID, lease.OwnerID, int64(lease.Fence)).Scan(&total, &valid); err != nil {
+	WHERE workspace_id=$1 AND operation_id=$2`, lease.WorkspaceID, lease.OperationID, lease.OwnerID, databaseFence).Scan(&total, &valid); err != nil {
 		return fmt.Errorf("validate operation resource leases: %w", err)
 	}
 	if expected != total || total != valid {
@@ -1322,11 +1326,15 @@ func renewResourceLeasesTx(ctx context.Context, tx pgx.Tx, lease OperationLease,
 	if err := lockResourceLeasesTx(ctx, tx, lease); err != nil {
 		return err
 	}
+	databaseFence, err := databaseCounter(lease.Fence)
+	if err != nil {
+		return err
+	}
 	result, err := tx.Exec(ctx, `
 		UPDATE fornix.operation_resource_leases
 		SET lease_until=clock_timestamp()+($5::double precision * interval '1 millisecond'),renewed_at=clock_timestamp()
 		WHERE workspace_id=$1 AND operation_id=$2 AND owner_id=$3 AND operation_fence=$4 AND released_at IS NULL`,
-		lease.WorkspaceID, lease.OperationID, lease.OwnerID, int64(lease.Fence), ttl.Milliseconds())
+		lease.WorkspaceID, lease.OperationID, lease.OwnerID, databaseFence, ttl.Milliseconds())
 	if err != nil {
 		return fmt.Errorf("renew operation resource leases: %w", err)
 	}
@@ -1347,11 +1355,15 @@ func releaseResourceLeasesTx(ctx context.Context, tx pgx.Tx, lease OperationLeas
 	if err := lockResourceLeasesTx(ctx, tx, lease); err != nil {
 		return err
 	}
+	databaseFence, err := databaseCounter(lease.Fence)
+	if err != nil {
+		return err
+	}
 	rows, err := tx.Query(ctx, `
 		UPDATE fornix.operation_resource_leases
 		SET released_at=clock_timestamp(),lease_until=clock_timestamp()
 		WHERE workspace_id=$1 AND operation_id=$2 AND owner_id=$3 AND operation_fence=$4 AND released_at IS NULL
-		RETURNING resource_key,fence`, lease.WorkspaceID, lease.OperationID, lease.OwnerID, int64(lease.Fence))
+		RETURNING resource_key,fence`, lease.WorkspaceID, lease.OperationID, lease.OwnerID, databaseFence)
 	if err != nil {
 		return fmt.Errorf("release operation resource leases: %w", err)
 	}
@@ -1379,7 +1391,7 @@ func releaseResourceLeasesTx(ctx context.Context, tx pgx.Tx, lease OperationLeas
 			INSERT INTO fornix.operation_resource_lease_history(
 			 workspace_id,resource_key,operation_id,owner_id,operation_fence,fence,action)
 			VALUES($1,$2,$3,$4,$5,$6,'released')`,
-			lease.WorkspaceID, resource.key, lease.OperationID, lease.OwnerID, int64(lease.Fence), resource.fence); err != nil {
+			lease.WorkspaceID, resource.key, lease.OperationID, lease.OwnerID, databaseFence, resource.fence); err != nil {
 			return fmt.Errorf("append released operation resource lease history: %w", err)
 		}
 	}
@@ -1474,7 +1486,7 @@ func (s *OperationStore) ClaimReadyWithOptions(ctx context.Context, workspaceID,
 		return nil, fmt.Errorf("select ready operations: %w", err)
 	}
 	defer rows.Close()
-	operationIDs := make([]string, 0, limit)
+	operationIDs := make([]string, 0)
 	for rows.Next() {
 		var operationID string
 		if err := rows.Scan(&operationID); err != nil {
@@ -1545,6 +1557,10 @@ func (s *OperationStore) RenewLeaseTx(ctx context.Context, tx pgx.Tx, lease Oper
 	if err := setWorkspaceContext(ctx, tx, lease.WorkspaceID); err != nil {
 		return OperationLease{}, err
 	}
+	databaseFence, err := databaseCounter(lease.Fence)
+	if err != nil {
+		return OperationLease{}, err
+	}
 	if _, err := s.validateLease(ctx, tx, lease); err != nil {
 		return OperationLease{}, err
 	}
@@ -1552,7 +1568,7 @@ func (s *OperationStore) RenewLeaseTx(ctx context.Context, tx pgx.Tx, lease Oper
 		return OperationLease{}, err
 	}
 	ttl = boundedLeaseTTL(ttl)
-	if _, err := tx.Exec(ctx, `UPDATE fornix.operation_leases SET lease_until=clock_timestamp()+($3::double precision * interval '1 millisecond'),renewed_at=clock_timestamp() WHERE workspace_id=$1 AND operation_id=$2 AND owner_id=$4 AND fence=$5`, lease.WorkspaceID, lease.OperationID, ttl.Milliseconds(), lease.OwnerID, int64(lease.Fence)); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE fornix.operation_leases SET lease_until=clock_timestamp()+($3::double precision * interval '1 millisecond'),renewed_at=clock_timestamp() WHERE workspace_id=$1 AND operation_id=$2 AND owner_id=$4 AND fence=$5`, lease.WorkspaceID, lease.OperationID, ttl.Milliseconds(), lease.OwnerID, databaseFence); err != nil {
 		return OperationLease{}, fmt.Errorf("renew operation lease: %w", err)
 	}
 	if err := renewResourceLeasesTx(ctx, tx, lease, ttl); err != nil {
@@ -1590,10 +1606,14 @@ func (s *OperationStore) ReleaseLeaseTx(ctx context.Context, tx pgx.Tx, lease Op
 	if err := setWorkspaceContext(ctx, tx, lease.WorkspaceID); err != nil {
 		return err
 	}
+	databaseFence, err := databaseCounter(lease.Fence)
+	if err != nil {
+		return err
+	}
 	if _, err := s.validateLease(ctx, tx, lease); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `UPDATE fornix.operation_leases SET released_at=clock_timestamp(),lease_until=clock_timestamp() WHERE workspace_id=$1 AND operation_id=$2 AND owner_id=$3 AND fence=$4`, lease.WorkspaceID, lease.OperationID, lease.OwnerID, int64(lease.Fence)); err != nil {
+	if _, err := tx.Exec(ctx, `UPDATE fornix.operation_leases SET released_at=clock_timestamp(),lease_until=clock_timestamp() WHERE workspace_id=$1 AND operation_id=$2 AND owner_id=$3 AND fence=$4`, lease.WorkspaceID, lease.OperationID, lease.OwnerID, databaseFence); err != nil {
 		return fmt.Errorf("release operation lease: %w", err)
 	}
 	if err := releaseResourceLeasesTx(ctx, tx, lease); err != nil {
@@ -1679,6 +1699,14 @@ func (s *OperationStore) transitionTx(ctx context.Context, tx pgx.Tx, input Oper
 	if _, err := s.validateLease(ctx, tx, OperationLease{WorkspaceID: input.WorkspaceID, OperationID: input.OperationID, OwnerID: input.OwnerID, Fence: input.Fence}); err != nil {
 		return OperationTransitionResult{}, err
 	}
+	databaseOperationFence, err := databaseCounter(input.Fence)
+	if err != nil {
+		return OperationTransitionResult{}, err
+	}
+	databaseTaskFence, err := databaseCounter(input.TaskFence)
+	if err != nil {
+		return OperationTransitionResult{}, err
+	}
 	if !contracts.CanTransitionOperation(operation.Status, input.ToStatus) {
 		return OperationTransitionResult{}, fmt.Errorf("%w: %s -> %s", ErrOperationTransition, operation.Status, input.ToStatus)
 	}
@@ -1701,10 +1729,10 @@ func (s *OperationStore) transitionTx(ctx context.Context, tx pgx.Tx, input Oper
 	if err != nil {
 		return OperationTransitionResult{}, fmt.Errorf("append operation transition event: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO fornix.operation_transitions(workspace_id,operation_id,state_version,from_status,to_status,request_id,idempotency_key,actor,task_ref,session_ref,task_owner_id,task_fence,operation_owner_id,operation_fence,causation_id,correlation_id,reason_code,state,state_hash,previous_state_hash,event_sequence) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10::jsonb,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,$19,$20,$21)`, input.WorkspaceID, input.OperationID, version, operation.Status, input.ToStatus, input.RequestID, input.IdempotencyKey, mustJSON(input.Actor), entityValue(operation.Request.Task), entityValue(operation.Request.Session), input.TaskOwnerID, int64(input.TaskFence), input.OwnerID, int64(input.Fence), input.CausationID, input.CorrelationID, input.ReasonCode, stateJSON, stateHash, operation.StateHash, appended.Event.Sequence); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO fornix.operation_transitions(workspace_id,operation_id,state_version,from_status,to_status,request_id,idempotency_key,actor,task_ref,session_ref,task_owner_id,task_fence,operation_owner_id,operation_fence,causation_id,correlation_id,reason_code,state,state_hash,previous_state_hash,event_sequence) VALUES($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,$10::jsonb,$11,$12,$13,$14,$15,$16,$17,$18::jsonb,$19,$20,$21)`, input.WorkspaceID, input.OperationID, version, operation.Status, input.ToStatus, input.RequestID, input.IdempotencyKey, mustJSON(input.Actor), entityValue(operation.Request.Task), entityValue(operation.Request.Session), input.TaskOwnerID, databaseTaskFence, input.OwnerID, databaseOperationFence, input.CausationID, input.CorrelationID, input.ReasonCode, stateJSON, stateHash, operation.StateHash, appended.Event.Sequence); err != nil {
 		return OperationTransitionResult{}, fmt.Errorf("insert operation transition: %w", err)
 	}
-	updated, err := tx.Exec(ctx, `UPDATE fornix.operations SET status=$3,state_version=$4,state_hash=$5,result_hash=$6,report_hash=$7,failure=$8::jsonb,next_retry_at=$9,task_owner_id=$10,task_fence=$11,updated_at=clock_timestamp(),started_at=CASE WHEN $3='running' AND started_at IS NULL THEN clock_timestamp() ELSE started_at END,completed_at=CASE WHEN $3 IN ('succeeded','failed','cancelled','dead_letter','abstained') THEN COALESCE(completed_at,clock_timestamp()) ELSE completed_at END WHERE workspace_id=$1 AND id=$2 AND state_version=$12`, input.WorkspaceID, input.OperationID, input.ToStatus, version, stateHash, input.ResultHash, input.ReportHash, operationNullableJSON(input.Failure), input.NextRetryAt, input.TaskOwnerID, int64(input.TaskFence), operation.StateVersion)
+	updated, err := tx.Exec(ctx, `UPDATE fornix.operations SET status=$3,state_version=$4,state_hash=$5,result_hash=$6,report_hash=$7,failure=$8::jsonb,next_retry_at=$9,task_owner_id=$10,task_fence=$11,updated_at=clock_timestamp(),started_at=CASE WHEN $3='running' AND started_at IS NULL THEN clock_timestamp() ELSE started_at END,completed_at=CASE WHEN $3 IN ('succeeded','failed','cancelled','dead_letter','abstained') THEN COALESCE(completed_at,clock_timestamp()) ELSE completed_at END WHERE workspace_id=$1 AND id=$2 AND state_version=$12`, input.WorkspaceID, input.OperationID, input.ToStatus, version, stateHash, input.ResultHash, input.ReportHash, operationNullableJSON(input.Failure), input.NextRetryAt, input.TaskOwnerID, databaseTaskFence, operation.StateVersion)
 	if err != nil {
 		return OperationTransitionResult{}, fmt.Errorf("update operation projection: %w", err)
 	}
@@ -2105,7 +2133,7 @@ func (s *OperationStore) Replay(ctx context.Context, workspaceID, operationID st
 		return OperationReplayResult{}, err
 	}
 	defer rows.Close()
-	transitions := make([]string, 0, limit)
+	transitions := make([]string, 0)
 	count := 0
 	hasMore := false
 	for rows.Next() {

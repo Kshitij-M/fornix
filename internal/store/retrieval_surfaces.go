@@ -190,7 +190,7 @@ func (s *RetrievalSurfaceStore) List(ctx context.Context, workspaceID string, li
 		query = retrievalSurfaceSelect + ` WHERE workspace_id=$1 AND (captured_at,id) > ($2,$3) ORDER BY captured_at,id LIMIT $4`
 		args = []any{workspaceID, value.CapturedAt, value.ID, limit + 1}
 	}
-	page := contracts.RetrievalSurfacePage{Items: make([]contracts.RetrievalSurface, 0, limit)}
+	page := contracts.RetrievalSurfacePage{Items: make([]contracts.RetrievalSurface, 0)}
 	err := workspaceQueryRows(ctx, s.pool, workspaceID, query, args, func(rows pgx.Rows) error {
 		for rows.Next() {
 			var surface contracts.RetrievalSurface

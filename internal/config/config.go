@@ -206,18 +206,18 @@ func Load() (Config, error) {
 	if c.FederationRetentionInterval < minFederationRetentionInterval || c.FederationRetentionInterval > maxFederationRetentionInterval {
 		return Config{}, fmt.Errorf("FORNIX_FEDERATION_RETENTION_INTERVAL_SECONDS must be between 1 and %d", int(maxFederationRetentionInterval/time.Second))
 	}
-	if value, present, err := optionalInt("FORNIX_FEDERATION_RETENTION_BATCH_SIZE"); err != nil {
+	if value, present, err := optionalBoundedInt("FORNIX_FEDERATION_RETENTION_BATCH_SIZE", 1, 500); err != nil {
 		return Config{}, err
 	} else if present {
-		c.FederationRetentionBatchSize = int(value)
+		c.FederationRetentionBatchSize = value
 	}
 	if c.FederationRetentionBatchSize < 1 || c.FederationRetentionBatchSize > 500 {
 		return Config{}, fmt.Errorf("FORNIX_FEDERATION_RETENTION_BATCH_SIZE must be between 1 and 500")
 	}
-	if value, present, err := optionalInt("FORNIX_FEDERATION_RETENTION_WORKSPACE_LIMIT"); err != nil {
+	if value, present, err := optionalBoundedInt("FORNIX_FEDERATION_RETENTION_WORKSPACE_LIMIT", 1, 1000); err != nil {
 		return Config{}, err
 	} else if present {
-		c.FederationRetentionWorkspaceLimit = int(value)
+		c.FederationRetentionWorkspaceLimit = value
 	}
 	if c.FederationRetentionWorkspaceLimit < 1 || c.FederationRetentionWorkspaceLimit > 1000 {
 		return Config{}, fmt.Errorf("FORNIX_FEDERATION_RETENTION_WORKSPACE_LIMIT must be between 1 and 1000")
@@ -249,26 +249,26 @@ func Load() (Config, error) {
 	if c.DBMinConnections > c.DBMaxConnections {
 		return Config{}, fmt.Errorf("FORNIX_DB_MIN_CONNS cannot exceed FORNIX_DB_MAX_CONNS")
 	}
-	if value, present, err := optionalInt("FORNIX_OPERATION_WORKER_MAX_CONCURRENT"); err != nil {
+	if value, present, err := optionalBoundedInt("FORNIX_OPERATION_WORKER_MAX_CONCURRENT", 1, maxOperationWorkerMaxConcurrent); err != nil {
 		return Config{}, err
 	} else if present {
-		c.OperationWorkerMaxConcurrent = int(value)
+		c.OperationWorkerMaxConcurrent = value
 	}
 	if c.OperationWorkerMaxConcurrent < 1 || c.OperationWorkerMaxConcurrent > maxOperationWorkerMaxConcurrent {
 		return Config{}, fmt.Errorf("FORNIX_OPERATION_WORKER_MAX_CONCURRENT must be between 1 and %d", maxOperationWorkerMaxConcurrent)
 	}
-	if value, present, err := optionalInt("FORNIX_OPERATION_WORKER_CLAIM_BATCH"); err != nil {
+	if value, present, err := optionalBoundedInt("FORNIX_OPERATION_WORKER_CLAIM_BATCH", 1, maxOperationWorkerClaimBatch); err != nil {
 		return Config{}, err
 	} else if present {
-		c.OperationWorkerClaimBatch = int(value)
+		c.OperationWorkerClaimBatch = value
 	}
 	if c.OperationWorkerClaimBatch < 1 || c.OperationWorkerClaimBatch > maxOperationWorkerClaimBatch {
 		return Config{}, fmt.Errorf("FORNIX_OPERATION_WORKER_CLAIM_BATCH must be between 1 and %d", maxOperationWorkerClaimBatch)
 	}
-	if value, present, err := optionalInt("FORNIX_OPERATION_WORKER_MAX_ACTIVE"); err != nil {
+	if value, present, err := optionalBoundedInt("FORNIX_OPERATION_WORKER_MAX_ACTIVE", 1, maxOperationWorkerMaxActive); err != nil {
 		return Config{}, err
 	} else if present {
-		c.OperationWorkerMaxActive = int(value)
+		c.OperationWorkerMaxActive = value
 	}
 	if c.OperationWorkerMaxActive < 1 || c.OperationWorkerMaxActive > maxOperationWorkerMaxActive {
 		return Config{}, fmt.Errorf("FORNIX_OPERATION_WORKER_MAX_ACTIVE must be between 1 and %d", maxOperationWorkerMaxActive)
@@ -367,6 +367,17 @@ func optionalInt(name string) (int64, bool, error) {
 		return 0, true, fmt.Errorf("%s must be a positive integer", name)
 	}
 	return n, true, nil
+}
+
+func optionalBoundedInt(name string, minimum, maximum int) (int, bool, error) {
+	value, present, err := optionalInt(name)
+	if err != nil || !present {
+		return 0, present, err
+	}
+	if value < int64(minimum) || value > int64(maximum) {
+		return 0, false, fmt.Errorf("%s must be between %d and %d", name, minimum, maximum)
+	}
+	return int(value), true, nil
 }
 
 func positiveInt32(name string, fallback int32) (int32, error) {

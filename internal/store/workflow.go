@@ -785,6 +785,14 @@ func (s *WorkflowStore) finalizeWorkflowTransition(ctx context.Context, tx pgx.T
 	if actor.WorkspaceID != operation.WorkspaceID || actor.ID != operation.Request.Actor.ID || actor.Kind != operation.Request.Actor.Kind || actor.Name != operation.Request.Actor.Name {
 		return ErrWorkflowWorkspace
 	}
+	databaseOperationFence, err := databaseCounter(fence)
+	if err != nil {
+		return err
+	}
+	databaseTaskFence, err := databaseCounter(taskFence)
+	if err != nil {
+		return err
+	}
 	event, err := workflowEvent(next, "workflow.transition", stepID, next.StateVersion, next.StateHash, idempotencyKey)
 	if err != nil {
 		return err
@@ -794,7 +802,7 @@ func (s *WorkflowStore) finalizeWorkflowTransition(ctx context.Context, tx pgx.T
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO fornix.workflow_transitions(workspace_id,run_id,version,step_id,from_run_status,to_run_status,from_step_status,to_step_status,request_id,idempotency_key,command_hash,actor,owner_id,fence,task_owner_id,task_fence,previous_state_hash,state_hash,state,event_sequence) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,$16,$17,$18,$19::jsonb,$20)`, next.WorkspaceID, next.ID, next.StateVersion, stepID, previous.Status, next.Status, fromStep, toStep, requestID, idempotencyKey, commandHash, mustJSON(actor), owner, int64(fence), taskOwner, int64(taskFence), previous.StateHash, next.StateHash, stateJSON, appended.Event.Sequence); err != nil {
+	if _, err := tx.Exec(ctx, `INSERT INTO fornix.workflow_transitions(workspace_id,run_id,version,step_id,from_run_status,to_run_status,from_step_status,to_step_status,request_id,idempotency_key,command_hash,actor,owner_id,fence,task_owner_id,task_fence,previous_state_hash,state_hash,state,event_sequence) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14,$15,$16,$17,$18,$19::jsonb,$20)`, next.WorkspaceID, next.ID, next.StateVersion, stepID, previous.Status, next.Status, fromStep, toStep, requestID, idempotencyKey, commandHash, mustJSON(actor), owner, databaseOperationFence, taskOwner, databaseTaskFence, previous.StateHash, next.StateHash, stateJSON, appended.Event.Sequence); err != nil {
 		return err
 	}
 	updatedRun, err := tx.Exec(ctx, `UPDATE fornix.workflow_runs SET status=$3,wait=$4::jsonb,failure=$5::jsonb,terminal_reason=$6,state_version=$7,state_hash=$8,output_bytes=$9,tokens=$10,cost_micros=$11,updated_at=clock_timestamp() WHERE workspace_id=$1 AND run_id=$2 AND state_version=$12`, next.WorkspaceID, next.ID, next.Status, workflowNullableJSONValue(next.Wait), workflowNullableJSONValue(next.Failure), next.TerminalReason, next.StateVersion, next.StateHash, next.OutputBytes, next.Tokens, next.CostMicros, previous.StateVersion)

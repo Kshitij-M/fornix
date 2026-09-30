@@ -221,7 +221,7 @@ func (s *WorkspaceCoordinationStore) ReadMessages(ctx context.Context, workspace
 		return nil, err
 	}
 	defer rows.Close()
-	messages := make([]contracts.CoordinationMessage, 0, limit)
+	messages := make([]contracts.CoordinationMessage, 0)
 	for rows.Next() {
 		message, scanErr := scanCoordinationMessage(rows)
 		if scanErr != nil {
@@ -340,7 +340,7 @@ func (s *WorkspaceCoordinationStore) Recommend(ctx context.Context, workspaceID,
 		return nil, err
 	}
 	defer rows.Close()
-	recommendations := make([]contracts.RouterRecommendation, 0, limit)
+	recommendations := make([]contracts.RouterRecommendation, 0)
 	for rows.Next() {
 		var recommendation contracts.RouterRecommendation
 		if err := rows.Scan(&recommendation.ModelID, &recommendation.CostUSDAvg, &recommendation.LatencyP50, &recommendation.SuccessRate, &recommendation.SampleSize); err != nil {
