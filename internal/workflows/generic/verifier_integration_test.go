@@ -248,12 +248,19 @@ func TestGenericWorkflowUnknownVerificationResumesWithoutRepeatingVerifier(t *te
 	if err != nil || !replay.Verified {
 		t.Fatalf("workflow replay verified=%v err=%v", replay.Verified, err)
 	}
-	receipt, duplicate, err := service.FinalizeReceipt(ctx, workspaceID, created.Run.ID, approver)
+	receipt, createdReceipt, err := service.FinalizeReceipt(ctx, workspaceID, created.Run.ID, approver)
 	if err != nil {
 		t.Fatalf("finalize work receipt: %v", err)
 	}
-	if duplicate || receipt.WorkID != created.Run.ID || receipt.ReplayHash != replay.ReplayHash {
-		t.Fatalf("receipt did not bind verified workflow replay: duplicate=%v receipt=%+v replay=%+v", duplicate, receipt, replay)
+	if !createdReceipt || receipt.WorkID != created.Run.ID || receipt.ReplayHash != replay.ReplayHash {
+		t.Fatalf("receipt did not bind verified workflow replay: created=%v receipt=%+v replay=%+v", createdReceipt, receipt, replay)
+	}
+	duplicateReceipt, createdDuplicate, err := service.FinalizeReceipt(ctx, workspaceID, created.Run.ID, approver)
+	if err != nil {
+		t.Fatalf("repeat work receipt finalization: %v", err)
+	}
+	if createdDuplicate || duplicateReceipt.CanonicalHash != receipt.CanonicalHash {
+		t.Fatalf("repeated finalization was not idempotent: created=%v receipt_hash=%s duplicate_hash=%s", createdDuplicate, receipt.CanonicalHash, duplicateReceipt.CanonicalHash)
 	}
 }
 

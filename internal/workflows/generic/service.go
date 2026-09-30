@@ -296,7 +296,9 @@ func (s *Service) Replay(ctx context.Context, workspaceID, runID string, request
 // FinalizeReceipt creates the generic operation-backed Work Receipt only for
 // a terminal successful run whose append-only replay verifies. It intentionally
 // does not manufacture evidence or artifact claims; domain adapters must add
-// those authoritative references before finalization when they exist.
+// those authoritative references before finalization when they exist. The
+// returned boolean is true only when this call inserted a new receipt; an
+// idempotent replay returns the existing receipt and false.
 func (s *Service) FinalizeReceipt(ctx context.Context, workspaceID, runID string, actor contracts.ActorRef) (contracts.WorkReceipt, bool, error) {
 	if err := s.validate(); err != nil {
 		return contracts.WorkReceipt{}, false, err
