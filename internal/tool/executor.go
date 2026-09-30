@@ -314,18 +314,49 @@ func restrictWorkdirRoot(requested, registered string, backend string) (string, 
 		registered = filepath.Clean(registered)
 	}
 	if backend == string(contracts.SandboxBackendLocalProcess) {
-		requested, err := canonicalWorkdirRoot(requested)
+		if registered == "" {
+			return "", fmt.Errorf("local-process tools require a registered workdir root")
+		}
+		requestedAbsolute, err := filepath.Abs(requested)
+		if err != nil {
+			return "", fmt.Errorf("make requested workdir root absolute: %w", err)
+		}
+		registeredAbsolute, err := filepath.Abs(registered)
+		if err != nil {
+			return "", fmt.Errorf("make registered workdir root absolute: %w", err)
+		}
+		lexicalRelative, err := filepath.Rel(registeredAbsolute, requestedAbsolute)
+		if err != nil || !filepath.IsLocal(lexicalRelative) {
+			return "", fmt.Errorf("request workdir root is outside the registered root")
+		}
+		registered, err = canonicalWorkdirRoot(registeredAbsolute)
+		if err != nil {
+			return "", fmt.Errorf("resolve registered workdir root: %w", err)
+		}
+		requested, err = canonicalWorkdirRoot(requestedAbsolute)
 		if err != nil {
 			return "", fmt.Errorf("resolve requested workdir root: %w", err)
 		}
-		if registered != "" {
-			registered, err = canonicalWorkdirRoot(registered)
-			if err != nil {
-				return "", fmt.Errorf("resolve registered workdir root: %w", err)
-			}
-		}
-		if registered != "" && !withinRoot(requested, registered) {
+		relative, err := filepath.Rel(registered, requested)
+		if err != nil || !filepath.IsLocal(relative) {
 			return "", fmt.Errorf("resolved request workdir root is outside the registered root")
+		}
+		registeredRoot, err := os.OpenRoot(registered)
+		if err != nil {
+			return "", fmt.Errorf("open registered workdir root: %w", err)
+		}
+		defer registeredRoot.Close()
+		requestedRoot, err := registeredRoot.OpenRoot(relative)
+		if err != nil {
+			return "", fmt.Errorf("open requested workdir root within registered root: %w", err)
+		}
+		defer requestedRoot.Close()
+		info, err := requestedRoot.Stat(".")
+		if err != nil {
+			return "", fmt.Errorf("stat requested workdir root: %w", err)
+		}
+		if !info.IsDir() {
+			return "", fmt.Errorf("requested workdir root is not a directory")
 		}
 		return requested, nil
 	}
@@ -343,13 +374,6 @@ func canonicalWorkdirRoot(root string) (string, error) {
 	resolved, err := filepath.EvalSymlinks(absolute)
 	if err != nil {
 		return "", err
-	}
-	info, err := os.Stat(resolved)
-	if err != nil {
-		return "", err
-	}
-	if !info.IsDir() {
-		return "", fmt.Errorf("workdir root is not a directory")
 	}
 	return filepath.Clean(resolved), nil
 }

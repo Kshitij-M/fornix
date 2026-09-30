@@ -471,6 +471,19 @@ func TestExecutorRejectsSymlinkedRequestRootEscapingRegisteredRoot(t *testing.T)
 	}
 }
 
+func TestRestrictWorkdirRootRejectsOutsidePathBeforeFilesystemResolution(t *testing.T) {
+	parent := t.TempDir()
+	registered := filepath.Join(parent, "registered")
+	if err := os.Mkdir(registered, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	outside := filepath.Join(parent, "not-created", "repository")
+	_, err := restrictWorkdirRoot(outside, registered, string(contracts.SandboxBackendLocalProcess))
+	if err == nil || !strings.Contains(err.Error(), "outside the registered root") {
+		t.Fatalf("outside path should fail containment before filesystem resolution, got: %v", err)
+	}
+}
+
 func TestExecutorRejectsSymlinkedPolicyRootEscapingRegisteredRoot(t *testing.T) {
 	parent := t.TempDir()
 	root := filepath.Join(parent, "registered")

@@ -237,14 +237,23 @@ func openChangeRoot(path string) (*os.Root, error) {
 	if path == "" || !filepath.IsAbs(path) {
 		return nil, fmt.Errorf("%w: repository root must be absolute", ErrUnsafePath)
 	}
-	info, err := os.Lstat(path)
+	filesystemRoot, err := os.OpenRoot(string(filepath.Separator))
+	if err != nil {
+		return nil, fmt.Errorf("open filesystem root: %w", err)
+	}
+	defer filesystemRoot.Close()
+	relative, err := filepath.Rel(string(filepath.Separator), path)
+	if err != nil || !filepath.IsLocal(relative) {
+		return nil, fmt.Errorf("%w: repository root is not local to the filesystem root", ErrUnsafePath)
+	}
+	info, err := filesystemRoot.Lstat(relative)
 	if err != nil {
 		return nil, fmt.Errorf("stat repository root: %w", err)
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return nil, fmt.Errorf("%w: repository root must be a non-symlink directory", ErrUnsafePath)
 	}
-	repositoryRoot, err := os.OpenRoot(path)
+	repositoryRoot, err := filesystemRoot.OpenRoot(relative)
 	if err != nil {
 		return nil, fmt.Errorf("open repository root: %w", err)
 	}
