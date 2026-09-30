@@ -22,7 +22,7 @@ assert_json() {
   predicate=$3
   if ! printf '%s' "$document" | jq -e "$predicate" >/dev/null; then
     printf 'multi-domain incident smoke: %s assertion failed\n' "$label" >&2
-    printf '%s' "$document" | jq -c '{workflow_id: .workflow.id, workflow_status: .workflow.status, incident_status: .incident.status, workspace_id: .incident.workspace_id, duplicate, replay_verified, replay_hash_present: (.replay_hash != null and .replay_hash != "")}' >&2 || true
+    printf '%s' "$document" | jq -c '{workflow_id: .workflow.id, workflow_status: .workflow.status, workflow_failure_code: (.workflow.failure.code // null), failed_steps: [(.workflow.steps // [])[] | select(.status == "failed" or .status == "recovery_required") | {ordinal,kind,status,failure_code:(.failure.code // null)}], incident_status: .incident.status, workspace_id: .incident.workspace_id, duplicate, replay_verified, replay_hash_present: (.replay_hash != null and .replay_hash != "")}' >&2 || true
     exit 1
   fi
 }
