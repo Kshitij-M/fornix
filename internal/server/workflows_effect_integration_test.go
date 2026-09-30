@@ -42,7 +42,7 @@ func TestAuthenticatedWorkflowCLIOverHTTPResumesUnknownEffectWithoutDuplicateVer
 	actor := principal.Actor()
 	reviewer, err := srv.auth.CreateIdentity(ctx, contracts.IdentityInput{
 		WorkspaceID: workspaceID, Subject: "workflow-reviewer", Kind: "user",
-		Permissions: []contracts.Permission{contracts.PermissionToolApprove},
+		Permissions: []contracts.Permission{contracts.PermissionOperationExecute, contracts.PermissionToolApprove},
 	})
 	if err != nil {
 		t.Fatalf("create distinct workflow reviewer: %v", err)
@@ -141,11 +141,31 @@ func TestAuthenticatedWorkflowCLIOverHTTPResumesUnknownEffectWithoutDuplicateVer
 	if waiting.Run.Status != contracts.WorkflowStatusAwaitingApproval {
 		t.Fatalf("first CLI advance status=%s, want awaiting approval", waiting.Run.Status)
 	}
+	if _, err := runFornixCLIProcess(t, cliBinary, api.URL, workspaceID, token, "workflow", "release", "--id", runID, "--fence", strconv.FormatUint(fence, 10)); err != nil {
+		t.Fatalf("requester releases workflow lease for independent review: %v", err)
+	}
+	reviewerLease := runFornixCLIJSON[struct {
+		Lease store.WorkflowLease `json:"lease"`
+	}](t, cliBinary, api.URL, workspaceID, reviewerToken, "workflow", "lease", "--id", runID, "--ttl-ms", "120000")
+	reviewerFence := reviewerLease.Lease.Fence
+	if reviewerFence <= fence {
+		t.Fatalf("reviewer fence=%d, want newer than requester fence %d", reviewerFence, fence)
+	}
 	approved := runFornixCLIJSON[struct {
 		Run contracts.WorkflowRun `json:"run"`
-	}](t, cliBinary, api.URL, workspaceID, reviewerToken, "workflow", "approve", "--id", runID, "--fence", strconv.FormatUint(fence, 10), "--step-id", "approval")
+	}](t, cliBinary, api.URL, workspaceID, reviewerToken, "workflow", "approve", "--id", runID, "--fence", strconv.FormatUint(reviewerFence, 10), "--step-id", "approval")
 	if approved.Run.Steps[0].Status != contracts.WorkflowStepSucceeded {
 		t.Fatalf("distinct reviewer approval status=%s, want succeeded", approved.Run.Steps[0].Status)
+	}
+	if _, err := runFornixCLIProcess(t, cliBinary, api.URL, workspaceID, reviewerToken, "workflow", "release", "--id", runID, "--fence", strconv.FormatUint(reviewerFence, 10)); err != nil {
+		t.Fatalf("reviewer releases workflow lease after approval: %v", err)
+	}
+	requesterLease := runFornixCLIJSON[struct {
+		Lease store.WorkflowLease `json:"lease"`
+	}](t, cliBinary, api.URL, workspaceID, token, "workflow", "lease", "--id", runID, "--ttl-ms", "120000")
+	fence = requesterLease.Lease.Fence
+	if fence <= reviewerFence {
+		t.Fatalf("resumed requester fence=%d, want newer than reviewer fence %d", fence, reviewerFence)
 	}
 	dispatchedEnvelope := runFornixCLIJSON[struct {
 		Run contracts.WorkflowRun `json:"run"`
