@@ -1,7 +1,10 @@
 package store
 
 import (
+	"bytes"
 	"context"
+	"crypto/ed25519"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -9,6 +12,28 @@ import (
 
 	"github.com/omaveda/fornix/internal/contracts"
 )
+
+func TestExternalEffectQualificationFixtureIsSignedAndMeasured(t *testing.T) {
+	private := ed25519.NewKeyFromSeed(bytes.Repeat([]byte{0x29}, ed25519.SeedSize))
+	fixture := &qualificationTrustFixture{
+		workspace: "qualification-boundary-fixture",
+		keyID:     "fixture-key",
+		private:   private,
+		target:    contracts.HashStrings("qualification-target", "fixture"),
+	}
+	observedAt := time.Date(2026, 9, 27, 0, 0, 0, 0, time.UTC)
+	signed, raw := fixture.signedWithExternalBoundary(t, "qualification-external-fixture", observedAt)
+	if err := signed.VerifyWithKey(fixture.keyID, private.Public().(ed25519.PublicKey)); err != nil {
+		t.Fatalf("verify external-effect bundle signature: %v", err)
+	}
+	if len(raw) == 0 || len(signed.Bundle.Report.BoundaryEvidence) != 1 {
+		t.Fatalf("fixture raw_bytes=%d boundary_evidence=%d, want nonempty raw bytes and exactly one observation", len(raw), len(signed.Bundle.Report.BoundaryEvidence))
+	}
+	boundary, evidenceHash, expiresAt, err := qualificationBoundaryHashes(signed, contracts.DeploymentEvidenceExternalEffect, observedAt.Add(time.Hour))
+	if err != nil || boundary == "" || evidenceHash == "" || expiresAt == nil || !expiresAt.After(observedAt.Add(time.Hour)) {
+		t.Fatalf("external-effect proof boundary=%q evidence=%q expires=%v err=%v", boundary, evidenceHash, expiresAt, err)
+	}
+}
 
 func TestDeploymentReleaseVerificationBindsGateAndAdmission(t *testing.T) {
 	f := newQualificationTrustFixture(t)
@@ -35,7 +60,13 @@ func TestDeploymentReleaseVerificationBindsGateAndAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, kind := range contracts.DeploymentDefaultRequiredEvidenceKinds {
-		signedRequired, rawRequired := f.signed(t, f.keyID, f.private, "qualification-"+kind+"-verify")
+		var signedRequired contracts.SignedQualificationBundle
+		var rawRequired []byte
+		if kind == contracts.DeploymentEvidenceExternalEffect {
+			signedRequired, rawRequired = f.signedWithExternalBoundary(t, "qualification-"+kind+"-verify", from)
+		} else {
+			signedRequired, rawRequired = f.signed(t, f.keyID, f.private, "qualification-"+kind+"-verify")
+		}
 		importRequired, importErr := f.store.ImportAuthorized(context.Background(), f.importRequest(signedRequired, rawRequired, "import-"+kind+"-verify", false), from.Add(time.Hour))
 		if importErr != nil {
 			t.Fatalf("import %s qualification: %v", kind, importErr)
@@ -112,6 +143,43 @@ func TestDeploymentReleaseVerificationBindsGateAndAdmission(t *testing.T) {
 	if err != nil || revoked.Ready || !containsString(revoked.BlockedReasons, "release_verification_revoked") {
 		t.Fatalf("revoked admission=%+v err=%v", revoked, err)
 	}
+}
+
+func (f *qualificationTrustFixture) signedWithExternalBoundary(t *testing.T, runID string, observedAt time.Time) (contracts.SignedQualificationBundle, []byte) {
+	t.Helper()
+	base, _ := f.signed(t, f.keyID, f.private, runID)
+	bundle := base.Bundle
+	boundary := contracts.ExternalBoundaryAuthority{
+		EgressPolicyHash:      contracts.HashStrings("qualification-egress", runID),
+		DestinationPolicyHash: contracts.HashStrings("qualification-destination", runID),
+		NetworkBoundary:       contracts.NetworkBoundaryControlledTransport,
+		NetworkBoundaryHash:   contracts.HashStrings("qualification-network", runID),
+	}
+	bundle.Report.BoundaryEvidence = []contracts.BoundaryQualificationEvidence{{
+		ID: "external-effect-boundary", Kind: contracts.BoundaryQualificationProviderIdempotency,
+		Outcome: contracts.QualificationOutcomePassed, BoundaryHash: boundary.StableHash(),
+		ProviderRequestHash:  contracts.HashStrings("qualification-provider-request", runID),
+		ProviderResponseHash: contracts.HashStrings("qualification-provider-response", runID),
+		Measured:             true, ObservedAt: observedAt, ExpiresAt: observedAt.Add(12 * time.Hour),
+	}}
+	bundle.Report.ReportHash = ""
+	if err := bundle.Report.Normalize(); err != nil {
+		t.Fatalf("normalize external-boundary qualification report: %v", err)
+	}
+	bundle.Manifest.ReportHash = bundle.Report.ReportHash
+	bundle.Manifest.ManifestHash = ""
+	if err := bundle.Normalize(); err != nil {
+		t.Fatalf("normalize external-boundary qualification bundle: %v", err)
+	}
+	signed, err := contracts.SignQualificationBundle(bundle, f.keyID, f.private)
+	if err != nil {
+		t.Fatalf("sign external-boundary qualification bundle: %v", err)
+	}
+	raw, err := json.Marshal(signed)
+	if err != nil {
+		t.Fatalf("marshal external-boundary qualification bundle: %v", err)
+	}
+	return signed, raw
 }
 
 func TestDeploymentReleaseVerificationFailsClosedForStaleGateAndWorkspace(t *testing.T) {
