@@ -422,7 +422,7 @@ func (s *DomainEffectLinkStore) CurrentByDomain(ctx context.Context, workspaceID
 		return DomainEffectLinkCurrent{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	link, err := readDomainEffectLinkByDomainTx(ctx, tx, workspaceID, kind, domainID, role)
+	link, err := readDomainEffectLinkBaseByDomainTx(ctx, tx, workspaceID, kind, domainID, role)
 	if err != nil {
 		return DomainEffectLinkCurrent{}, err
 	}
@@ -451,7 +451,6 @@ func (s *DomainEffectLinkStore) CurrentTx(ctx context.Context, tx pgx.Tx, worksp
 	if err != nil {
 		return DomainEffectLinkCurrent{}, err
 	}
-	link.Status = transition.ToStatus
 	return DomainEffectLinkCurrent{Link: link, Transition: transition}, nil
 }
 
@@ -504,8 +503,16 @@ func readDomainEffectLinkTx(ctx context.Context, tx pgx.Tx, workspaceID, linkID 
 	}
 	return value, nil
 }
-func readDomainEffectLinkByDomainTx(ctx context.Context, tx pgx.Tx, workspaceID, kind, domainID, role string) (contracts.DomainEffectLink, error) {
+func readDomainEffectLinkBaseByDomainTx(ctx context.Context, tx pgx.Tx, workspaceID, kind, domainID, role string) (contracts.DomainEffectLink, error) {
 	value, err := scanDomainEffectLink(tx.QueryRow(ctx, domainEffectLinkSelect+` WHERE workspace_id=$1 AND domain_kind=$2 AND domain_id=$3 AND link_role=$4`, workspaceID, strings.ToLower(strings.TrimSpace(kind)), strings.TrimSpace(domainID), strings.ToLower(strings.TrimSpace(role))))
+	if err != nil {
+		return contracts.DomainEffectLink{}, err
+	}
+	return value, nil
+}
+
+func readDomainEffectLinkByDomainTx(ctx context.Context, tx pgx.Tx, workspaceID, kind, domainID, role string) (contracts.DomainEffectLink, error) {
+	value, err := readDomainEffectLinkBaseByDomainTx(ctx, tx, workspaceID, kind, domainID, role)
 	if err != nil {
 		return contracts.DomainEffectLink{}, err
 	}

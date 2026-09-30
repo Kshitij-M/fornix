@@ -87,6 +87,16 @@ func TestDomainEffectLinkBindingIsIdempotentAndWorkspaceScoped(t *testing.T) {
 	if err != nil || recovery.Duplicate || recovery.Transition.Version != 2 || recovery.Link.Status != contracts.DomainEffectLinkStatusRecoveryRequired {
 		t.Fatalf("recovery transition=%+v err=%v", recovery, err)
 	}
+	currentRecovery, err := links.CurrentByDomain(ctx, workspace, contracts.DomainEffectKindHTTPRequest, "http-request-1", contracts.DomainEffectLinkRolePrimary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if currentRecovery.Link.Status != contracts.DomainEffectLinkStatusLinked || currentRecovery.Transition.ToStatus != contracts.DomainEffectLinkStatusRecoveryRequired {
+		t.Fatalf("current link read changed its immutable identity: link=%+v transition=%+v", currentRecovery.Link, currentRecovery.Transition)
+	}
+	if err := currentRecovery.Link.Normalize(); err != nil {
+		t.Fatalf("current link read no longer matches its immutable hash: %v", err)
+	}
 	duplicateRecovery, err := links.Transition(ctx, contracts.DomainEffectLinkTransitionRequest{
 		WorkspaceID: workspace, LinkID: first.Link.ID, ExpectedVersion: 1,
 		FromStatus: contracts.DomainEffectLinkStatusLinked, ToStatus: contracts.DomainEffectLinkStatusRecoveryRequired,
@@ -109,6 +119,16 @@ func TestDomainEffectLinkBindingIsIdempotentAndWorkspaceScoped(t *testing.T) {
 	})
 	if err != nil || reconciled.Duplicate || reconciled.Link.Status != contracts.DomainEffectLinkStatusReconciled {
 		t.Fatalf("reconciled transition=%+v err=%v", reconciled, err)
+	}
+	currentReconciled, err := links.CurrentByDomain(ctx, workspace, contracts.DomainEffectKindHTTPRequest, "http-request-1", contracts.DomainEffectLinkRolePrimary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if currentReconciled.Link.Status != contracts.DomainEffectLinkStatusLinked || currentReconciled.Transition.ToStatus != contracts.DomainEffectLinkStatusReconciled {
+		t.Fatalf("reconciled link read changed its immutable identity: link=%+v transition=%+v", currentReconciled.Link, currentReconciled.Transition)
+	}
+	if err := currentReconciled.Link.Normalize(); err != nil {
+		t.Fatalf("reconciled link identity no longer matches its immutable hash: %v", err)
 	}
 	latest, err := links.Get(ctx, workspace, first.Link.ID)
 	if err != nil || latest.Status != contracts.DomainEffectLinkStatusReconciled {
