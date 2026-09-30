@@ -439,6 +439,38 @@ func TestExecutorRejectsPolicyWorkdirThatWidensDefinitionRoot(t *testing.T) {
 	}
 }
 
+func TestExecutorUsesWorkspacePolicyRootWhenToolHasNoGlobalHostRoot(t *testing.T) {
+	root := t.TempDir()
+	definition := testDefinition("/bin/echo")
+	registry := NewRegistry()
+	if err := registry.Register(definition); err != nil {
+		t.Fatal(err)
+	}
+	policy, err := NewPolicy([]contracts.ToolPolicyRule{{
+		ID: "workspace-root", WorkspaceID: "w1", ToolID: definition.ID, Capability: definition.Capability,
+		Mode: contracts.ToolModeAutomatic, Enabled: true, WorkdirRoot: root,
+		Sandbox: contracts.DefaultSandboxProfile(),
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	process := &workdirRecordingProcess{}
+	executor := &Executor{Registry: registry, Policy: policy, Store: newFakeRunStore(), Sandboxes: testSandboxRegistry(t, process)}
+	request := testRequest()
+	request.Workdir = root
+
+	if _, err := executor.Execute(context.Background(), request); err != nil {
+		t.Fatalf("workspace policy root should admit the workspace-scoped tool: %v", err)
+	}
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if process.calls != 1 || process.definitionRoot != canonicalRoot || process.requestWorkdir != root {
+		t.Fatalf("workspace root was not applied to execution: calls=%d definition root=%q request workdir=%q", process.calls, process.definitionRoot, process.requestWorkdir)
+	}
+}
+
 func TestExecutorRejectsSymlinkedRequestRootEscapingRegisteredRoot(t *testing.T) {
 	parent := t.TempDir()
 	root := filepath.Join(parent, "registered")
@@ -1338,6 +1370,19 @@ type countingProcess struct {
 	mu     sync.Mutex
 	calls  int
 	result contracts.ToolResult
+}
+
+type workdirRecordingProcess struct {
+	calls          int
+	definitionRoot string
+	requestWorkdir string
+}
+
+func (p *workdirRecordingProcess) Run(_ context.Context, definition contracts.ToolDefinition, request contracts.ToolRequest) (contracts.ToolResult, error) {
+	p.calls++
+	p.definitionRoot = definition.Sandbox.AllowedWorkdirRoot
+	p.requestWorkdir = request.Workdir
+	return contracts.ToolResult{Status: contracts.ToolRunSucceeded}, nil
 }
 
 func (p *countingProcess) Run(context.Context, contracts.ToolDefinition, contracts.ToolRequest) (contracts.ToolResult, error) {

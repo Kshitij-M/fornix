@@ -608,7 +608,13 @@ func (e *Executor) Execute(ctx context.Context, req contracts.ToolRequest) (Outc
 		return Outcome{}, sandboxFailure(contracts.ToolFailureSandboxUnavailable, "sandbox policy is incompatible with the registered tool")
 	}
 	if decision.Rule.WorkdirRoot != "" {
-		root, rootErr := restrictWorkdirRoot(decision.Rule.WorkdirRoot, effectiveDefinition.Sandbox.AllowedWorkdirRoot, effectiveDefinition.Sandbox.Backend)
+		registeredRoot := effectiveDefinition.Sandbox.AllowedWorkdirRoot
+		if registeredRoot == "" {
+			// Workspace policy may supply the authoritative repository mount for
+			// tools whose global definition intentionally has no host path.
+			registeredRoot = decision.Rule.WorkdirRoot
+		}
+		root, rootErr := restrictWorkdirRoot(decision.Rule.WorkdirRoot, registeredRoot, effectiveDefinition.Sandbox.Backend)
 		if rootErr != nil {
 			return Outcome{}, failure(contracts.ToolFailureWorkdirDenied, "tool policy workdir exceeds the registered root", false)
 		}
