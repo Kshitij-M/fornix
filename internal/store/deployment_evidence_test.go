@@ -244,6 +244,21 @@ func TestQualificationRefreshIsAtomicIdempotentAndHistoryPreserving(t *testing.T
 		Items: []contracts.QualificationRefreshItem{{Kind: contracts.DeploymentEvidenceProvider, ImportID: importTwo.Record.ID, SupersedesLinkID: linkOne.ID}},
 		AsOf:  now.Add(time.Minute), IdempotencyKey: "refresh-provider-one", Actor: f.actor,
 	}
+	dryRun := request
+	dryRun.IdempotencyKey = "refresh-provider-dry-run"
+	dryRun.DryRun = true
+	planned, err := deployment.RefreshQualificationEvidence(context.Background(), dryRun, now.Add(time.Minute))
+	if err != nil || !planned.DryRun || planned.Report.ReportHash == "" || planned.Created {
+		t.Fatalf("refresh dry-run=%+v err=%v", planned, err)
+	}
+	page, err := deployment.ListQualificationRefreshes(context.Background(), f.workspace, "deployment-a", release.ID, 10, "")
+	if err != nil || len(page.Items) != 0 {
+		t.Fatalf("dry-run created durable refresh=%+v err=%v", page, err)
+	}
+	evidence, err := deployment.ListEvidence(context.Background(), f.workspace, "deployment-a", release.ID, 10, "")
+	if err != nil || len(evidence.Items) != 1 || evidence.Items[0].ID != linkOne.ID {
+		t.Fatalf("dry-run changed evidence history=%+v err=%v", evidence, err)
+	}
 	first, err := deployment.RefreshQualificationEvidence(context.Background(), request, now.Add(time.Minute))
 	if err != nil || !first.Created || first.Report.ReportHash == "" || first.Report.Items[0].PreviousLinkID != linkOne.ID {
 		t.Fatalf("refresh=%+v err=%v", first, err)
@@ -252,23 +267,24 @@ func TestQualificationRefreshIsAtomicIdempotentAndHistoryPreserving(t *testing.T
 	if err != nil || !replayed.Deduplicated || replayed.Report.ReportHash != first.Report.ReportHash {
 		t.Fatalf("refresh replay=%+v err=%v", replayed, err)
 	}
-	dryRun := request
-	dryRun.IdempotencyKey = "refresh-provider-dry-run"
-	dryRun.DryRun = true
-	planned, err := deployment.RefreshQualificationEvidence(context.Background(), dryRun, now.Add(3*time.Minute))
-	if err != nil || !planned.DryRun || planned.Report.ReportHash == "" {
-		t.Fatalf("refresh dry-run=%+v err=%v", planned, err)
-	}
-	page, err := deployment.ListQualificationRefreshes(context.Background(), f.workspace, "deployment-a", release.ID, 10, "")
+	page, err = deployment.ListQualificationRefreshes(context.Background(), f.workspace, "deployment-a", release.ID, 10, "")
 	if err != nil || len(page.Items) != 1 {
 		t.Fatalf("refresh page=%+v err=%v", page, err)
 	}
-	evidence, err := deployment.ListEvidence(context.Background(), f.workspace, "deployment-a", release.ID, 10, "")
+	evidence, err = deployment.ListEvidence(context.Background(), f.workspace, "deployment-a", release.ID, 10, "")
 	if err != nil || len(evidence.Items) != 2 {
 		t.Fatalf("evidence history=%+v err=%v", evidence, err)
 	}
+	signedThree, rawThree := f.signed(t, f.keyID, f.private, "qualification-provider-refresh-three")
+	importThree, err := f.store.ImportAuthorized(context.Background(), f.importRequest(signedThree, rawThree, "import-provider-refresh-three", false), from.Add(100*time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
 	failed := request
 	failed.IdempotencyKey = "refresh-provider-atomic-failure"
+	failed.AsOf = now.Add(4 * time.Minute)
+	failed.Items[0].ImportID = importThree.Record.ID
+	failed.Items[0].SupersedesLinkID = first.Report.Items[0].LinkID
 	failed.Items = append(failed.Items, contracts.QualificationRefreshItem{Kind: contracts.DeploymentEvidenceMigration, ImportID: "missing-import"})
 	if _, err := deployment.RefreshQualificationEvidence(context.Background(), failed, now.Add(4*time.Minute)); err == nil {
 		t.Fatal("invalid later item did not fail")
