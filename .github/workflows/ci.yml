@@ -43,10 +43,6 @@ jobs:
         run: make smoke-universal-trust
       - name: Run shared destination policy tests
         run: make smoke-universal-egress
-      - name: Run durable generic connector execution tests
-        env:
-          FORNIX_TEST_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
-        run: make smoke-universal-execution
       - name: Run external-effect reconciliation tests
         env:
           FORNIX_TEST_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
@@ -136,6 +132,10 @@ jobs:
           go build -trimpath -o /tmp/fornix ./cmd/fornix
           mkdir -p bin
           cp /tmp/fornix bin/fornix
+      - name: Run durable generic connector execution tests
+        env:
+          FORNIX_TEST_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
+        run: make smoke-universal-execution
       - name: Run authorization audit replay qualification
         env:
           FORNIX_TEST_PG_DSN: postgres://fornix:fornix-ci@localhost:5432/fornix?sslmode=disable
