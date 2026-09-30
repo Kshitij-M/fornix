@@ -1148,7 +1148,7 @@ func (c *operatorCLI) referenceWorkflow(args []string) error {
 		if state == "" {
 			return errors.New("reference workflow did not return an agent run state")
 		}
-		return fmt.Errorf("reference workflow agent run ended in %s", state)
+		return fmt.Errorf("reference workflow agent run ended: %s", agentRunFailureDetails(run))
 	}
 	report, _ := json.Marshal(map[string]any{"workflow": workflowName, "task_id": taskID, "run_id": runID, "manifest_hash": manifestHash, "output": run["last_output"], "context_hash": run["context_hash"], "state_hash": run["state_hash"]})
 	artifact, err := c.request(http.MethodPost, "/v1/artifacts", map[string]any{"workspace_id": workspace, "kind": "fornix-report", "media_type": "application/json", "raw": report, "source_kind": "agent_run", "source_id": runID, "role": "report", "idempotency_key": prefix + ":report"}, false)
@@ -1210,6 +1210,31 @@ func (c *operatorCLI) referenceWorkflow(args []string) error {
 		return nil
 	}
 	return c.print(result)
+}
+
+// agentRunFailureDetails exposes only bounded, stable diagnostic fields. The
+// persisted failure message can contain adapter/provider text, so it is
+// deliberately omitted from CLI errors and smoke logs.
+func agentRunFailureDetails(run map[string]any) string {
+	parts := make([]string, 0, 4)
+	if state := stringValue(run, "state"); state != "" {
+		parts = append(parts, "state="+state)
+	}
+	if termination := stringValue(run, "termination"); termination != "" {
+		parts = append(parts, "termination="+termination)
+	}
+	if failure, ok := run["last_failure"].(map[string]any); ok {
+		if code := stringValue(failure, "code"); code != "" {
+			parts = append(parts, "failure_code="+code)
+		}
+		if phase := stringValue(failure, "phase"); phase != "" {
+			parts = append(parts, "failure_phase="+phase)
+		}
+	}
+	if len(parts) == 0 {
+		return "state unavailable"
+	}
+	return strings.Join(parts, " ")
 }
 
 func (c *operatorCLI) requestPrint(method, path string, body any, bootstrap bool) error {

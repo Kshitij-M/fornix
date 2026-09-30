@@ -88,6 +88,23 @@ func TestWorkflowCLIRequiresFenceForMutation(t *testing.T) {
 	}
 }
 
+func TestAgentRunFailureDetailsAreUsefulAndRedacted(t *testing.T) {
+	details := agentRunFailureDetails(map[string]any{
+		"state":       "failed",
+		"termination": "tool_failed",
+		"last_failure": map[string]any{
+			"code": "tool_execution_failed", "phase": "tool",
+			"message": "provider response contained a secret-token-value",
+		},
+	})
+	if details != "state=failed termination=tool_failed failure_code=tool_execution_failed failure_phase=tool" {
+		t.Fatalf("unexpected failure details: %q", details)
+	}
+	if strings.Contains(details, "secret-token-value") {
+		t.Fatal("failure diagnostic exposed arbitrary provider text")
+	}
+}
+
 func TestWorkflowCLICommandSequencePreservesWorkspaceFencesAndIdempotency(t *testing.T) {
 	type capturedRequest struct {
 		method, path, workspace, operationFence, taskFence, effectFence, idempotency, authorization string
