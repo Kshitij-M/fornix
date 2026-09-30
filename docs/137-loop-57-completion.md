@@ -24,6 +24,11 @@ is production-qualified.
   operation results contain bounded hashes and references only.
 - Propagated task owner/fence facts into model requests and child dispatches.
   Stale operation or task owners fail before the external callback.
+- Generic workflow effect approval is plan-bound: only succeeded approval
+  ancestors can authorize a write, the requester cannot self-approve those
+  gates, and the durable workflow decision is mirrored idempotently into the
+  generic admission record before dispatch. Adapter-supplied approval flags
+  are not treated as authority.
 - Preserved streaming sink behavior and the existing no-retry-after-content
   rule. Provider fallback remains disabled once content has been emitted.
 - Added migration 055. Model calls and tool runs can now record

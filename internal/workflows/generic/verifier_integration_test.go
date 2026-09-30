@@ -2,6 +2,7 @@ package generic
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"sync/atomic"
@@ -114,14 +115,31 @@ func TestGenericWorkflowUnknownVerificationResumesWithoutRepeatingVerifier(t *te
 	if waiting.Status != contracts.WorkflowStatusAwaitingApproval {
 		t.Fatalf("first checkpoint=%s, want approval", waiting.Status)
 	}
-	approved, err := service.Approve(ctx, workspaceID, created.Run.ID, actor, fence, 0, "approval")
+	if _, err := service.Resume(ctx, workspaceID, created.Run.ID, actor, fence, 0, contracts.WorkflowResumeRequest{
+		StepID: "approval", Result: contracts.WorkflowStepResult{Status: contracts.WorkflowStepSucceeded},
+	}); !errors.Is(err, ErrApprovalRequired) {
+		t.Fatalf("generic resume bypassed the approval command: %v", err)
+	}
+	if _, err := service.Approve(ctx, workspaceID, created.Run.ID, actor, fence, 0, "approval"); !errors.Is(err, ErrSelfApproval) {
+		t.Fatalf("workflow requester self-approved an external effect: %v", err)
+	}
+	if err := service.ReleaseLease(ctx, leaseResult.Lease); err != nil {
+		t.Fatal(err)
+	}
+	approver := contracts.ActorRef{ID: "approver", Kind: "human", WorkspaceID: workspaceID}
+	leaseResult, err = service.AcquireLease(ctx, workspaceID, created.Run.ID, approver.ID, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fence = leaseResult.Lease.Fence
+	approved, err := service.Approve(ctx, workspaceID, created.Run.ID, approver, fence, 0, "approval")
 	if err != nil {
 		t.Fatalf("approve workflow: %v", err)
 	}
 	if approved.Steps[0].Status != contracts.WorkflowStepSucceeded {
 		t.Fatalf("approval step=%s, want succeeded", approved.Steps[0].Status)
 	}
-	waiting, err = service.Advance(ctx, workspaceID, created.Run.ID, actor, fence, 0)
+	waiting, err = service.Advance(ctx, workspaceID, created.Run.ID, approver, fence, 0)
 	if err != nil {
 		t.Fatalf("dispatch effect: %v", err)
 	}
@@ -132,9 +150,15 @@ func TestGenericWorkflowUnknownVerificationResumesWithoutRepeatingVerifier(t *te
 		}
 	}
 	if waiting.Status != contracts.WorkflowStatusAwaitingExternal || effect == nil || effect.ID == "" {
-		t.Fatalf("publish did not pause on its durable effect: run=%+v", waiting)
+		var stepFailure *contracts.WorkflowFailure
+		for _, step := range waiting.Steps {
+			if step.StepID == "publish" {
+				stepFailure = step.Failure
+			}
+		}
+		t.Fatalf("publish did not pause on its durable effect: status=%s terminal_reason=%s failure=%+v step_failure=%+v", waiting.Status, waiting.TerminalReason, waiting.Failure, stepFailure)
 	}
-	effectLease, err := admission.AcquireEffectLease(ctx, workspaceID, created.Run.ID, effect.ID, actor.ID, time.Minute)
+	effectLease, err := admission.AcquireEffectLease(ctx, workspaceID, created.Run.ID, effect.ID, approver.ID, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,7 +180,7 @@ func TestGenericWorkflowUnknownVerificationResumesWithoutRepeatingVerifier(t *te
 		}
 		return nil
 	})
-	if _, err := service.VerifyEffect(ctx, workspaceID, created.Run.ID, actor, fence, 0, verify); err == nil {
+	if _, err := service.VerifyEffect(ctx, workspaceID, created.Run.ID, approver, fence, 0, verify); err == nil {
 		t.Fatal("expected workflow-checkpoint crash after effect proof commit")
 	}
 	workflowStore.SetFailureHook(nil)
@@ -178,7 +202,7 @@ func TestGenericWorkflowUnknownVerificationResumesWithoutRepeatingVerifier(t *te
 		t.Fatalf("workflow checkpoint partially committed: %+v", unchangedRun.Steps[1])
 	}
 
-	unknown, err := service.VerifyEffect(ctx, workspaceID, created.Run.ID, actor, fence, 0, verify)
+	unknown, err := service.VerifyEffect(ctx, workspaceID, created.Run.ID, approver, fence, 0, verify)
 	if err != nil {
 		t.Fatalf("resume from committed proof without repeating verifier: %v", err)
 	}
@@ -188,7 +212,7 @@ func TestGenericWorkflowUnknownVerificationResumesWithoutRepeatingVerifier(t *te
 	if verifier.Calls() != 1 {
 		t.Fatalf("same idempotency key called verifier again: calls=%d", verifier.Calls())
 	}
-	if _, err := service.VerifyEffect(ctx, workspaceID, created.Run.ID, actor, fence, 0, verify); err != nil {
+	if _, err := service.VerifyEffect(ctx, workspaceID, created.Run.ID, approver, fence, 0, verify); err != nil {
 		t.Fatalf("repeat same verification request: %v", err)
 	}
 	if verifier.Calls() != 1 {
@@ -207,7 +231,7 @@ func TestGenericWorkflowUnknownVerificationResumesWithoutRepeatingVerifier(t *te
 	retry.ExpectedEffectVer = state.Version
 	retry.ExpectedLinkVersion = link.Transition.Version
 	retry.IdempotencyKey = "verify-success-attempt"
-	verified, err := service.VerifyEffect(ctx, workspaceID, created.Run.ID, actor, fence, 0, retry)
+	verified, err := service.VerifyEffect(ctx, workspaceID, created.Run.ID, approver, fence, 0, retry)
 	if err != nil {
 		t.Fatalf("fresh verification attempt could not resolve recovery-required effect: %v", err)
 	}
@@ -221,7 +245,7 @@ func TestGenericWorkflowUnknownVerificationResumesWithoutRepeatingVerifier(t *te
 	if err != nil || !replay.Verified {
 		t.Fatalf("workflow replay verified=%v err=%v", replay.Verified, err)
 	}
-	receipt, duplicate, err := service.FinalizeReceipt(ctx, workspaceID, created.Run.ID, actor)
+	receipt, duplicate, err := service.FinalizeReceipt(ctx, workspaceID, created.Run.ID, approver)
 	if err != nil {
 		t.Fatalf("finalize work receipt: %v", err)
 	}

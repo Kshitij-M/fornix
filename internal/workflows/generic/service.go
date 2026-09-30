@@ -24,6 +24,7 @@ const (
 var (
 	ErrNotConfigured          = errors.New("generic workflow service is not configured")
 	ErrActorRequired          = errors.New("authenticated workflow actor is required")
+	ErrSelfApproval           = errors.New("effect approval requires an actor distinct from the workflow requester")
 	ErrEffectAuthorityNeeded  = errors.New("effectful workflow step requires an authority-aware adapter")
 	ErrEffectExecutionDenied  = errors.New("generic workflow effect execution is denied")
 	ErrApprovalRequired       = errors.New("workflow step is not awaiting approval")
@@ -179,6 +180,18 @@ func (s *Service) Advance(ctx context.Context, workspaceID, runID string, actor 
 // Resume records a canonical approval, callback, human, or external result.
 // It performs no external work and remains protected by the workflow lease.
 func (s *Service) Resume(ctx context.Context, workspaceID, runID string, actor contracts.ActorRef, fence, taskFence uint64, request contracts.WorkflowResumeRequest) (contracts.WorkflowRun, error) {
+	if s == nil || s.Store == nil {
+		return contracts.WorkflowRun{}, ErrNotConfigured
+	}
+	run, err := s.Store.Get(ctx, strings.TrimSpace(workspaceID), strings.TrimSpace(runID))
+	if err != nil {
+		return contracts.WorkflowRun{}, err
+	}
+	for _, step := range run.Steps {
+		if step.StepID == strings.TrimSpace(request.StepID) && step.Status == contracts.WorkflowStepAwaitingApproval {
+			return contracts.WorkflowRun{}, ErrApprovalRequired
+		}
+	}
 	return s.resume(ctx, workspaceID, runID, actor, fence, taskFence, request, false)
 }
 
@@ -228,9 +241,15 @@ func (s *Service) Approve(ctx context.Context, workspaceID, runID string, actor 
 	if err != nil {
 		return contracts.WorkflowRun{}, err
 	}
+	if actor.ID == "" || actor.WorkspaceID != run.WorkspaceID {
+		return contracts.WorkflowRun{}, ErrActorRequired
+	}
 	for _, step := range run.Steps {
 		if step.StepID == stepID && step.Status == contracts.WorkflowStepAwaitingApproval {
-			return s.Resume(ctx, workspaceID, runID, actor, fence, taskFence, contracts.WorkflowResumeRequest{StepID: stepID, Result: contracts.WorkflowStepResult{Status: contracts.WorkflowStepSucceeded}})
+			if workflowApprovalGatesEffect(run, stepID) && actor.ID == run.Actor.ID {
+				return contracts.WorkflowRun{}, ErrSelfApproval
+			}
+			return s.resume(ctx, workspaceID, runID, actor, fence, taskFence, contracts.WorkflowResumeRequest{StepID: stepID, Result: contracts.WorkflowStepResult{Status: contracts.WorkflowStepSucceeded}}, false)
 		}
 	}
 	return contracts.WorkflowRun{}, ErrApprovalRequired

@@ -209,13 +209,7 @@ func (e *ConnectorStepExecutor) executeEffect(ctx context.Context, run contracts
 	}
 	request := operation.Request
 	principal := contracts.Principal{ID: run.Actor.ID, WorkspaceID: run.WorkspaceID, Subject: run.Actor.ID, Kind: run.Actor.Kind, DisplayName: run.Actor.Name, Authenticated: true}
-	approved := false
-	for _, candidate := range run.Steps {
-		if candidate.Status == contracts.WorkflowStepSucceeded && strings.Contains(candidate.Kind, contracts.WorkflowStepApproval) {
-			approved = true
-			break
-		}
-	}
+	approved := workflowApprovalSatisfied(run, step.ID)
 	options := connectorruntime.AdmissionOptions{Principal: &principal, ApprovalGranted: approved, Authorize: func(_ context.Context, value contracts.Principal, candidate contracts.OperationRequest, _ contracts.CapabilityDefinition) (bool, error) {
 		return value.WorkspaceID == candidate.WorkspaceID && value.ID == candidate.Actor.ID, nil
 	}}
@@ -246,6 +240,28 @@ func (e *ConnectorStepExecutor) dispatchEffect(ctx context.Context, run contract
 	}
 	if operation.Request.Task != nil {
 		input.TaskOwnerID, input.TaskFence, input.TaskFenceValid = taskOwnerID, taskFence, false
+	}
+	// Persist the generic admission before dispatch. A workflow approval is
+	// already a durable, plan-bound approval transition; mirror it into the
+	// generic admission authority instead of trusting the adapter-only boolean.
+	preAdmission, err := e.Admission.Admit(ctx, input)
+	if err != nil {
+		return contracts.WorkflowStepResult{}, fmt.Errorf("persist workflow effect admission: %w", err)
+	}
+	if preAdmission.Decision.Status == contracts.AdmissionAwaitingApproval && workflowApprovalSatisfied(run, step.ID) {
+		if preAdmission.Approval == nil {
+			return contracts.WorkflowStepResult{}, fmt.Errorf("workflow effect admission approval is missing")
+		}
+		approvalKey := "workflow-generic-approval-" + contracts.HashStrings(run.ID, step.ID)[:40]
+		_, _, err := e.Admission.DecideApproval(ctx, contracts.OperationApprovalDecision{
+			RequestID: approvalKey, IdempotencyKey: approvalKey, WorkspaceID: run.WorkspaceID,
+			ApprovalID: preAdmission.Approval.ID, Decision: contracts.ApprovalRequestApproved,
+			Actor:      contracts.ActorRef{ID: "workflow-approval-controller", Kind: "system", WorkspaceID: run.WorkspaceID},
+			ReasonHash: contracts.HashStrings("workflow-human-approval", run.ID, step.ID),
+		})
+		if err != nil {
+			return contracts.WorkflowStepResult{}, fmt.Errorf("mirror workflow effect approval: %w", err)
+		}
 	}
 	link := &contracts.DomainEffectLink{DomainKind: contracts.DomainEffectKindWorkflowStep, DomainID: run.ID + ":" + step.ID, DomainHash: contracts.HashStrings(run.ID, step.ID, step.InputHash), LinkRole: contracts.DomainEffectLinkRolePrimary, IdempotencyKey: contracts.HashStrings("workflow-domain-link", run.ID, step.ID, fmt.Sprint(state.Attempt))}
 	result, err := e.Dispatcher.Dispatch(ctx, effectdispatch.Request{
