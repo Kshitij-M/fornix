@@ -88,6 +88,7 @@ func TestDeploymentReleaseVerificationBindsGateAndAdmission(t *testing.T) {
 		WorkspaceID: f.workspace, DeploymentID: "deployment-a", ReleaseID: release.ID,
 		ReleaseHash: release.ReleaseHash, TargetHash: release.TargetHash, ArtifactKind: contracts.DeploymentArtifactImage,
 		ArtifactHash: artifactHash, AttestationHash: contracts.HashStrings("attestation", "verify"), GateHash: gate.GateHash,
+		ExternalBoundaryHash: gate.ExternalBoundaryHash, BoundaryEvidenceHash: gate.BoundaryEvidenceHash,
 		SourceReference: "deployment-proof-1", ExpiresAt: now.Add(time.Hour), IdempotencyKey: "verification-1", Actor: f.actor,
 	}
 	verification, created, err := deployment.RegisterVerification(context.Background(), verificationRequest, now)
