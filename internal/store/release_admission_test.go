@@ -108,6 +108,8 @@ func TestDeploymentReleaseVerificationBindsGateAndAdmission(t *testing.T) {
 		ReleaseHash: decision.ReleaseHash, ArtifactKind: decision.ArtifactKind, ArtifactHash: decision.ArtifactHash,
 		TrustSnapshotRevision: decision.TrustSnapshotRevision, TrustSnapshotHash: decision.TrustSnapshotHash,
 		GateHash: decision.GateHash, DecisionHash: decision.DecisionHash,
+		ExternalBoundaryHash: decision.ExternalBoundaryHash, BoundaryEvidenceHash: decision.BoundaryEvidenceHash,
+		BoundaryEvidenceExpiresAt: decision.BoundaryEvidenceExpiresAt,
 	}
 	tx, err := beginWorkspaceTx(context.Background(), f.pool, f.workspace)
 	if err != nil {
