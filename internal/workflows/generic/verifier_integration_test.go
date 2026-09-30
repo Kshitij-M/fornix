@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -182,6 +183,8 @@ func TestGenericWorkflowUnknownVerificationResumesWithoutRepeatingVerifier(t *te
 	})
 	if _, err := service.VerifyEffect(ctx, workspaceID, created.Run.ID, approver, fence, 0, verify); err == nil {
 		t.Fatal("expected workflow-checkpoint crash after effect proof commit")
+	} else if !strings.Contains(err.Error(), "injected crash after effect proof commit") {
+		t.Fatalf("expected injected crash after verifier/reconciliation, got earlier failure: %v", err)
 	}
 	workflowStore.SetFailureHook(nil)
 	if verifier.Calls() != 1 {
