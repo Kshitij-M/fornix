@@ -108,7 +108,7 @@ func TestAgentRunSchedulerDirectLeaseIsIdempotentAndFenced(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := runs.AcquireAgentRunLease(ctx, workspace, run.ID, "api-a", 40*time.Millisecond)
+	first, err := runs.AcquireAgentRunLease(ctx, workspace, run.ID, "api-a", time.Minute)
 	if err != nil || first.Lease.Fence != 1 || first.Takeover {
 		t.Fatalf("first direct lease=%+v err=%v", first, err)
 	}
@@ -119,7 +119,9 @@ func TestAgentRunSchedulerDirectLeaseIsIdempotentAndFenced(t *testing.T) {
 	if _, err := runs.AcquireAgentRunLease(ctx, workspace, run.ID, "api-b", time.Second); !errors.Is(err, ErrAgentRunLeaseHeld) {
 		t.Fatalf("other owner acquired active lease: %v", err)
 	}
-	time.Sleep(70 * time.Millisecond)
+	if _, err := pool.Exec(ctx, `UPDATE fornix.agent_run_worker_leases SET lease_until=clock_timestamp()-interval '1 second' WHERE workspace_id=$1 AND run_id=$2`, workspace, run.ID); err != nil {
+		t.Fatal(err)
+	}
 	takeover, err := runs.AcquireAgentRunLease(ctx, workspace, run.ID, "api-b", time.Second)
 	if err != nil || !takeover.Takeover || takeover.Lease.Fence != first.Lease.Fence+1 {
 		t.Fatalf("direct takeover=%+v err=%v", takeover, err)
