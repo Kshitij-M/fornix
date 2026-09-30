@@ -6,11 +6,13 @@ import (
 	"crypto/rand"
 	"fmt"
 	"os"
+	"sort"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/omaveda/fornix/internal/adapters/fakedomains"
 	"github.com/omaveda/fornix/internal/adapters/fakeincident"
 	"github.com/omaveda/fornix/internal/adapters/repository"
 	"github.com/omaveda/fornix/internal/config"
@@ -43,87 +45,47 @@ func TestServerStartupReloadsSignedWorkspaceAuthority(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	adapter, err := repository.NewConnector(workspaceID, repository.ConnectorVersion, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	definitions := make([]contracts.CapabilityDefinition, 0, len(adapter.Capabilities()))
-	for _, capability := range adapter.Capabilities() {
-		definitions = append(definitions, capability.Definition())
-	}
-	policy, err := connector.NewTrustPolicy(workspaceID, "1", definitions)
-	if err != nil {
-		t.Fatal(err)
-	}
-	catalog, err := connector.NewSchemaCatalog(workspaceID, "1", definitions)
-	if err != nil {
-		t.Fatal(err)
-	}
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
 		t.Fatal(err)
 	}
-	issued := time.Now().UTC().Add(-time.Minute)
-	if err := policy.Sign(signerID, privateKey, issued, issued.Add(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	if err := catalog.Sign(signerID, privateKey, issued, issued.Add(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
 	trust := store.NewTrustCatalogStore(pool)
-	actor := contracts.AuditActor{ID: "startup-operator", WorkspaceID: workspaceID, Kind: "human", APIKeyID: "startup-key"}
-	if err := trust.RegisterSigner(ctx, workspaceID, signerID, publicKey, actor); err != nil {
-		t.Fatal(err)
+	// The CI smoke job reuses one Postgres database across its bounded
+	// integration steps, so earlier steps may have left additional workspaces.
+	// A strict production startup validates every durable workspace; install a
+	// complete signed generation for the same built-in connector set on each
+	// one instead of making the test depend on database cleanliness.
+	workspaceIDs := map[string]struct{}{workspaceID: {}, contracts.DefaultWorkspaceID: {}}
+	cursor := ""
+	for {
+		page, err := operator.ListWorkspaces(ctx, 100, cursor)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, workspace := range page.Items {
+			workspaceIDs[workspace.ID] = struct{}{}
+		}
+		if page.NextCursor == "" {
+			break
+		}
+		cursor = page.NextCursor
 	}
-	if err := trust.PublishSignedPolicy(ctx, policy, time.Now().UTC(), actor); err != nil {
-		t.Fatal(err)
+	orderedWorkspaceIDs := make([]string, 0, len(workspaceIDs))
+	for id := range workspaceIDs {
+		orderedWorkspaceIDs = append(orderedWorkspaceIDs, id)
 	}
-	if err := trust.PublishSignedSchemaCatalog(ctx, catalog, time.Now().UTC(), actor); err != nil {
-		t.Fatal(err)
-	}
-	// The default workspace is a durable workspace whenever earlier operator
-	// tests or a local installation have bootstrapped it. Strict startup must
-	// qualify it too rather than silently retaining the built-in unsigned
-	// snapshot.
-	defaultRepository, err := repository.NewConnector(contracts.DefaultWorkspaceID, repository.ConnectorVersion, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defaultIncident, err := fakeincident.NewConnector(contracts.DefaultWorkspaceID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defaultDefinitions := make([]contracts.CapabilityDefinition, 0, len(defaultRepository.Capabilities())+len(defaultIncident.Capabilities()))
-	for _, capability := range append(defaultRepository.Capabilities(), defaultIncident.Capabilities()...) {
-		defaultDefinitions = append(defaultDefinitions, capability.Definition())
-	}
-	var defaultRevision int64
-	if err := pool.QueryRow(ctx, `SELECT GREATEST(COALESCE((SELECT MAX(revision) FROM fornix.trust_policies WHERE workspace_id=$1),0), COALESCE((SELECT MAX(revision) FROM fornix.trust_schema_catalogs WHERE workspace_id=$1),0))+1`, contracts.DefaultWorkspaceID).Scan(&defaultRevision); err != nil {
-		t.Fatal(err)
-	}
-	defaultPolicy, err := connector.NewTrustPolicy(contracts.DefaultWorkspaceID, fmt.Sprint(defaultRevision), defaultDefinitions)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defaultCatalog, err := connector.NewSchemaCatalog(contracts.DefaultWorkspaceID, fmt.Sprint(defaultRevision), defaultDefinitions)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := defaultPolicy.Sign(signerID, privateKey, issued, issued.Add(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	if err := defaultCatalog.Sign(signerID, privateKey, issued, issued.Add(time.Hour)); err != nil {
-		t.Fatal(err)
-	}
-	defaultActor := contracts.AuditActor{ID: "startup-default-operator", WorkspaceID: contracts.DefaultWorkspaceID, Kind: "human", APIKeyID: "startup-default-key"}
-	if err := trust.RegisterSigner(ctx, contracts.DefaultWorkspaceID, signerID, publicKey, defaultActor); err != nil {
-		t.Fatal(err)
-	}
-	if err := trust.PublishSignedPolicy(ctx, defaultPolicy, time.Now().UTC(), defaultActor); err != nil {
-		t.Fatal(err)
-	}
-	if err := trust.PublishSignedSchemaCatalog(ctx, defaultCatalog, time.Now().UTC(), defaultActor); err != nil {
-		t.Fatal(err)
+	sort.Strings(orderedWorkspaceIDs)
+	issued := time.Now().UTC().Add(-time.Minute)
+	var policy connector.TrustPolicy
+	for _, id := range orderedWorkspaceIDs {
+		actor := contracts.AuditActor{ID: "startup-operator", WorkspaceID: id, Kind: "human", APIKeyID: "startup-key"}
+		workspacePolicy, publishErr := publishStartupAuthority(ctx, pool, trust, id, signerID, publicKey, privateKey, issued, actor)
+		if publishErr != nil {
+			t.Fatalf("publish signed startup authority for %s: %v", id, publishErr)
+		}
+		if id == workspaceID {
+			policy = workspacePolicy
+		}
 	}
 	serverConfig := config.Config{
 		DSN: dsn, AuthMode: "workspace", Environment: "production", RequireSignedAuthority: true,
@@ -144,4 +106,51 @@ func TestServerStartupReloadsSignedWorkspaceAuthority(t *testing.T) {
 	if !ok || loaded.PolicyHash != policy.PolicyHash || loaded.Revision != policy.Revision || loaded.Signature == "" {
 		t.Fatalf("startup did not reload durable trust policy: %+v present=%v", loaded, ok)
 	}
+}
+
+func publishStartupAuthority(ctx context.Context, pool *pgxpool.Pool, trust *store.TrustCatalogStore, workspaceID, signerID string, publicKey ed25519.PublicKey, privateKey ed25519.PrivateKey, issued time.Time, actor contracts.AuditActor) (connector.TrustPolicy, error) {
+	repositoryAdapter, err := repository.NewConnector(workspaceID, repository.ConnectorVersion, nil)
+	if err != nil {
+		return connector.TrustPolicy{}, err
+	}
+	incidentAdapter, err := fakeincident.NewConnector(workspaceID)
+	if err != nil {
+		return connector.TrustPolicy{}, err
+	}
+	domainAdapter, err := fakedomains.NewConnector(workspaceID)
+	if err != nil {
+		return connector.TrustPolicy{}, err
+	}
+	definitions := make([]contracts.CapabilityDefinition, 0, len(repositoryAdapter.Capabilities())+len(incidentAdapter.Capabilities())+len(domainAdapter.Capabilities()))
+	for _, capability := range append(append(repositoryAdapter.Capabilities(), incidentAdapter.Capabilities()...), domainAdapter.Capabilities()...) {
+		definitions = append(definitions, capability.Definition())
+	}
+	var revision int64
+	if err := pool.QueryRow(ctx, `SELECT GREATEST(COALESCE((SELECT MAX(revision) FROM fornix.trust_policies WHERE workspace_id=$1),0), COALESCE((SELECT MAX(revision) FROM fornix.trust_schema_catalogs WHERE workspace_id=$1),0))+1`, workspaceID).Scan(&revision); err != nil {
+		return connector.TrustPolicy{}, err
+	}
+	policy, err := connector.NewTrustPolicy(workspaceID, fmt.Sprint(revision), definitions)
+	if err != nil {
+		return connector.TrustPolicy{}, err
+	}
+	catalog, err := connector.NewSchemaCatalog(workspaceID, fmt.Sprint(revision), definitions)
+	if err != nil {
+		return connector.TrustPolicy{}, err
+	}
+	if err := policy.Sign(signerID, privateKey, issued, issued.Add(time.Hour)); err != nil {
+		return connector.TrustPolicy{}, err
+	}
+	if err := catalog.Sign(signerID, privateKey, issued, issued.Add(time.Hour)); err != nil {
+		return connector.TrustPolicy{}, err
+	}
+	if err := trust.RegisterSigner(ctx, workspaceID, signerID, publicKey, actor); err != nil {
+		return connector.TrustPolicy{}, err
+	}
+	if err := trust.PublishSignedPolicy(ctx, policy, time.Now().UTC(), actor); err != nil {
+		return connector.TrustPolicy{}, err
+	}
+	if err := trust.PublishSignedSchemaCatalog(ctx, catalog, time.Now().UTC(), actor); err != nil {
+		return connector.TrustPolicy{}, err
+	}
+	return policy, nil
 }
