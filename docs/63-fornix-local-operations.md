@@ -90,6 +90,13 @@ The local runtime prints its workspace, provider, database, and loopback
 address when ready. The API is bound to loopback by default; the database has
 no host-published port.
 
+The managed local runtime uses Fornix's development policy profile because a
+fresh local installation has no deployment qualification-trust snapshot or
+release admission to load. It still uses workspace-scoped authentication and
+does not enable legacy global surfaces. Production deployments must use the
+production profile and provision the required qualification trust and release
+evidence; the local runtime does not pretend those deployment controls exist.
+
 ## Command reference
 
 The local commands are deliberately small and deterministic:

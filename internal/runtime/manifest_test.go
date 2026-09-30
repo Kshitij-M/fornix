@@ -31,6 +31,7 @@ func TestRenderManifestHasSafeDeterministicDefaults(t *testing.T) {
 		`image: "ghcr.io/kshitij-m/fornix:v0.10.1"`,
 		`image: "pgvector/pgvector@sha256:cf134a767f474095eeba57e0117be8e568e011a63f33fbf252f14c9b760f8e6f"`,
 		`FORNIX_AUTH_MODE: "workspace"`,
+		`FORNIX_ENV: "development"`,
 		`"127.0.0.1:8201:8201"`,
 		`fornix-postgres-data:/var/lib/postgresql/data`,
 		`condition: service_healthy`,
