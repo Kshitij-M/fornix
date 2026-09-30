@@ -48,6 +48,10 @@ func (s *QualificationTrustStore) PublishSnapshot(ctx context.Context, request c
 	if err := signed.VerifyWithKey("", nil, now); err != nil {
 		return contracts.QualificationTrustSnapshotRecord{}, false, ErrQualificationSnapshotExpired
 	}
+	signerPublicKey, err := qualificationPublicKeyBytes(signed.SignerPublicKey)
+	if err != nil {
+		return contracts.QualificationTrustSnapshotRecord{}, false, fmt.Errorf("decode qualification snapshot signer public key: %w", err)
+	}
 	sourceHash := sha256Hex(raw)
 	tx, err := beginWorkspaceTx(ctx, s.pool, request.WorkspaceID)
 	if err != nil {
@@ -132,7 +136,7 @@ func (s *QualificationTrustStore) PublishSnapshot(ctx context.Context, request c
 		INSERT INTO fornix.qualification_trust_snapshots
 		  (id,workspace_id,deployment_id,revision,snapshot_hash,source_hash,source_reference,signer_key_id,signature_scheme,signer_public_key,signature,issued_at,expires_at,status,signed_bytes,actor,request_id,idempotency_key,causation_id,correlation_id)
 		VALUES($1,$2,$3,$4,$5,$6,$7,$8,'ed25519',$9,$10,$11,$12,'active',$13,$14::jsonb,$15,$16,$17,$18)`,
-		record.ID, record.Snapshot.WorkspaceID, record.Snapshot.DeploymentID, record.Snapshot.Revision, record.Snapshot.SnapshotHash, record.SourceHash, nullableString(record.SourceReference), record.Snapshot.SignerKeyID, []byte(signed.SignerPublicKey), signed.Signature, record.Snapshot.IssuedAt, record.Snapshot.ExpiresAt, raw, actorJSON, nullableString(record.RequestID), record.IdempotencyKey, nullableString(record.CausationID), nullableString(record.CorrelationID)); err != nil {
+		record.ID, record.Snapshot.WorkspaceID, record.Snapshot.DeploymentID, record.Snapshot.Revision, record.Snapshot.SnapshotHash, record.SourceHash, nullableString(record.SourceReference), record.Snapshot.SignerKeyID, []byte(signerPublicKey), signed.Signature, record.Snapshot.IssuedAt, record.Snapshot.ExpiresAt, raw, actorJSON, nullableString(record.RequestID), record.IdempotencyKey, nullableString(record.CausationID), nullableString(record.CorrelationID)); err != nil {
 		if isUniqueViolation(err) {
 			return contracts.QualificationTrustSnapshotRecord{}, false, ErrQualificationSnapshotConflict
 		}

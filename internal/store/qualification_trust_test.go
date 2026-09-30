@@ -239,6 +239,15 @@ func TestQualificationTrustSnapshotReplayAndRevocation(t *testing.T) {
 	f.register(t, f.keyID, fmt.Sprintf("%x", f.public), "")
 	from := time.Date(2026, 9, 27, 0, 0, 0, 0, time.UTC)
 	first := f.publishSnapshot(t, 1, f.keyID, f.private, []contracts.QualificationTrustSnapshotEntry{{DeploymentID: "deployment-a", KeyID: f.keyID, PublicKey: fmt.Sprintf("%x", f.public), ValidFrom: from.Add(-time.Hour), ValidUntil: from.Add(24 * time.Hour)}})
+	var storedPublicKey []byte
+	if err := f.pool.QueryRow(context.Background(), `
+		SELECT signer_public_key FROM fornix.qualification_trust_snapshots
+		WHERE workspace_id=$1 AND deployment_id=$2 AND id=$3`, f.workspace, "deployment-a", first.ID).Scan(&storedPublicKey); err != nil {
+		t.Fatalf("read persisted snapshot signer key: %v", err)
+	}
+	if !bytes.Equal(storedPublicKey, f.public) {
+		t.Fatalf("persisted signer key is not the raw Ed25519 public key: got %d bytes, want %d", len(storedPublicKey), len(f.public))
+	}
 	disclosure, err := f.store.DiscloseSnapshot(context.Background(), f.workspace, "deployment-a", first.ID)
 	if err != nil || len(disclosure.SourceBytes) == 0 {
 		t.Fatalf("snapshot disclosure err=%v", err)
