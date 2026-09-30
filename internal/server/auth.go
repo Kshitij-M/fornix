@@ -206,7 +206,15 @@ func validateRequestWorkspace(r *http.Request, principal contracts.Principal) er
 }
 
 func isLegacyGlobalSurface(path string) bool {
-	return strings.HasPrefix(path, "/v1/federation/") || path == "/v1/router/observation" || path == "/v1/router/recommend"
+	if !strings.HasPrefix(path, "/v1/federation/") {
+		return false
+	}
+	switch path {
+	case "/v1/federation/peer", "/v1/federation/peer/poll", "/v1/federation/poll/reconcile", "/v1/federation/peers", "/v1/federation/legacy-quarantine":
+		return false
+	default:
+		return true
+	}
 }
 
 func permissionForRequest(r *http.Request) contracts.Permission {
@@ -231,10 +239,50 @@ func permissionForRequest(r *http.Request) contracts.Permission {
 			return contracts.PermissionRetrievalRead
 		}
 		return contracts.PermissionRetrievalWrite
+	case strings.HasPrefix(path, "/v1/qualification/signers"):
+		if strings.HasSuffix(path, "/revoke") || r.Method == http.MethodPost {
+			return contracts.PermissionQualificationAdmin
+		}
+		return contracts.PermissionQualificationRead
+	case path == "/v1/qualification/import":
+		if r.Method == http.MethodPost {
+			return contracts.PermissionQualificationImport
+		}
+		return contracts.PermissionQualificationRead
+	case strings.HasPrefix(path, "/v1/qualification/imports"):
+		return contracts.PermissionQualificationRead
+	case strings.HasPrefix(path, "/v1/qualification/snapshots"):
+		if r.Method == http.MethodGet {
+			return contracts.PermissionQualificationRead
+		}
+		return contracts.PermissionQualificationAdmin
+	case strings.HasPrefix(path, "/v1/qualification/readiness"):
+		if strings.HasPrefix(path, "/v1/qualification/readiness/review") || strings.HasSuffix(path, "/retention/plan") || strings.HasSuffix(path, "/retention/recovery") || r.Method == http.MethodGet {
+			return contracts.PermissionQualificationRead
+		}
+		return contracts.PermissionQualificationAdmin
+	case strings.HasPrefix(path, "/v1/qualification/releases"):
+		if strings.Contains(path, "/refresh/plan") || strings.Contains(path, "/refreshes") || (strings.HasSuffix(path, "/refresh") && r.Method == http.MethodGet) {
+			return contracts.PermissionQualificationRead
+		}
+		if strings.HasSuffix(path, "/refresh") && r.Method == http.MethodPost {
+			return contracts.PermissionQualificationAdmin
+		}
+		if r.Method == http.MethodGet {
+			return contracts.PermissionQualificationRead
+		}
+		return contracts.PermissionQualificationAdmin
+	case strings.HasPrefix(path, "/v1/qualification/refresh-schedules"):
+		if r.Method == http.MethodGet || strings.HasSuffix(path, "/attempts") || strings.HasSuffix(path, "/plan") {
+			return contracts.PermissionQualificationRead
+		}
+		return contracts.PermissionQualificationAdmin
 	case path == "/v1/model/complete":
 		return contracts.PermissionModelInvoke
 	case path == "/v1/tools/execute":
 		return contracts.PermissionToolExecute
+	case path == "/v1/tools/recovery":
+		return contracts.PermissionOperationExecute
 	case strings.HasPrefix(path, "/v1/tools/approvals/"):
 		return contracts.PermissionToolApprove
 	case strings.HasPrefix(path, "/v1/agent/run"):
@@ -247,6 +295,23 @@ func permissionForRequest(r *http.Request) contracts.Permission {
 			return contracts.PermissionAgentRead
 		}
 		return contracts.PermissionAgentRun
+	case strings.HasPrefix(path, "/v1/workflows"):
+		if path == "/v1/workflows" {
+			return contracts.PermissionOperationCreate
+		}
+		if strings.HasSuffix(path, "/receipt") && r.Method == http.MethodGet {
+			return contracts.PermissionReceiptRead
+		}
+		if strings.HasSuffix(path, "/receipt") && r.Method == http.MethodPost {
+			return contracts.PermissionReceiptWrite
+		}
+		if r.Method == http.MethodGet || strings.HasSuffix(path, "/replay") {
+			return contracts.PermissionOperationRead
+		}
+		if strings.HasSuffix(path, "/approve") {
+			return contracts.PermissionToolApprove
+		}
+		return contracts.PermissionOperationExecute
 	case path == "/v1/operations":
 		if r.Method == http.MethodGet {
 			return contracts.PermissionOperationRead
@@ -261,17 +326,33 @@ func permissionForRequest(r *http.Request) contracts.Permission {
 		return contracts.PermissionOperationExecute
 	case path == "/v1/operation-effects/recovery":
 		return contracts.PermissionOperationRead
+	case path == "/v1/embedding-calls/reconcile":
+		return contracts.PermissionOperationExecute
 	case path == "/v1/retrieve" || path == "/v1/rag" || path == "/v1/memo/search" || path == "/v1/symbol/search":
 		return contracts.PermissionRetrievalRead
-	case path == "/v1/router/recommend" || path == "/v1/router/observation":
-		// These routes are legacy/global and are gated before authorization. The
-		// explicit workspace permission keeps the migration-only opt-in narrow.
+	case path == "/v1/coord/recent" || path == "/v1/router/recommend":
 		return contracts.PermissionWorkspaceRead
-	case strings.HasPrefix(path, "/v1/federation/"):
+	case path == "/v1/coord" || path == "/v1/router/observation":
 		if r.Method == http.MethodGet {
 			return contracts.PermissionWorkspaceRead
 		}
 		return contracts.PermissionWorkspaceWrite
+	case path == "/v1/federation/peers":
+		return contracts.PermissionWorkspaceRead
+	case path == "/v1/federation/peer" || path == "/v1/federation/peer/poll":
+		return contracts.PermissionWorkspaceWrite
+	case path == "/v1/federation/poll/reconcile":
+		return contracts.PermissionWorkspaceWrite
+	case path == "/v1/federation/legacy-quarantine":
+		if r.Method == http.MethodGet {
+			return contracts.PermissionWorkspaceRead
+		}
+		return contracts.PermissionWorkspaceWrite
+	case isLegacyGlobalSurface(path):
+		// These handlers use tables without an authoritative workspace key. The
+		// compatibility flag is necessary but insufficient; require an explicit
+		// migration-only capability as well.
+		return contracts.PermissionLegacyGlobalAdmin
 	case path == "/v1/evaluations/retrieval/surfaces":
 		if r.Method == http.MethodGet {
 			return contracts.PermissionEvaluationRead
@@ -361,7 +442,7 @@ func permissionForRequest(r *http.Request) contracts.Permission {
 			return contracts.PermissionRetrievalRead
 		}
 		return contracts.PermissionRetrievalWrite
-	case strings.HasPrefix(path, "/v1/session") || strings.HasPrefix(path, "/v1/coord"):
+	case strings.HasPrefix(path, "/v1/session"):
 		if r.Method == http.MethodGet {
 			return contracts.PermissionWorkspaceRead
 		}

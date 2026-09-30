@@ -25,8 +25,9 @@ type AdmissionEvaluation struct {
 
 // Evaluate applies one immutable policy snapshot to one capability and its
 // verified, secret-free runtime facts. It is deterministic for the same
-// normalized input. IDs and timestamps are delivery identities and are not
-// included in DecisionHash.
+// normalized input. Delivery IDs and creation timestamps are excluded from the
+// decision hash; a durable rate-limit eligibility time is included because it
+// changes the scheduled outcome.
 func Evaluate(input contracts.AdmissionInput) (AdmissionEvaluation, error) {
 	if err := input.Normalize(); err != nil {
 		return AdmissionEvaluation{}, err
@@ -58,6 +59,9 @@ func Evaluate(input contracts.AdmissionInput) (AdmissionEvaluation, error) {
 	}
 	if input.Policy.MaxCostMicros > 0 && input.RequestedCostMicros > input.Policy.MaxCostMicros {
 		return deny(input, contracts.AdmissionReasonBudgetExceeded)
+	}
+	if input.CapabilityOperationsInWindow >= input.Capability.RateLimitPerMinute {
+		return deny(input, contracts.AdmissionReasonRateLimited)
 	}
 	if input.Policy.MaxOperationsPerWindow > 0 && input.QuotaOperations >= input.Policy.MaxOperationsPerWindow {
 		return deny(input, contracts.AdmissionReasonQuotaExceeded)
@@ -112,6 +116,10 @@ func Evaluate(input contracts.AdmissionInput) (AdmissionEvaluation, error) {
 func deny(input contracts.AdmissionInput, reason string) (AdmissionEvaluation, error) {
 	decision := baseDecision(input)
 	decision.Status, decision.ReasonCode = contracts.AdmissionDenied, reason
+	if reason == contracts.AdmissionReasonRateLimited && input.CapabilityRetryAt != nil {
+		retryAt := input.CapabilityRetryAt.UTC()
+		decision.RetryAt = &retryAt
+	}
 	decision.DecisionHash = decisionHash(decision)
 	return AdmissionEvaluation{Decision: decision}, nil
 }
@@ -137,11 +145,12 @@ func decisionHash(decision contracts.AdmissionDecision) string {
 		Effect, Status, ReasonCode                                      string
 		ActorID, ActorWorkspace                                         string
 		CostMicros                                                      int64
+		RetryAt                                                         *time.Time `json:"retry_at,omitempty"`
 	}{
 		decision.WorkspaceID, decision.OperationID, decision.OperationHash, decision.InputHash,
 		decision.Capability.DefinitionHash, decision.Target.StableHash(), decision.PolicyID, decision.PolicyVersion, decision.PolicyHash,
 		string(decision.Effect), decision.Status, decision.ReasonCode,
-		decision.Actor.ID, decision.Actor.WorkspaceID, decision.CostMicros,
+		decision.Actor.ID, decision.Actor.WorkspaceID, decision.CostMicros, decision.RetryAt,
 	}
 	raw, _ := json.Marshal(payload)
 	digest := sha256.Sum256(raw)

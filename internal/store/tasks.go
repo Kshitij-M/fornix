@@ -205,7 +205,7 @@ func (s *TaskStore) Create(ctx context.Context, input TaskCreateInput) (Task, co
 	if err != nil {
 		return Task{}, contracts.EventEnvelope{}, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
 		return Task{}, contracts.EventEnvelope{}, fmt.Errorf("begin task create: %w", err)
 	}
@@ -365,7 +365,7 @@ func (s *TaskStore) ClaimNext(ctx context.Context, input TaskClaimInput) (TaskCl
 		return TaskClaimResult{}, errors.New("workspace_id and session_id are required")
 	}
 	ttl := boundedTaskLeaseTTL(input.LeaseTTL)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
 		return TaskClaimResult{}, fmt.Errorf("begin task claim: %w", err)
 	}
@@ -499,7 +499,7 @@ func (s *TaskStore) Renew(ctx context.Context, workspaceID string, taskID int64,
 		}
 		return TaskRenewResult{}, ErrTaskLeaseFenced
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
 		return TaskRenewResult{}, fmt.Errorf("begin task lease renewal: %w", err)
 	}
@@ -562,7 +562,7 @@ func (s *TaskStore) Complete(ctx context.Context, input TaskOutcomeInput) (TaskM
 
 func (s *TaskStore) completeOrProgress(ctx context.Context, input TaskOutcomeInput, status string) (TaskMutationResult, error) {
 	workspaceID := normalizeWorkspace(input.WorkspaceID)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
 		return TaskMutationResult{}, fmt.Errorf("begin task completion: %w", err)
 	}
@@ -647,7 +647,7 @@ func (s *TaskStore) Fail(ctx context.Context, input TaskFailureInput) (TaskMutat
 	if input.Retryable == nil {
 		retryable = class == contracts.FailureTransient || class == contracts.FailureTimeout || class == contracts.FailureRateLimited
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
 		return TaskMutationResult{}, fmt.Errorf("begin task failure: %w", err)
 	}
@@ -740,7 +740,7 @@ func (s *TaskStore) Fail(ctx context.Context, input TaskFailureInput) (TaskMutat
 // worker mutations from proceeding.
 func (s *TaskStore) Cancel(ctx context.Context, input TaskCancelInput) (TaskMutationResult, error) {
 	workspaceID := normalizeWorkspace(input.WorkspaceID)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
 		return TaskMutationResult{}, fmt.Errorf("begin task cancellation: %w", err)
 	}
@@ -802,11 +802,23 @@ func (s *TaskStore) Cancel(ctx context.Context, input TaskCancelInput) (TaskMuta
 
 // Get reads one task from the workspace-scoped compatibility read model.
 func (s *TaskStore) Get(ctx context.Context, workspaceID string, taskID int64) (Task, error) {
-	task, err := readTask(ctx, s.pool, normalizeWorkspace(workspaceID), taskID)
+	workspaceID = normalizeWorkspace(workspaceID)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
+	if err != nil {
+		return Task{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	task, err := readTaskTx(ctx, tx, workspaceID, taskID, false)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Task{}, ErrTaskNotFound
 	}
-	return task, err
+	if err != nil {
+		return Task{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return Task{}, err
+	}
+	return task, nil
 }
 
 // List returns a bounded deterministic task view filtered within one
@@ -832,21 +844,20 @@ func (s *TaskStore) List(ctx context.Context, workspaceID, status, assigned, sin
 	}
 	args = append(args, limit)
 	query += fmt.Sprintf(" ORDER BY t.created_at DESC, t.id DESC LIMIT $%d", len(args))
-	rows, err := s.pool.Query(ctx, query, args...)
+	var result []Task
+	err := workspaceQueryRows(ctx, s.pool, workspaceID, query, args, func(rows pgx.Rows) error {
+		result = make([]Task, 0)
+		for rows.Next() {
+			task, err := scanTask(rows)
+			if err != nil {
+				return fmt.Errorf("scan task: %w", err)
+			}
+			result = append(result, task)
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, fmt.Errorf("list tasks: %w", err)
-	}
-	defer rows.Close()
-	result := make([]Task, 0)
-	for rows.Next() {
-		task, err := scanTask(rows)
-		if err != nil {
-			return nil, fmt.Errorf("scan task: %w", err)
-		}
-		result = append(result, task)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate tasks: %w", err)
 	}
 	return result, nil
 }

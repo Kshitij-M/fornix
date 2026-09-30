@@ -88,6 +88,40 @@ func (s *ObservabilityStore) ObserveRetrieval(ctx context.Context, request contr
 	return err
 }
 
+// ObserveEmbeddingQueryUse attributes one adaptive query-embedding use while
+// keeping the canonical embedding call as the provider-cost authority.
+func (s *ObservabilityStore) ObserveEmbeddingQueryUse(ctx context.Context, use contracts.EmbeddingQueryUse) error {
+	if s == nil {
+		return fmt.Errorf("observability store is not configured")
+	}
+	if err := use.Normalize(); err != nil {
+		return err
+	}
+	outcome := contracts.OutcomeSucceeded
+	if use.CacheHit {
+		outcome = "cache_hit"
+	}
+	observation := contracts.RunObservation{
+		WorkspaceID: use.WorkspaceID, IdempotencyKey: "embedding-use-observation:" + use.IdempotencyKey,
+		Kind: contracts.ObservationRetrieval, Component: "embedding_gateway", Operation: "query_embedding",
+		Outcome: outcome, Actor: use.Actor, SourceKind: "embedding_query_use", SourceID: use.EmbeddingRequestID,
+		InputBytes: use.Usage.InputBytes, CostUSD: use.CostUSD, CostKnown: use.CostKnown,
+		UsageMeasured: use.UsageMeasured, UsageEstimated: use.UsageEstimated,
+		Metadata: map[string]string{"route": use.Route, "gate_reason": use.GateReason, "cache_hit": fmt.Sprintf("%t", use.CacheHit)},
+	}
+	if _, _, err := s.RecordObservation(ctx, observation); err != nil {
+		return err
+	}
+	_, _, err := s.RecordCost(ctx, contracts.CostLedgerEntry{
+		WorkspaceID: use.WorkspaceID, IdempotencyKey: "embedding-query-cost:" + use.IdempotencyKey,
+		Category: contracts.CostRetrieval, Basis: "embedding_query", SourceKind: "embedding_query_use",
+		SourceID: use.EmbeddingRequestID, Actor: use.Actor, Units: 1, AmountUSD: use.CostUSD,
+		AmountKnown: use.CostKnown, Measured: use.UsageMeasured, Estimated: use.UsageEstimated,
+		InputTokens: 0, Bytes: use.Usage.InputBytes, Metadata: map[string]string{"route": use.Route, "cache_hit": fmt.Sprintf("%t", use.CacheHit)},
+	})
+	return err
+}
+
 // ObserveAgentRun attributes an agent run's bounded context, token, and cost
 // totals while leaving transitions authoritative in the run store.
 func (s *ObservabilityStore) ObserveAgentRun(ctx context.Context, run contracts.AgentRun) error {
@@ -170,7 +204,7 @@ func (s *ObservabilityStore) RecordObservation(ctx context.Context, observation 
 	if len(evidence) == 0 {
 		evidence = []byte(`{}`)
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, observation.WorkspaceID)
 	if err != nil {
 		return contracts.RunObservation{}, false, err
 	}
@@ -269,7 +303,7 @@ func (s *ObservabilityStore) RecordSpan(ctx context.Context, span contracts.Trac
 		return contracts.TraceSpan{}, false, err
 	}
 	attrs, _ := json.Marshal(span.Attributes)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, span.WorkspaceID)
 	if err != nil {
 		return contracts.TraceSpan{}, false, err
 	}
@@ -309,7 +343,7 @@ func (s *ObservabilityStore) RecordCost(ctx context.Context, entry contracts.Cos
 		return contracts.CostLedgerEntry{}, false, err
 	}
 	metadata, _ := json.Marshal(entry.Metadata)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, entry.WorkspaceID)
 	if err != nil {
 		return contracts.CostLedgerEntry{}, false, err
 	}
@@ -340,7 +374,7 @@ func (s *ObservabilityStore) RecordMetric(ctx context.Context, sample contracts.
 		return contracts.MetricSample{}, false, err
 	}
 	dimensions, _ := json.Marshal(sample.Dimensions)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, sample.WorkspaceID)
 	if err != nil {
 		return contracts.MetricSample{}, false, err
 	}
@@ -377,16 +411,21 @@ func (s *ObservabilityStore) Snapshot(ctx context.Context, workspaceID string, s
 	}
 	var out contracts.ObservabilitySnapshot
 	out.SchemaVersion, out.WorkspaceID, out.Since, out.Until = contracts.ObservabilitySchemaVersion, workspaceID, since, until
-	if err := s.pool.QueryRow(ctx, `SELECT count(*),COALESCE(sum(duration_ms),0),COALESCE(sum(db_queries),0),COALESCE(sum(artifact_bytes),0),COALESCE(sum(CASE WHEN duplicate_work THEN 1 ELSE 0 END),0) FROM fornix.run_observations WHERE workspace_id=$1 AND created_at >= $2 AND created_at < $3`, workspaceID, since, until).Scan(&out.ObservationCount, &out.DurationMS, &out.DBQueries, &out.ArtifactBytes, &out.DuplicateWorkCount); err != nil {
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
+	if err != nil {
 		return contracts.ObservabilitySnapshot{}, err
 	}
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM fornix.trace_spans WHERE workspace_id=$1 AND created_at >= $2 AND created_at < $3`, workspaceID, since, until).Scan(&out.SpanCount); err != nil {
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := tx.QueryRow(ctx, `SELECT count(*),COALESCE(sum(duration_ms),0),COALESCE(sum(db_queries),0),COALESCE(sum(artifact_bytes),0),COALESCE(sum(CASE WHEN duplicate_work THEN 1 ELSE 0 END),0) FROM fornix.run_observations WHERE workspace_id=$1 AND created_at >= $2 AND created_at < $3`, workspaceID, since, until).Scan(&out.ObservationCount, &out.DurationMS, &out.DBQueries, &out.ArtifactBytes, &out.DuplicateWorkCount); err != nil {
 		return contracts.ObservabilitySnapshot{}, err
 	}
-	if err := s.pool.QueryRow(ctx, `SELECT count(*) FROM fornix.metric_samples WHERE workspace_id=$1 AND created_at >= $2 AND created_at < $3`, workspaceID, since, until).Scan(&out.MetricCount); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM fornix.trace_spans WHERE workspace_id=$1 AND created_at >= $2 AND created_at < $3`, workspaceID, since, until).Scan(&out.SpanCount); err != nil {
 		return contracts.ObservabilitySnapshot{}, err
 	}
-	rows, err := s.pool.Query(ctx, `SELECT component,operation,outcome,count(*),COALESCE(sum(duration_ms),0),COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms),0) FROM fornix.run_observations WHERE workspace_id=$1 AND created_at >= $2 AND created_at < $3 GROUP BY component,operation,outcome ORDER BY component,operation,outcome`, workspaceID, since, until)
+	if err := tx.QueryRow(ctx, `SELECT count(*) FROM fornix.metric_samples WHERE workspace_id=$1 AND created_at >= $2 AND created_at < $3`, workspaceID, since, until).Scan(&out.MetricCount); err != nil {
+		return contracts.ObservabilitySnapshot{}, err
+	}
+	rows, err := tx.Query(ctx, `SELECT component,operation,outcome,count(*),COALESCE(sum(duration_ms),0),COALESCE(percentile_cont(0.95) WITHIN GROUP (ORDER BY duration_ms),0) FROM fornix.run_observations WHERE workspace_id=$1 AND created_at >= $2 AND created_at < $3 GROUP BY component,operation,outcome ORDER BY component,operation,outcome`, workspaceID, since, until)
 	if err != nil {
 		return contracts.ObservabilitySnapshot{}, err
 	}
@@ -405,7 +444,7 @@ func (s *ObservabilityStore) Snapshot(ctx context.Context, workspaceID string, s
 	if err := rows.Err(); err != nil {
 		return contracts.ObservabilitySnapshot{}, err
 	}
-	rows, err = s.pool.Query(ctx, `SELECT category,count(*),COALESCE(sum(amount_usd),0),COALESCE(sum(CASE WHEN measured THEN amount_usd ELSE 0 END),0),COALESCE(sum(CASE WHEN estimated THEN amount_usd ELSE 0 END),0),COALESCE(sum(CASE WHEN NOT amount_known THEN 1 ELSE 0 END),0),COALESCE(sum(bytes),0),COALESCE(sum(duration_ms),0) FROM fornix.cost_ledger WHERE workspace_id=$1 AND created_at >= $2 AND created_at < $3 GROUP BY category ORDER BY category`, workspaceID, since, until)
+	rows, err = tx.Query(ctx, `SELECT category,count(*),COALESCE(sum(amount_usd),0),COALESCE(sum(CASE WHEN measured THEN amount_usd ELSE 0 END),0),COALESCE(sum(CASE WHEN estimated THEN amount_usd ELSE 0 END),0),COALESCE(sum(CASE WHEN NOT amount_known THEN 1 ELSE 0 END),0),COALESCE(sum(bytes),0),COALESCE(sum(duration_ms),0) FROM fornix.cost_ledger WHERE workspace_id=$1 AND created_at >= $2 AND created_at < $3 GROUP BY category ORDER BY category`, workspaceID, since, until)
 	if err != nil {
 		return contracts.ObservabilitySnapshot{}, err
 	}
@@ -421,7 +460,13 @@ func (s *ObservabilityStore) Snapshot(ctx context.Context, workspaceID string, s
 		out.UnknownCostEntries += item.UnknownEntries
 	}
 	rows.Close()
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return contracts.ObservabilitySnapshot{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return contracts.ObservabilitySnapshot{}, err
+	}
+	return out, nil
 }
 
 func readObservationTx(ctx context.Context, tx pgx.Tx, workspaceID, key string) (contracts.RunObservation, error) {

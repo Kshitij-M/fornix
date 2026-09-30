@@ -63,7 +63,7 @@ func (s *ConnectorBindingStore) Create(ctx context.Context, request contracts.Co
 	configurationJSON := append([]byte(nil), request.Binding.Configuration...)
 	credentialsJSON := mustJSON(request.Binding.CredentialRefs)
 	actorJSON := mustJSON(request.Actor)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, request.WorkspaceID)
 	if err != nil {
 		return contracts.ConnectorBinding{}, false, fmt.Errorf("begin connector binding create: %w", err)
 	}

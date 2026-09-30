@@ -115,6 +115,15 @@ The local commands are deliberately small and deterministic:
 | `fornix support bundle --output PATH` | Write a redacted diagnostic bundle for a support issue. |
 | `fornix version` | Print build, platform, and schema compatibility information. |
 
+Support bundles are local, versioned diagnostic JSON capped at 4 KiB. They
+contain only coarse profile state, safe configured/not-configured indicators,
+the Fornix version, and local migration metadata. They omit profile paths,
+workspace and actor identifiers, server URLs, repository paths, credential
+references, prompts, and logs. The destination is created with owner-only
+permissions; an existing file is never overwritten or chmodded. Fornix does
+not create or change permissions on the profile while gathering this
+read-only diagnostic, and does not upload the bundle.
+
 Every command accepts the common local options shown by `fornix help`,
 including `--home`, `--workspace`, `--url`, `--json`, and `--bootstrap-key`.
 The CLI uses bounded output and deterministic JSON fields so scripts can use
@@ -158,6 +167,33 @@ The run path applies turn, token, byte, wall-clock, tool, and cost budgets
 before work is admitted. A budget failure is a durable, inspectable outcome;
 it is not silently converted into an unbounded retry.
 
+### Managed OpenAI credentials for a hosted server
+
+The shell-environment example above is a local development convenience. A
+production server must not read a model API key from `FORNIX_OPENAI_API_KEY`.
+Instead, enable OpenAI with a logical workspace credential reference and the
+configured credential manager:
+
+```sh
+FORNIX_ENV=production \
+FORNIX_OPENAI_ENABLED=true \
+FORNIX_OPENAI_CREDENTIAL_REF=openai/production-api-key \
+FORNIX_CREDENTIAL_MANAGER_URL=https://credentials.example/v1/resolve \
+FORNIX_CREDENTIAL_MANAGER_TOKEN_REF=FORNIX_CREDENTIAL_MANAGER_TOKEN \
+fornix serve
+```
+
+Provision `openai/production-api-key` as an active credential reference for
+the target workspace, and configure the manager's workload identity or
+short-lived authentication token separately. The server wraps the manager in
+the existing Postgres-backed credential lease authority, validates the
+workspace, reference, expiry, fence, and revocation epoch immediately before
+provider egress, and never writes the provider secret to profile/config files.
+Library deployments may inject `OpenAILeaseResolver` through
+`server.NewWithDependencies` instead of using the built-in HTTP manager.
+`FORNIX_OPENAI_ENABLED` remains optional; the default fake-provider path does
+not need any credential manager.
+
 ## Profile and data layout
 
 The profile root defaults to `~/.fornix` and can be changed with `--home` or
@@ -189,6 +225,7 @@ Useful environment overrides are:
 | `FORNIX_DOCKER_PATH` | Explicit Docker executable when it is not on `PATH`. |
 | `FORNIX_RUNTIME_PROJECT` | Compose project name for disposable or isolated runs. |
 | `FORNIX_OPENAI_API_KEY` | Opt-in process environment credential; never persisted by the CLI. |
+| `FORNIX_OPENAI_CREDENTIAL_REF` | Development environment-variable name, or a namespaced managed reference when the credential manager is configured; production requires the managed form. |
 | `FORNIX_OPENAI_MODEL` | Default OpenAI model when `--model` is omitted. |
 | `FORNIX_OLLAMA_MODEL` | Explicit Ollama model for an Ollama-enabled path. |
 | `FORNIX_RELEASE_BASE_URL` | Test-only release directory override; use the default GitHub channel for normal installs. |

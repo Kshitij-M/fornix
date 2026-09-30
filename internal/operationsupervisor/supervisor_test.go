@@ -163,6 +163,35 @@ func TestSupervisorRejectsUnboundedConfiguration(t *testing.T) {
 	}
 }
 
+func TestSupervisorCanReplaceWorkspaceInventoryWithoutResettingFairness(t *testing.T) {
+	var seen []string
+	var mu sync.Mutex
+	supervisor, err := New([]string{"a", "b", "c"}, func(workspaceID string) (Runner, error) {
+		return &fakeRunner{mu: &mu, seen: &seen, active: &atomic.Int32{}, maxSeen: &atomic.Int32{}}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := supervisor.Step(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if err := supervisor.ReplaceWorkspaces([]string{"c", "d"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := supervisor.Step(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !equalStrings(seen, []string{"a", "d"}) {
+		t.Fatalf("replacement reset fairness or selected stale workspace: %v", seen)
+	}
+	if err := supervisor.ReplaceWorkspaces(nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := supervisor.Step(context.Background()); !errors.Is(err, ErrWorkspaceSet) {
+		t.Fatalf("empty replacement step error=%v, want workspace-set error", err)
+	}
+}
+
 func equalStrings(left, right []string) bool {
 	if len(left) != len(right) {
 		return false

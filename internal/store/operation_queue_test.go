@@ -75,6 +75,51 @@ func TestOperationQueueClaimIsBoundedWorkspaceScopedAndFenced(t *testing.T) {
 	}
 }
 
+func TestOperationQueueReadOnlyFilterExcludesUnplannedAndEffectfulWork(t *testing.T) {
+	store, _, workspace := newOperationTestStore(t)
+	readRequest := operationTestRequest(t, workspace, "read-only-filter")
+	readPlan := operationTestPlan(t, readRequest)
+	readPlan.ID = "plan-read-only-filter"
+	read, err := store.Create(context.Background(), OperationCreateInput{Request: readRequest, Plan: &readPlan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	effectRequest := operationTestRequest(t, workspace, "effect-filter")
+	effectPlan := operationTestPlan(t, effectRequest)
+	effectPlan.ID = "plan-effect-filter"
+	effectPlan.Steps[0].Effect = contracts.EffectClassReversibleWrite
+	effect, err := store.Create(context.Background(), OperationCreateInput{Request: effectRequest, Plan: &effectPlan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unplanned, err := store.Create(context.Background(), OperationCreateInput{Request: operationTestRequest(t, workspace, "unplanned-filter")})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	claims, err := store.ClaimReadyWithOptions(context.Background(), workspace, "read-only-worker", OperationClaimOptions{Limit: 8, TTL: time.Minute, ReadOnlyOnly: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 1 || claims[0].Operation.ID != read.Operation.ID {
+		t.Fatalf("read-only claim=%+v, want only %s", claims, read.Operation.ID)
+	}
+	if claims[0].Operation.ID == effect.Operation.ID || claims[0].Operation.ID == unplanned.Operation.ID {
+		t.Fatalf("filter claimed ineligible operation: %+v", claims[0])
+	}
+	if err := store.ReleaseLease(context.Background(), claims[0].Lease); err != nil {
+		t.Fatal(err)
+	}
+
+	allClaims, err := store.ClaimReadyWithOptions(context.Background(), workspace, "general-worker", OperationClaimOptions{Limit: 8, TTL: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(allClaims) != 3 {
+		t.Fatalf("general claim count=%d, want 3", len(allClaims))
+	}
+}
+
 func TestOperationResourceLeaseSerializesDeclaredResourceAndAdvancesFence(t *testing.T) {
 	store, pool, workspace := newOperationTestStore(t)
 	resource := OperationResource{WorkspaceID: workspace, ResourceKind: "account", ResourceID: "account-1", Role: "target"}

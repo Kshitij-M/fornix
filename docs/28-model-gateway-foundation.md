@@ -1,6 +1,8 @@
 # Model gateway foundation
 
-Status: implemented for Loop 8.
+Status: chat gateway implemented for Loop 8; embedding execution authority and
+repository-ingestion target attachment implemented in Loops 59–60 (partial
+qualification only).
 
 ## Scope
 
@@ -10,13 +12,31 @@ provider capability, adds an opt-in OpenAI-compatible chat provider, and adds a
 deterministic fake provider for tests and offline development. Model execution
 is still an explicit caller action; retrieval remains model-free by default.
 
+Embedding capability is explicit: Ollama and the fake provider implement the
+typed `EmbeddingProvider` seam, while a chat-only provider cannot be selected
+for vector generation merely because it is registered in the general model
+registry.
+
+Loop 59 closes the previous embedding exception. Embeddings now use a typed,
+workspace-scoped request and durable `embedding_calls` ledger (migration 056),
+then pass through the same fenced child-operation and domain-link authority as
+other external effects. Successful vectors are retained for deterministic
+replay; uncertain provider outcomes become `recovery_required`; the retrieval
+store still never invokes a provider implicitly. The ledger deliberately
+stores a replayable vector while memo/chunk/symbol rows remain derived target
+projections. Migration 057 records immutable target attachments; the ingestion
+chunk path now commits its projection, checkpoint, lineage, and attachment in
+one transaction. Memo and symbol attachment are still follow-up work.
+
 ## Invariants
 
 - Every model request has an explicit workspace, provider, model, request
   identity, idempotency key, and bounded execution budget.
 - Provider lookup is explicit, case-normalized, alias-safe, and deterministic.
 - A provider may not receive a credential through the request contract. The
-  provider resolves its credential from configuration at call time.
+  provider resolves it at call time through a workspace/purpose-bound lease
+  when production composition supplies one; environment resolution remains an
+  explicit development-only compatibility path.
 - Raw provider request and response evidence is redacted and bounded before it
   is persisted. Authorization headers, API keys, bearer tokens, and secret
   fields never enter logs, events, or the database.

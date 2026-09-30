@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"strconv"
@@ -14,6 +15,7 @@ import (
 
 	connectorruntime "github.com/omaveda/fornix/internal/connector"
 	"github.com/omaveda/fornix/internal/contracts"
+	"github.com/omaveda/fornix/internal/effectdispatch"
 	"github.com/omaveda/fornix/internal/store"
 )
 
@@ -203,6 +205,10 @@ func (s *server) handleOperation(w http.ResponseWriter, r *http.Request) {
 		s.handleOperationGet(w, r, operationID)
 		return
 	}
+	if len(parts) == 2 && parts[1] == "authority-links" && r.Method == http.MethodGet {
+		s.handleOperationAuthorityLinks(w, r, operationID)
+		return
+	}
 	if len(parts) == 3 && parts[1] == "effects" {
 		effectID := parts[2]
 		if r.Method == http.MethodGet {
@@ -244,6 +250,25 @@ func (s *server) handleOperation(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleOperationAuthorityLinks exposes only bounded, hash-and-reference
+// authority linkage. It never discloses connector payloads, prompts,
+// credentials, or raw evidence/artifacts.
+func (s *server) handleOperationAuthorityLinks(w http.ResponseWriter, r *http.Request, operationID string) {
+	limit, _ := strconv.Atoi(strings.TrimSpace(r.URL.Query().Get("limit")))
+	if limit <= 0 {
+		limit = 64
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
+	defer cancel()
+	workspaceID := requestWorkspace(r, r.URL.Query().Get("workspace_id"))
+	links, err := s.operations.AuthorityLinks(ctx, workspaceID, operationID, limit)
+	if err != nil {
+		writeOperationErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"workspace_id": workspaceID, "operation_id": operationID, "links": links, "count": len(links), "limit": limit})
+}
+
 // handleOperationEffectReserve makes an external effect visible before a
 // connector is dispatched. The operation store owns reservation idempotency,
 // operation leases, task fences, and the initial append-only state.
@@ -274,6 +299,50 @@ func (s *server) handleOperationEffectReserve(w http.ResponseWriter, r *http.Req
 		writeOperationErr(w, store.ErrOperationWorkspace)
 		return
 	}
+	capability, found := s.connectorRegistry.Lookup(operation.Request.Capability)
+	if !found {
+		writeErr(w, http.StatusConflict, "capability is not available")
+		return
+	}
+	definition := capability.Definition()
+	if definition.Effect == contracts.EffectClassReadOnly || definition.Effect == contracts.EffectClassObservation {
+		writeErr(w, http.StatusConflict, "read-only capability cannot reserve an external effect")
+		return
+	}
+	describer, described := capability.(connectorruntime.EffectDescriber)
+	if !described {
+		writeErr(w, http.StatusConflict, "effectful capability does not describe a durable effect")
+		return
+	}
+	authoritativeEffect, describeErr := describer.DescribeEffect(operation.Request)
+	if describeErr != nil {
+		writeErr(w, http.StatusConflict, "effect description failed")
+		return
+	}
+	if strings.TrimSpace(input.Effect.Boundary) != "" && input.Effect.StableHash() != authoritativeEffect.StableHash() {
+		writeErr(w, http.StatusConflict, "effect metadata does not match capability")
+		return
+	}
+	input.Effect = authoritativeEffect
+	var externalBoundary *contracts.ExternalBoundaryAuthority
+	if contracts.RequiresExternalBoundary(definition.Effect) {
+		boundaryDescriber, ok := capability.(connectorruntime.BoundaryDescriber)
+		if !ok {
+			writeErr(w, http.StatusConflict, "effectful capability does not describe a controlled boundary")
+			return
+		}
+		boundary, boundaryErr := boundaryDescriber.DescribeBoundary(operation.Request)
+		if boundaryErr != nil || boundary.Normalize() != nil {
+			writeErr(w, http.StatusConflict, "effect boundary description failed")
+			return
+		}
+		externalBoundary = &boundary
+	}
+	if err := s.reloadWorkspaceAuthority(ctx, workspaceID); err != nil {
+		s.setAuthorityStatus(false, shortError(err, 320), time.Time{}, 0)
+		writeErr(w, http.StatusServiceUnavailable, "workspace authority is unavailable")
+		return
+	}
 	pathEffectID := strings.TrimSpace(effectID)
 	if pathEffectID == "reserve" {
 		pathEffectID = ""
@@ -292,6 +361,7 @@ func (s *server) handleOperationEffectReserve(w http.ResponseWriter, r *http.Req
 	result, inserted, err := s.operations.ReserveEffect(ctx, store.OperationEffectInput{
 		WorkspaceID: workspaceID, OperationID: operationID, StepID: input.StepID, AttemptID: input.AttemptID,
 		OwnerID: principal.ID, Fence: operationLeaseFence(r), Effect: input.Effect, RequestHash: input.RequestHash,
+		ExternalBoundary: externalBoundary, RequireAllowedAdmission: true,
 	})
 	if err != nil {
 		writeOperationErr(w, err)
@@ -473,6 +543,13 @@ func (s *server) handleOperationEffectState(w http.ResponseWriter, r *http.Reque
 // limited to read-only and observation capabilities; effectful connectors
 // must use the durable admission/effect reservation path before they can be
 // exposed here.
+func operationAdmissionHTTPStatus(decision contracts.AdmissionDecision) int {
+	if decision.ReasonCode == contracts.AdmissionReasonRateLimited {
+		return http.StatusTooManyRequests
+	}
+	return http.StatusConflict
+}
+
 func (s *server) handleOperationExecute(w http.ResponseWriter, r *http.Request, operationID string) {
 	if s.connectorExecutor == nil || s.connectorRegistry == nil {
 		writeErr(w, http.StatusServiceUnavailable, "connector executor unavailable")
@@ -517,13 +594,13 @@ func (s *server) handleOperationExecute(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	definition := capability.Definition()
-	if definition.Effect != contracts.EffectClassReadOnly && definition.Effect != contracts.EffectClassObservation {
-		writeErr(w, http.StatusConflict, "effectful capability requires durable effect admission")
+	if s.admission == nil {
+		writeErr(w, http.StatusServiceUnavailable, "durable operation admission unavailable")
 		return
 	}
-	if len(operation.Request.Metadata) > 0 && strings.EqualFold(operation.Request.Metadata["external_effect"], "true") {
-		writeErr(w, http.StatusConflict, "external effect execution requires durable effect admission")
-		return
+	executionKey := strings.TrimSpace(input.IdempotencyKey)
+	if executionKey == "" {
+		executionKey = contracts.HashStrings("operation-execute", operationID, operation.OperationHash)
 	}
 	options := connectorruntime.AdmissionOptions{
 		Principal:       &principal,
@@ -535,6 +612,53 @@ func (s *server) handleOperationExecute(w http.ResponseWriter, r *http.Request, 
 	admission, err := s.connectorRegistry.Admit(ctx, operation.Request, options)
 	if err != nil {
 		writeErr(w, http.StatusConflict, "operation admission failed")
+		return
+	}
+	resourceKinds := append([]string(nil), definition.ResourceKinds...)
+	if len(resourceKinds) == 0 {
+		resourceKinds = []string{operation.Request.Target.Kind}
+	}
+	requestID := requestIDFromRequest(r)
+	if requestID == "" {
+		requestID = operation.RequestID
+	}
+	durableInput := contracts.AdmissionInput{
+		WorkspaceID: operation.WorkspaceID, OperationID: operation.ID, OperationHash: operation.OperationHash,
+		RequestID: requestID, IdempotencyKey: contracts.HashStrings("operation-admission", operation.ID, operation.OperationHash),
+		Actor: principal.Actor(), Capability: definition, Target: operation.Request.Target,
+		SchemaCatalogHash: admission.SchemaCatalogHash, SchemaCatalogRevision: admission.SchemaCatalogRevision,
+		Policy: contracts.AdmissionPolicy{
+			WorkspaceID: operation.WorkspaceID, PolicyID: "runtime-connector", Version: "1",
+			AllowedConnectors: []contracts.ConnectorRef{definition.Ref.Connector}, AllowedResourceKinds: resourceKinds,
+			AllowedActorIDs: []string{principal.ID}, RequireEvidence: false,
+			RequireTaskFence: operation.Request.Task != nil,
+		},
+		ConnectorAvailable: true, ResourceAllowed: true, EvidenceSatisfied: true,
+		TaskBound: operation.Request.Task != nil, TaskOwnerID: operation.TaskOwnerID, TaskFence: operation.TaskFence,
+		TaskFenceValid: operation.Request.Task == nil,
+	}
+	var externalBoundary *contracts.ExternalBoundaryAuthority
+	if contracts.RequiresExternalBoundary(definition.Effect) {
+		boundaryDescriber, ok := capability.(connectorruntime.BoundaryDescriber)
+		if !ok {
+			writeErr(w, http.StatusConflict, "effectful capability does not describe a controlled boundary")
+			return
+		}
+		boundary, boundaryErr := boundaryDescriber.DescribeBoundary(operation.Request)
+		if boundaryErr != nil || boundary.Normalize() != nil {
+			writeErr(w, http.StatusConflict, "effect boundary description failed")
+			return
+		}
+		externalBoundary = &boundary
+		durableInput.ExternalBoundary = contracts.CloneExternalBoundary(externalBoundary)
+	}
+	durableAdmission, err := s.admission.Admit(ctx, durableInput)
+	if err != nil {
+		writeErr(w, http.StatusConflict, "durable operation admission failed")
+		return
+	}
+	if durableAdmission.Decision.Status != contracts.AdmissionAllowed {
+		writeErr(w, operationAdmissionHTTPStatus(durableAdmission.Decision), "durable operation admission denied")
 		return
 	}
 	plan, err := admission.Capability.Plan(operation.Request)
@@ -551,10 +675,6 @@ func (s *server) handleOperationExecute(w http.ResponseWriter, r *http.Request, 
 	}
 	if input.TaskFence != 0 {
 		taskFence = input.TaskFence
-	}
-	executionKey := strings.TrimSpace(input.IdempotencyKey)
-	if executionKey == "" {
-		executionKey = contracts.HashStrings("operation-execute", operationID, operation.OperationHash)
 	}
 	if operation.Status == contracts.OperationStatusCreated {
 		planned, planErr := s.operations.AttachPlan(ctx, store.OperationPlanInput{
@@ -590,11 +710,52 @@ func (s *server) handleOperationExecute(w http.ResponseWriter, r *http.Request, 
 		}
 		operation = transition.Operation
 	}
+	if definition.Effect != contracts.EffectClassReadOnly && definition.Effect != contracts.EffectClassObservation {
+		describer, ok := capability.(connectorruntime.EffectDescriber)
+		if !ok {
+			writeErr(w, http.StatusConflict, "effectful capability does not describe a durable effect")
+			return
+		}
+		effect, describeErr := describer.DescribeEffect(operation.Request)
+		if describeErr != nil {
+			writeErr(w, http.StatusConflict, "effect description failed")
+			return
+		}
+		dispatchResult, dispatchErr := s.effectDispatcher.Dispatch(ctx, effectdispatch.Request{
+			Admission: durableInput, Operation: operation.Request, Definition: definition,
+			OwnerID: ownerID, Fence: lease.Fence, TaskOwnerID: taskOwnerID, TaskFence: taskFence,
+			StepID: firstOperationStep(operation), AttemptKey: executionKey, Effect: effect,
+			Authority:    contracts.EffectAuthority{SchemaCatalogHash: admission.SchemaCatalogHash, SchemaCatalogRevision: admission.SchemaCatalogRevision, ExternalBoundary: contracts.CloneExternalBoundary(externalBoundary)},
+			DomainLink:   &contracts.DomainEffectLink{DomainKind: contracts.DomainEffectKindHTTPRequest, DomainID: operation.ID, DomainHash: operation.Request.StableHash(), LinkRole: contracts.DomainEffectLinkRolePrimary, IdempotencyKey: executionKey + ":domain-link"},
+			RecordResult: true,
+			Invoker: func(invokeCtx context.Context, authority contracts.EffectAuthority) (effectdispatch.InvocationResult, error) {
+				outcome, executeErr := s.connectorExecutor.Execute(invokeCtx, operation.Request, connectorruntime.AdmissionOptions{
+					Principal: &principal, ApprovalGranted: input.ApprovalGranted, Authority: &authority,
+					RequireAuthority: true, ValidateAuthority: s.operations.ValidateEffectAuthority,
+					Authorize: options.Authorize,
+				})
+				if executeErr != nil {
+					return effectdispatch.InvocationResult{}, executeErr
+				}
+				return effectdispatch.InvocationResult{Result: outcome.Result}, nil
+			},
+		})
+		if dispatchErr != nil {
+			writeOperationErr(w, dispatchErr)
+			return
+		}
+		if dispatchResult.OperationResult != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"operation": publicOperation(dispatchResult.OperationResult.Operation), "result": publicOperationResult(dispatchResult.OperationResult.Record), "attempts": 1, "duplicate": dispatchResult.Duplicate || dispatchResult.OperationResult.Duplicate})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"operation": publicOperation(operation), "effect": publicOperationEffect(dispatchResult.Effect), "effect_state": publicEffectState(dispatchResult.State), "duplicate": dispatchResult.Duplicate})
+		return
+	}
 	outcome, executeErr := s.connectorExecutor.Execute(ctx, operation.Request, options)
 	if executeErr != nil {
 		failure := &contracts.OperationFailure{SchemaVersion: contracts.DomainNeutralSchemaVersion, WorkspaceID: workspaceID, Code: contracts.OperationFailureAdapter, Retryable: false, DetailHash: contracts.HashStrings("connector-execution-failure", safeConnectorFailure(executeErr))}
 		failed := contracts.OperationResult{ID: operationID + "-result", OperationID: operationID, OperationHash: operation.OperationHash, RequestID: operation.RequestID, WorkspaceID: workspaceID, Actor: principal.Actor(), Status: contracts.OperationStatusFailed, Failure: failure}
-		written, writeErr := s.operations.RecordResult(ctx, store.OperationResultInput{WorkspaceID: workspaceID, OperationID: operationID, OwnerID: ownerID, Fence: lease.Fence, TaskOwnerID: taskOwnerID, TaskFence: taskFence, Actor: principal.Actor(), RequestID: requestIDFromRequest(r), IdempotencyKey: executionKey + ":result", CausationID: operation.Request.CausationID, CorrelationID: operation.Request.CorrelationID, Result: failed})
+		written, writeErr := s.operations.RecordResult(ctx, store.OperationResultInput{WorkspaceID: workspaceID, OperationID: operationID, OwnerID: ownerID, Fence: lease.Fence, TaskOwnerID: taskOwnerID, TaskFence: taskFence, Actor: principal.Actor(), RequestID: requestIDFromRequest(r), IdempotencyKey: executionKey + ":result", CausationID: operation.Request.CausationID, CorrelationID: operation.Request.CorrelationID, SchemaCatalogHash: admission.SchemaCatalogHash, SchemaCatalogRevision: admission.SchemaCatalogRevision, Result: failed})
 		if writeErr != nil {
 			writeOperationErr(w, writeErr)
 			return
@@ -614,7 +775,7 @@ func (s *server) handleOperationExecute(w http.ResponseWriter, r *http.Request, 
 	// authority additionally binds the result to the persisted operation hash,
 	// which includes the normalized plan identity.
 	outcome.Result.OperationHash = operation.OperationHash
-	written, err := s.operations.RecordResult(ctx, store.OperationResultInput{WorkspaceID: workspaceID, OperationID: operationID, OwnerID: ownerID, Fence: lease.Fence, TaskOwnerID: taskOwnerID, TaskFence: taskFence, Actor: principal.Actor(), RequestID: requestIDFromRequest(r), IdempotencyKey: executionKey + ":result", CausationID: operation.Request.CausationID, CorrelationID: operation.Request.CorrelationID, Result: outcome.Result})
+	written, err := s.operations.RecordResult(ctx, store.OperationResultInput{WorkspaceID: workspaceID, OperationID: operationID, OwnerID: ownerID, Fence: lease.Fence, TaskOwnerID: taskOwnerID, TaskFence: taskFence, Actor: principal.Actor(), RequestID: requestIDFromRequest(r), IdempotencyKey: executionKey + ":result", CausationID: operation.Request.CausationID, CorrelationID: operation.Request.CorrelationID, SchemaCatalogHash: admission.SchemaCatalogHash, SchemaCatalogRevision: admission.SchemaCatalogRevision, Result: outcome.Result})
 	if err != nil {
 		writeOperationErr(w, err)
 		return
@@ -634,6 +795,78 @@ func operationLeaseForRequest(ctx context.Context, operations *store.OperationSt
 		return store.OperationLease{}, err
 	}
 	return result.Lease, nil
+}
+
+func firstOperationStep(operation store.Operation) string {
+	if operation.Plan == nil || len(operation.Plan.Steps) == 0 {
+		return ""
+	}
+	return operation.Plan.Steps[0].ID
+}
+
+// admitPersistedOperation applies the durable policy used by the synchronous
+// API before a background worker invokes a connector. The persisted operation
+// remains the authority; worker-supplied quota facts are never trusted.
+func (s *server) admitPersistedOperation(ctx context.Context, operation store.Operation, principal contracts.Principal, requestID string) (connectorruntime.Admission, store.AdmissionResult, error) {
+	if s == nil || s.connectorRegistry == nil || s.admission == nil {
+		return connectorruntime.Admission{}, store.AdmissionResult{}, fmt.Errorf("durable operation admission unavailable")
+	}
+	capability, ok := s.connectorRegistry.Lookup(operation.Request.Capability)
+	if !ok {
+		return connectorruntime.Admission{}, store.AdmissionResult{}, fmt.Errorf("operation capability is unavailable")
+	}
+	options := connectorruntime.AdmissionOptions{
+		Principal: &principal,
+		Authorize: func(_ context.Context, value contracts.Principal, request contracts.OperationRequest, _ contracts.CapabilityDefinition) (bool, error) {
+			return value.WorkspaceID == request.WorkspaceID && value.ID == request.Actor.ID && value.Has(contracts.PermissionOperationExecute), nil
+		},
+	}
+	runtimeAdmission, err := s.connectorRegistry.Admit(ctx, operation.Request, options)
+	if err != nil {
+		return connectorruntime.Admission{}, store.AdmissionResult{}, err
+	}
+	definition := runtimeAdmission.Definition
+	resourceKinds := append([]string(nil), definition.ResourceKinds...)
+	if len(resourceKinds) == 0 {
+		resourceKinds = []string{operation.Request.Target.Kind}
+	}
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" {
+		requestID = operation.RequestID
+	}
+	input := contracts.AdmissionInput{
+		WorkspaceID: operation.WorkspaceID, OperationID: operation.ID, OperationHash: operation.OperationHash,
+		RequestID: requestID, IdempotencyKey: contracts.HashStrings("operation-admission", operation.ID, operation.OperationHash),
+		Actor: principal.Actor(), Capability: definition, Target: operation.Request.Target,
+		SchemaCatalogHash: runtimeAdmission.SchemaCatalogHash, SchemaCatalogRevision: runtimeAdmission.SchemaCatalogRevision,
+		Policy: contracts.AdmissionPolicy{
+			WorkspaceID: operation.WorkspaceID, PolicyID: "runtime-connector", Version: "1",
+			AllowedConnectors: []contracts.ConnectorRef{definition.Ref.Connector}, AllowedResourceKinds: resourceKinds,
+			AllowedActorIDs: []string{principal.ID}, RequireEvidence: false, RequireTaskFence: operation.Request.Task != nil,
+		},
+		ConnectorAvailable: true, ResourceAllowed: true, EvidenceSatisfied: true,
+		TaskBound: operation.Request.Task != nil, TaskOwnerID: operation.TaskOwnerID, TaskFence: operation.TaskFence,
+		TaskFenceValid: operation.Request.Task == nil,
+	}
+	if contracts.RequiresExternalBoundary(definition.Effect) {
+		boundaryDescriber, ok := capability.(connectorruntime.BoundaryDescriber)
+		if !ok {
+			return connectorruntime.Admission{}, store.AdmissionResult{}, fmt.Errorf("effectful capability does not describe a controlled boundary")
+		}
+		boundary, err := boundaryDescriber.DescribeBoundary(operation.Request)
+		if err != nil {
+			return connectorruntime.Admission{}, store.AdmissionResult{}, err
+		}
+		if err := boundary.Normalize(); err != nil {
+			return connectorruntime.Admission{}, store.AdmissionResult{}, err
+		}
+		input.ExternalBoundary = contracts.CloneExternalBoundary(&boundary)
+	}
+	durableAdmission, err := s.admission.Admit(ctx, input)
+	if err != nil {
+		return connectorruntime.Admission{}, store.AdmissionResult{}, err
+	}
+	return runtimeAdmission, durableAdmission, nil
 }
 
 func operationFenceHeader(r *http.Request) uint64 {
@@ -893,7 +1126,7 @@ func writeOperationErr(w http.ResponseWriter, err error) {
 		status = http.StatusNotFound
 	case errors.Is(err, store.ErrOperationWorkspace), errors.Is(err, store.ErrOperationTaskFence):
 		status = http.StatusForbidden
-	case errors.Is(err, store.ErrOperationIdempotency), errors.Is(err, store.ErrOperationPlanConflict), errors.Is(err, store.ErrOperationResultConflict), errors.Is(err, store.ErrOperationTransition), errors.Is(err, store.ErrOperationTerminal), errors.Is(err, store.ErrOperationLeaseMissing), errors.Is(err, store.ErrOperationLeaseHeld), errors.Is(err, store.ErrOperationLeaseOwned), errors.Is(err, store.ErrOperationLeaseFenced), errors.Is(err, store.ErrOperationLeaseExpired), errors.Is(err, store.ErrOperationLeaseReleased):
+	case errors.Is(err, store.ErrOperationIdempotency), errors.Is(err, store.ErrOperationPlanConflict), errors.Is(err, store.ErrOperationResultConflict), errors.Is(err, store.ErrOperationTransition), errors.Is(err, store.ErrOperationTerminal), errors.Is(err, store.ErrOperationLeaseMissing), errors.Is(err, store.ErrOperationLeaseHeld), errors.Is(err, store.ErrOperationLeaseOwned), errors.Is(err, store.ErrOperationLeaseFenced), errors.Is(err, store.ErrOperationLeaseExpired), errors.Is(err, store.ErrOperationLeaseReleased), errors.Is(err, store.ErrOperationAdmissionRequired), errors.Is(err, store.ErrOperationAdmissionUnavailable), errors.Is(err, store.ErrDeploymentAdmissionReference), errors.Is(err, store.ErrDeploymentAdmissionNotReady):
 		status = http.StatusConflict
 	case errors.Is(err, store.ErrOperationReplay):
 		status = http.StatusUnprocessableEntity

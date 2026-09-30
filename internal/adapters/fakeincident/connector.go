@@ -126,6 +126,24 @@ func (c *capability) Plan(request contracts.OperationRequest) (contracts.Operati
 	return plan, nil
 }
 
+// DescribeEffect publishes the same deterministic remediation boundary that
+// ExecuteWithAuthority returns, allowing the shared dispatcher to reserve it
+// before the capability runs.
+func (c *capability) DescribeEffect(request contracts.OperationRequest) (contracts.ExternalEffect, error) {
+	if err := c.Validate(request); err != nil {
+		return contracts.ExternalEffect{}, err
+	}
+	if !c.definition.RequiresApproval {
+		return contracts.ExternalEffect{}, fmt.Errorf("capability %q does not produce an external effect", c.definition.Ref.Name)
+	}
+	outputHash := contracts.HashStrings(c.definition.Ref.Name, request.Target.StableHash(), request.InputHash)
+	effect := contracts.ExternalEffect{ID: "effect-" + outputHash[:32], WorkspaceID: request.WorkspaceID, Boundary: "fakeincident.remediation", Class: c.definition.Effect, DeliveryGuarantee: contracts.ExternalDeliveryAtLeastOnce, IdempotencyKey: request.IdempotencyKey, ProviderRequestID: "fake-" + outputHash[:16], ProviderIdempotency: true, VerificationRequired: true, VerificationStatus: contracts.ExternalVerificationPending, CompensationStatus: contracts.ExternalCompensationUnavailable}
+	if err := effect.Normalize(); err != nil {
+		return contracts.ExternalEffect{}, err
+	}
+	return effect, nil
+}
+
 func (c *capability) Execute(ctx context.Context, request contracts.OperationRequest, plan contracts.OperationPlan) (contracts.OperationResult, error) {
 	if err := c.Validate(request); err != nil {
 		return contracts.OperationResult{}, err
@@ -143,6 +161,41 @@ func (c *capability) Execute(ctx context.Context, request contracts.OperationReq
 		result.ExternalEffects = []contracts.ExternalEffect{{WorkspaceID: request.WorkspaceID, Boundary: "fakeincident.remediation", Class: contracts.EffectClassApprovalRequiredWrite, DeliveryGuarantee: contracts.ExternalDeliveryAtLeastOnce, IdempotencyKey: request.IdempotencyKey, ProviderRequestID: "fake-" + outputHash[:16], ProviderIdempotency: true, VerificationRequired: true, VerificationStatus: contracts.ExternalVerificationPending, CompensationStatus: contracts.ExternalCompensationUnavailable}}
 		result.Steps[0].ExternalEffect = &result.ExternalEffects[0]
 	}
+	if err := result.Normalize(); err != nil {
+		return contracts.OperationResult{}, err
+	}
+	return result, nil
+}
+
+// ExecuteWithAuthority is the strict effectful adapter seam. The fake
+// adapter has no remote service, but it still requires the same reference-only
+// authority envelope as a production connector so tests cannot accidentally
+// bless a direct effectful execution path.
+func (c *capability) ExecuteWithAuthority(ctx context.Context, request contracts.OperationRequest, plan contracts.OperationPlan, authority contracts.EffectAuthority) (contracts.OperationResult, error) {
+	if c == nil || c.parent == nil {
+		return contracts.OperationResult{}, fmt.Errorf("fake incident capability is not configured")
+	}
+	if err := authority.Normalize(); err != nil {
+		return contracts.OperationResult{}, fmt.Errorf("fake incident authority: %w", err)
+	}
+	if authority.WorkspaceID != request.WorkspaceID || authority.OperationID != request.ID || authority.EffectID == "" {
+		return contracts.OperationResult{}, connector.ErrAuthorityExecution
+	}
+	if c.definition.Effect == contracts.EffectClassReadOnly || c.definition.Effect == contracts.EffectClassObservation {
+		return contracts.OperationResult{}, connector.ErrAuthorityExecution
+	}
+	result, err := c.Execute(ctx, request, plan)
+	if err != nil {
+		return contracts.OperationResult{}, err
+	}
+	if len(result.ExternalEffects) != 1 || len(result.Steps) != 1 || result.Steps[0].ExternalEffect == nil {
+		return contracts.OperationResult{}, connector.ErrAuthorityExecution
+	}
+	// The durable dispatcher reserves the effect identity before this method
+	// runs. The adapter may describe provider metadata, but it must not invent
+	// a second local effect identity.
+	result.ExternalEffects[0].ID = authority.EffectID
+	result.Steps[0].ExternalEffect = &result.ExternalEffects[0]
 	if err := result.Normalize(); err != nil {
 		return contracts.OperationResult{}, err
 	}

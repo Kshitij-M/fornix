@@ -19,6 +19,11 @@ suite. It requires:
 - explicit confirmation text for the destructive restore target;
 - `pg_dump`, `pg_restore`, and `psql`.
 
+The PostgreSQL client major version must match the server major version. In a
+containerized qualification, run the drill inside the pinned database image
+or provide matching client binaries; a PostgreSQL 14 `pg_dump` must not be
+used against a PostgreSQL 17 server.
+
 The script does not print DSNs, credentials, prompts, raw payloads, or artifact
 bytes. It prints only the backup path, SHA-256, byte size, durations, and a
 redacted catalog fingerprint.
@@ -32,10 +37,12 @@ It performs a custom-format `pg_dump`, restores into the explicitly separate
 target with `pg_restore`, recomputes the fingerprint, and fails closed on any
 mismatch.
 
-The fingerprint is not a substitute for replay. After a successful restore,
-operators must run the bounded operation replay and representative workspace
-isolation smokes against the restored database, then record those hashes in
-the qualification evidence.
+The fingerprint is not a substitute for replay. It now includes federation
+peer configuration, poll request/state hashes, and retention tombstone
+hashes. After a successful restore, operators must run the bounded operation
+replay and representative workspace isolation/federation smokes against the
+restored database, then record the emitted replay identity hash in the
+qualification evidence.
 
 ## RPO/RTO and cost
 
@@ -58,7 +65,8 @@ repository remains MIT licensed.
 - relative or pre-existing backup paths fail closed;
 - source backup completes and emits a checksum without secret material;
 - restore into a clean separate database succeeds;
-- migration, event, artifact, and operation fingerprints match;
+- migration, event, artifact, operation, federation, and retention
+  fingerprints match;
 - a changed restore fingerprint fails;
 - post-restore replay and workspace-isolation qualification can run against
   the restored DSN.

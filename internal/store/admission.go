@@ -15,6 +15,8 @@ import (
 	policyruntime "github.com/omaveda/fornix/internal/policy"
 )
 
+const capabilityRateLimitLockNamespace int32 = 0x46524e58 // "FRNX"
+
 var (
 	ErrAdmissionNotFound       = errors.New("operation admission not found")
 	ErrAdmissionConflict       = errors.New("operation admission conflicts with existing state")
@@ -61,6 +63,26 @@ type EffectStateResult struct {
 	Duplicate bool
 }
 
+// EffectTransition is one immutable, idempotency-addressable fact in an
+// external-effect history. It is intentionally limited to normalized hashes
+// and classifications; provider payloads and credentials are never stored.
+type EffectTransition struct {
+	WorkspaceID       string
+	EffectID          string
+	OperationID       string
+	Version           int64
+	FromState         string
+	ToState           string
+	RequestID         string
+	IdempotencyKey    string
+	LeaseKind         string
+	ProviderRequestID string
+	ResponseHash      string
+	VerificationHash  string
+	FailureCode       string
+	OccurredAt        time.Time
+}
+
 // EffectLease is independent from an operation lease. It permits a recovery
 // worker to reconcile an uncertain external effect after the parent operation
 // has become terminal or its original worker has disappeared.
@@ -105,6 +127,25 @@ func NewAdmissionStore(pool *pgxpool.Pool, events *EventStore) *AdmissionStore {
 	return &AdmissionStore{pool: pool, events: events}
 }
 
+// WithWorkspaceTx executes a bounded authority composition transaction. The
+// callback must not perform external I/O; it is intended for committing local
+// generic-effect and domain-link state together after the external boundary
+// has returned.
+func (s *AdmissionStore) WithWorkspaceTx(ctx context.Context, workspaceID string, fn func(pgx.Tx) error) error {
+	if s == nil || s.pool == nil || fn == nil {
+		return fmt.Errorf("workspace transaction is not configured")
+	}
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // SetFailureHook provides deterministic transaction crash points for tests.
 func (s *AdmissionStore) SetFailureHook(hook func(string) error) {
 	if s != nil {
@@ -127,6 +168,35 @@ func (s *AdmissionStore) GetDecision(ctx context.Context, workspaceID, decisionI
 		return contracts.AdmissionDecision{}, err
 	}
 	value, err := readAdmissionDecision(ctx, tx, workspaceID, decisionID)
+	if err == nil {
+		err = tx.Commit(ctx)
+	}
+	return value, err
+}
+
+// GetDecisionByIdempotencyKey reads one immutable decision by its workspace-
+// scoped delivery identity. It is used only to recover a workflow wait that
+// was committed before its workflow checkpoint; it never reevaluates policy.
+func (s *AdmissionStore) GetDecisionByIdempotencyKey(ctx context.Context, workspaceID, idempotencyKey string) (contracts.AdmissionDecision, error) {
+	if s == nil || s.pool == nil {
+		return contracts.AdmissionDecision{}, fmt.Errorf("admission store is not configured")
+	}
+	workspaceID, idempotencyKey = strings.TrimSpace(workspaceID), strings.TrimSpace(idempotencyKey)
+	if workspaceID == "" || idempotencyKey == "" {
+		return contracts.AdmissionDecision{}, ErrOperationWorkspace
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return contracts.AdmissionDecision{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := setWorkspaceContext(ctx, tx, workspaceID); err != nil {
+		return contracts.AdmissionDecision{}, err
+	}
+	value, err := readAdmissionDecisionByIdempotencyKey(ctx, tx, workspaceID, idempotencyKey)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return contracts.AdmissionDecision{}, ErrAdmissionNotFound
+	}
 	if err == nil {
 		err = tx.Commit(ctx)
 	}
@@ -172,6 +242,52 @@ func (s *AdmissionStore) GetEffectState(ctx context.Context, workspaceID, effect
 		err = tx.Commit(ctx)
 	}
 	return value, err
+}
+
+// GetEffectTransition reads one immutable transition by its idempotency key.
+// A historical result remains addressable after the current effect projection
+// has advanced, which is required for safe duplicate verification requests.
+func (s *AdmissionStore) GetEffectTransition(ctx context.Context, workspaceID, effectID, idempotencyKey string) (EffectTransition, error) {
+	if s == nil || s.pool == nil {
+		return EffectTransition{}, fmt.Errorf("admission store is not configured")
+	}
+	workspaceID = strings.TrimSpace(workspaceID)
+	effectID = strings.TrimSpace(effectID)
+	idempotencyKey = strings.TrimSpace(idempotencyKey)
+	if workspaceID == "" || effectID == "" || idempotencyKey == "" {
+		return EffectTransition{}, ErrOperationWorkspace
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return EffectTransition{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := setWorkspaceContext(ctx, tx, workspaceID); err != nil {
+		return EffectTransition{}, err
+	}
+	var transition EffectTransition
+	err = tx.QueryRow(ctx, `
+		SELECT workspace_id,effect_id,operation_id,version,from_state,to_state,
+	       request_id,idempotency_key,lease_kind,provider_request_id,response_hash,
+		       verification_hash,failure_code,occurred_at
+		FROM fornix.operation_effect_transitions
+		WHERE workspace_id=$1 AND effect_id=$2 AND idempotency_key=$3`,
+		workspaceID, effectID, idempotencyKey).Scan(
+		&transition.WorkspaceID, &transition.EffectID, &transition.OperationID,
+		&transition.Version, &transition.FromState, &transition.ToState,
+		&transition.RequestID, &transition.IdempotencyKey, &transition.LeaseKind, &transition.ProviderRequestID,
+		&transition.ResponseHash, &transition.VerificationHash, &transition.FailureCode,
+		&transition.OccurredAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return EffectTransition{}, ErrAdmissionNotFound
+	}
+	if err != nil {
+		return EffectTransition{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return EffectTransition{}, err
+	}
+	return transition, nil
 }
 
 // ListRecoverableEffects returns a deterministic, bounded page of non-terminal
@@ -363,6 +479,29 @@ func (s *AdmissionStore) RenewEffectLease(ctx context.Context, lease EffectLease
 	return updated, nil
 }
 
+// ValidateEffectLease proves that a caller still owns the current recovery
+// fence without changing lease state. It is used before duplicate recovery
+// responses as well as before a new reconciliation commit: a stale worker may
+// observe a terminal outcome, but it must not use that observation to advance
+// a waiting workflow.
+func (s *AdmissionStore) ValidateEffectLease(ctx context.Context, lease EffectLease) error {
+	if s == nil || s.pool == nil {
+		return fmt.Errorf("admission store is not configured")
+	}
+	tx, err := s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := setWorkspaceContext(ctx, tx, lease.WorkspaceID); err != nil {
+		return err
+	}
+	if _, err := validateEffectLease(ctx, tx, lease); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 func (s *AdmissionStore) ReleaseEffectLease(ctx context.Context, lease EffectLease) error {
 	if s == nil || s.pool == nil {
 		return fmt.Errorf("admission store is not configured")
@@ -468,17 +607,64 @@ func (s *AdmissionStore) Admit(ctx context.Context, input contracts.AdmissionInp
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, input.WorkspaceID+":"+input.Actor.ID); err != nil {
 		return AdmissionResult{}, fmt.Errorf("lock admission quota: %w", err)
 	}
-	var quotaOperations int
+	// PostgreSQL's two-int advisory-lock space is disjoint from the one-bigint
+	// actor lock above. This capability lock serializes aggregate workspace
+	// traffic without changing the existing per-actor quota semantics.
+	capabilityLockKey := input.WorkspaceID + ":" + input.Capability.Ref.Connector.Name + ":" + input.Capability.Ref.Name
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1::integer, hashtext($2))`, capabilityRateLimitLockNamespace, capabilityLockKey); err != nil {
+		return AdmissionResult{}, fmt.Errorf("lock capability rate quota: %w", err)
+	}
+	var quotaOperations, capabilityOperations int
 	var quotaCost int64
+	var capabilityRetryAt *time.Time
 	if err := tx.QueryRow(ctx, `
-		SELECT count(*)::int, COALESCE(sum(cost_micros), 0)::bigint
-		FROM fornix.operation_admission_decisions
-		WHERE workspace_id=$1 AND (actor->>'id')=$2 AND status <> 'denied'
-		  AND created_at >= clock_timestamp() - ($3::int * interval '1 second')`,
-		input.WorkspaceID, input.Actor.ID, input.Policy.QuotaWindowSeconds).Scan(&quotaOperations, &quotaCost); err != nil {
+		WITH admission_clock AS MATERIALIZED (SELECT clock_timestamp() AS observed_at),
+		actor_quota AS (
+		  SELECT count(*)::int AS operations, COALESCE(sum(cost_micros), 0)::bigint AS cost_micros
+		  FROM fornix.operation_admission_decisions, admission_clock
+		  WHERE workspace_id=$1 AND (actor->>'id')=$2 AND status <> 'denied'
+		    AND created_at >= admission_clock.observed_at - ($3::int * interval '1 second')
+		),
+		capability_quota AS (
+		  SELECT count(*)::int AS operations
+		  FROM fornix.operation_admission_decisions, admission_clock
+		  WHERE workspace_id=$1
+		    AND capability->'connector'->>'name'=$4
+		    AND capability->>'name'=$5
+		    AND status <> 'denied'
+		    AND created_at >= admission_clock.observed_at - ($6::int * interval '1 second')
+		),
+		capability_retry AS (
+		  SELECT decision.created_at + ($6::int * interval '1 second') + interval '1 microsecond' AS retry_at
+		  FROM fornix.operation_admission_decisions AS decision
+		  CROSS JOIN admission_clock
+		  WHERE decision.workspace_id=$1
+		    AND decision.capability->'connector'->>'name'=$4
+		    AND decision.capability->>'name'=$5
+		    AND decision.status <> 'denied'
+		    AND decision.created_at >= admission_clock.observed_at - ($6::int * interval '1 second')
+		    AND (SELECT operations FROM capability_quota) >= $7::int
+		  ORDER BY decision.created_at DESC, decision.decision_id ASC
+		  OFFSET ($7::int - 1)
+		  LIMIT 1
+		)
+		SELECT actor_quota.operations, actor_quota.cost_micros, capability_quota.operations, capability_retry.retry_at
+		FROM actor_quota CROSS JOIN capability_quota LEFT JOIN capability_retry ON TRUE`,
+		input.WorkspaceID, input.Actor.ID, input.Policy.QuotaWindowSeconds,
+		input.Capability.Ref.Connector.Name, input.Capability.Ref.Name, 60, input.Capability.RateLimitPerMinute,
+	).Scan(&quotaOperations, &quotaCost, &capabilityOperations, &capabilityRetryAt); err != nil {
 		return AdmissionResult{}, fmt.Errorf("read admission quota: %w", err)
 	}
 	input.QuotaOperations, input.QuotaCostMicros = quotaOperations, quotaCost
+	input.CapabilityOperationsInWindow = capabilityOperations
+	if capabilityOperations >= input.Capability.RateLimitPerMinute {
+		// Do not persist a rate denial that could be interpreted as immediately
+		// retryable when the authoritative window cannot provide a deadline.
+		if capabilityRetryAt == nil {
+			return AdmissionResult{}, fmt.Errorf("capability rate window is full but has no retry deadline")
+		}
+		input.CapabilityRetryAt = capabilityRetryAt
+	}
 	evaluation, err := policyruntime.Evaluate(input)
 	if err != nil {
 		return AdmissionResult{}, err
@@ -491,12 +677,12 @@ func (s *AdmissionStore) Admit(ctx context.Context, input contracts.AdmissionInp
 		INSERT INTO fornix.operation_admission_decisions(
 		 workspace_id,decision_id,operation_id,operation_hash,request_id,idempotency_key,
 		 actor,capability,target,effect_class,policy_id,policy_version,policy_hash,
-		 policy_snapshot,input_hash,decision_hash,status,reason_code,approval_id,cost_micros)
-		VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10,$11,$12,$13,$14::jsonb,$15,$16,$17,$18,$19,$20)
+		 policy_snapshot,input_hash,decision_hash,status,reason_code,approval_id,cost_micros,retry_at)
+		VALUES($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9::jsonb,$10,$11,$12,$13,$14::jsonb,$15,$16,$17,$18,$19,$20,$21)
 		ON CONFLICT DO NOTHING`,
 		decision.WorkspaceID, decision.ID, decision.OperationID, decision.OperationHash, decision.RequestID, decision.IdempotencyKey,
 		mustJSON(decision.Actor), capabilityJSON, targetJSON, decision.Effect, decision.PolicyID, decision.PolicyVersion, decision.PolicyHash,
-		policyJSON, decision.InputHash, decision.DecisionHash, decision.Status, decision.ReasonCode, decision.ApprovalID, decision.CostMicros)
+		policyJSON, decision.InputHash, decision.DecisionHash, decision.Status, decision.ReasonCode, decision.ApprovalID, decision.CostMicros, decision.RetryAt)
 	if err != nil {
 		return AdmissionResult{}, fmt.Errorf("insert operation admission: %w", err)
 	}
@@ -539,10 +725,16 @@ func (s *AdmissionStore) Admit(ctx context.Context, input contracts.AdmissionInp
 			return AdmissionResult{}, fmt.Errorf("insert operation approval history: %w", err)
 		}
 	}
+	// Bind the decision to the exact trusted capability/policy snapshot and
+	// any verified credential/task authority before publishing the event. The
+	// link and the admission decision therefore commit or roll back together.
+	if _, _, err := appendAuthorityLinkTx(ctx, tx, authorityAdmissionLink(input, decision)); err != nil {
+		return AdmissionResult{}, fmt.Errorf("append admission authority link: %w", err)
+	}
 	event, err := admissionEvent("operation.admission_decided", decision.WorkspaceID, decision.Actor, "admission:"+input.IdempotencyKey, map[string]any{
 		"decision_id": decision.ID, "operation_id": decision.OperationID, "operation_hash": decision.OperationHash,
 		"decision_hash": decision.DecisionHash, "input_hash": decision.InputHash, "status": decision.Status,
-		"reason_code": decision.ReasonCode, "effect": decision.Effect, "policy_id": decision.PolicyID,
+		"reason_code": decision.ReasonCode, "retry_at": decision.RetryAt, "effect": decision.Effect, "policy_id": decision.PolicyID,
 		"policy_version": decision.PolicyVersion, "policy_hash": decision.PolicyHash, "approval_id": decision.ApprovalID,
 	})
 	if err != nil {
@@ -677,17 +869,37 @@ func (s *AdmissionStore) UpdateEffect(ctx context.Context, update contracts.Exte
 	if s == nil || s.pool == nil || s.events == nil {
 		return EffectStateResult{}, fmt.Errorf("admission store is not configured")
 	}
-	if err := update.Normalize(); err != nil {
-		return EffectStateResult{}, err
-	}
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return EffectStateResult{}, err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := s.UpdateEffectTx(ctx, tx, update)
+	if err != nil {
+		return EffectStateResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return EffectStateResult{}, err
+	}
+	return result, nil
+}
+
+// UpdateEffectTx records a fenced external state transition in a caller-owned
+// transaction. It is the composition seam used by domain-specific recovery
+// coordinators that must commit the generic effect, specialized ledger,
+// domain-effect link, audit record, and event atomically. The caller owns
+// commit/rollback; this method never commits.
+func (s *AdmissionStore) UpdateEffectTx(ctx context.Context, tx pgx.Tx, update contracts.ExternalEffectUpdate) (EffectStateResult, error) {
+	if s == nil || tx == nil || s.events == nil {
+		return EffectStateResult{}, fmt.Errorf("admission transaction is not configured")
+	}
+	if err := update.Normalize(); err != nil {
+		return EffectStateResult{}, err
+	}
 	if err := setWorkspaceContext(ctx, tx, update.WorkspaceID); err != nil {
 		return EffectStateResult{}, err
 	}
+	var err error
 	var operationID string
 	if err := tx.QueryRow(ctx, `SELECT operation_id FROM fornix.operation_effects WHERE workspace_id=$1 AND effect_id=$2 FOR SHARE`, update.WorkspaceID, update.EffectID).Scan(&operationID); errors.Is(err, pgx.ErrNoRows) {
 		return EffectStateResult{}, ErrAdmissionNotFound
@@ -710,9 +922,6 @@ func (s *AdmissionStore) UpdateEffect(ctx context.Context, update contracts.Exte
 		state, readErr := readEffectState(ctx, tx, update.WorkspaceID, update.EffectID)
 		if readErr != nil {
 			return EffectStateResult{}, readErr
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return EffectStateResult{}, err
 		}
 		return EffectStateResult{State: state, Duplicate: true}, nil
 	}
@@ -744,6 +953,18 @@ func (s *AdmissionStore) UpdateEffect(ctx context.Context, update contracts.Exte
 	}
 	state, err = readEffectState(ctx, tx, update.WorkspaceID, update.EffectID, true)
 	if err != nil {
+		return EffectStateResult{}, err
+	}
+	// A concurrent delivery can have missed the first idempotency read while
+	// another transaction was still committing. Re-check after locking the
+	// effect projection so it cannot attempt an invalid same-state transition
+	// merely because the first delivery won the race.
+	if err := tx.QueryRow(ctx, `SELECT command_hash FROM fornix.operation_effect_transitions WHERE workspace_id=$1 AND effect_id=$2 AND idempotency_key=$3`, update.WorkspaceID, update.EffectID, update.IdempotencyKey).Scan(&priorHash); err == nil {
+		if priorHash != commandHash {
+			return EffectStateResult{}, ErrAdmissionConflict
+		}
+		return EffectStateResult{State: state, Duplicate: true}, nil
+	} else if !errors.Is(err, pgx.ErrNoRows) {
 		return EffectStateResult{}, err
 	}
 	// An effect lease is a reconciliation authority. It cannot turn an
@@ -783,9 +1004,6 @@ func (s *AdmissionStore) UpdateEffect(ctx context.Context, update contracts.Exte
 		if err != nil {
 			return EffectStateResult{}, err
 		}
-		if err := tx.Commit(ctx); err != nil {
-			return EffectStateResult{}, err
-		}
 		return EffectStateResult{State: state, Duplicate: true}, nil
 	}
 	updated, err := tx.Exec(ctx, `
@@ -821,9 +1039,6 @@ func (s *AdmissionStore) UpdateEffect(ctx context.Context, update contracts.Exte
 	if err != nil {
 		return EffectStateResult{}, err
 	}
-	if err := tx.Commit(ctx); err != nil {
-		return EffectStateResult{}, err
-	}
 	return EffectStateResult{State: state}, nil
 }
 
@@ -831,7 +1046,16 @@ func validateAdmissionOperation(input contracts.AdmissionInput, operation Operat
 	if operation.OperationHash != input.OperationHash || operation.WorkspaceID != input.WorkspaceID || operation.Request.Actor.ID != input.Actor.ID || operation.Request.Actor.WorkspaceID != input.Actor.WorkspaceID {
 		return ErrAdmissionOperation
 	}
-	if operation.Request.Capability.StableHash() != input.Capability.Ref.StableHash() || operation.Request.Target.StableHash() != input.Target.StableHash() {
+	capabilityMatches := operation.Request.Capability.StableHash() == input.Capability.Ref.StableHash() && operation.Request.Target.StableHash() == input.Target.StableHash()
+	if !capabilityMatches && operation.Plan != nil {
+		for _, step := range operation.Plan.Steps {
+			if step.Capability.StableHash() == input.Capability.Ref.StableHash() && step.Target.StableHash() == input.Target.StableHash() {
+				capabilityMatches = true
+				break
+			}
+		}
+	}
+	if !capabilityMatches {
 		return ErrAdmissionOperation
 	}
 	if (operation.Request.Task != nil) != input.TaskBound {
@@ -862,13 +1086,19 @@ func approvalPtr(value contracts.OperationApprovalRequest) *contracts.OperationA
 func readAdmissionDecisionByKey(ctx context.Context, queryer interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }, workspaceID, key string) (contracts.AdmissionDecision, error) {
-	return readAdmissionDecisionQuery(ctx, queryer, `SELECT decision_id,workspace_id,operation_id,operation_hash,request_id,idempotency_key,actor,capability,target,effect_class,policy_id,policy_version,policy_hash,input_hash,decision_hash,status,reason_code,approval_id,cost_micros,created_at FROM fornix.operation_admission_decisions WHERE workspace_id=$1 AND idempotency_key=$2 FOR UPDATE`, workspaceID, key)
+	return readAdmissionDecisionQuery(ctx, queryer, `SELECT decision_id,workspace_id,operation_id,operation_hash,request_id,idempotency_key,actor,capability,target,effect_class,policy_id,policy_version,policy_hash,input_hash,decision_hash,status,reason_code,approval_id,cost_micros,retry_at,created_at FROM fornix.operation_admission_decisions WHERE workspace_id=$1 AND idempotency_key=$2 FOR UPDATE`, workspaceID, key)
+}
+
+func readAdmissionDecisionByIdempotencyKey(ctx context.Context, queryer interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}, workspaceID, key string) (contracts.AdmissionDecision, error) {
+	return readAdmissionDecisionQuery(ctx, queryer, `SELECT decision_id,workspace_id,operation_id,operation_hash,request_id,idempotency_key,actor,capability,target,effect_class,policy_id,policy_version,policy_hash,input_hash,decision_hash,status,reason_code,approval_id,cost_micros,retry_at,created_at FROM fornix.operation_admission_decisions WHERE workspace_id=$1 AND idempotency_key=$2`, workspaceID, key)
 }
 
 func readAdmissionDecision(ctx context.Context, queryer interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }, workspaceID, id string) (contracts.AdmissionDecision, error) {
-	return readAdmissionDecisionQuery(ctx, queryer, `SELECT decision_id,workspace_id,operation_id,operation_hash,request_id,idempotency_key,actor,capability,target,effect_class,policy_id,policy_version,policy_hash,input_hash,decision_hash,status,reason_code,approval_id,cost_micros,created_at FROM fornix.operation_admission_decisions WHERE workspace_id=$1 AND decision_id=$2`, workspaceID, id)
+	return readAdmissionDecisionQuery(ctx, queryer, `SELECT decision_id,workspace_id,operation_id,operation_hash,request_id,idempotency_key,actor,capability,target,effect_class,policy_id,policy_version,policy_hash,input_hash,decision_hash,status,reason_code,approval_id,cost_micros,retry_at,created_at FROM fornix.operation_admission_decisions WHERE workspace_id=$1 AND decision_id=$2`, workspaceID, id)
 }
 
 func readAdmissionDecisionQuery(ctx context.Context, queryer interface {
@@ -876,7 +1106,7 @@ func readAdmissionDecisionQuery(ctx context.Context, queryer interface {
 }, query string, args ...any) (contracts.AdmissionDecision, error) {
 	var value contracts.AdmissionDecision
 	var actorJSON, capabilityJSON, targetJSON []byte
-	if err := queryer.QueryRow(ctx, query, args...).Scan(&value.ID, &value.WorkspaceID, &value.OperationID, &value.OperationHash, &value.RequestID, &value.IdempotencyKey, &actorJSON, &capabilityJSON, &targetJSON, &value.Effect, &value.PolicyID, &value.PolicyVersion, &value.PolicyHash, &value.InputHash, &value.DecisionHash, &value.Status, &value.ReasonCode, &value.ApprovalID, &value.CostMicros, &value.CreatedAt); err != nil {
+	if err := queryer.QueryRow(ctx, query, args...).Scan(&value.ID, &value.WorkspaceID, &value.OperationID, &value.OperationHash, &value.RequestID, &value.IdempotencyKey, &actorJSON, &capabilityJSON, &targetJSON, &value.Effect, &value.PolicyID, &value.PolicyVersion, &value.PolicyHash, &value.InputHash, &value.DecisionHash, &value.Status, &value.ReasonCode, &value.ApprovalID, &value.CostMicros, &value.RetryAt, &value.CreatedAt); err != nil {
 		return contracts.AdmissionDecision{}, err
 	}
 	if err := json.Unmarshal(actorJSON, &value.Actor); err != nil {

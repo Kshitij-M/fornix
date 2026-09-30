@@ -37,6 +37,15 @@ sha256() {
 	shasum -a 256 "$1" | awk '{print $1}'
 }
 
+hash_text() {
+	if command -v sha256sum >/dev/null 2>&1; then
+		printf '%s' "$1" | sha256sum | awk '{print $1}'
+		return
+	fi
+	command -v shasum >/dev/null 2>&1 || fail 'sha256sum or shasum is required'
+	printf '%s' "$1" | shasum -a 256 | awk '{print $1}'
+}
+
 # This fingerprint intentionally contains only counts, migration version, and
 # hashes. It never emits prompts, credentials, raw payloads, or artifact bytes.
 fingerprint_sql=$(cat <<'SQL'
@@ -49,7 +58,13 @@ SELECT
   (SELECT count(*)::text FROM fornix.artifacts),
   (SELECT md5(COALESCE(string_agg(workspace_id || ':' || content_hash, E'\n' ORDER BY workspace_id, content_hash), '')) FROM fornix.artifacts),
   (SELECT count(*)::text FROM fornix.operations),
-  (SELECT md5(COALESCE(string_agg(workspace_id || ':' || id || ':' || operation_hash, E'\n' ORDER BY workspace_id, id), '')) FROM fornix.operations);
+  (SELECT md5(COALESCE(string_agg(workspace_id || ':' || id || ':' || operation_hash, E'\n' ORDER BY workspace_id, id), '')) FROM fornix.operations),
+  (SELECT count(*)::text FROM fornix.workspace_federation_peers),
+  (SELECT md5(COALESCE(string_agg(workspace_id || ':' || peer_id || ':' || config_hash, E'\n' ORDER BY workspace_id, peer_id), '')) FROM fornix.workspace_federation_peers),
+  (SELECT count(*)::text FROM fornix.workspace_federation_poll_attempts),
+  (SELECT md5(COALESCE(string_agg(workspace_id || ':' || id || ':' || request_hash || ':' || state, E'\n' ORDER BY workspace_id, id), '')) FROM fornix.workspace_federation_poll_attempts),
+  (SELECT count(*)::text FROM fornix.federation_retention_tombstones),
+  (SELECT md5(COALESCE(string_agg(workspace_id || ':' || id || ':' || source_hash, E'\n' ORDER BY workspace_id, id), '')) FROM fornix.federation_retention_tombstones);
 SQL
 )
 
@@ -72,4 +87,6 @@ printf 'backup_bytes=%s\n' "$backup_bytes"
 printf 'backup_seconds=%s\n' "$((backup_finished_at - started_at))"
 printf 'restore_seconds=%s\n' "$((restore_finished_at - backup_finished_at))"
 printf 'source_restore_fingerprint=%s\n' "$source_fingerprint"
-printf '%s\n' 'replay_input=append-only control history and operation hashes preserved'
+replay_identity_hash=$(hash_text "$restore_fingerprint")
+printf 'replay_identity_hash=%s\n' "$replay_identity_hash"
+printf '%s\n' 'replay_input=append-only control history, operation hashes, federation authority hashes, and retention tombstone hashes preserved'

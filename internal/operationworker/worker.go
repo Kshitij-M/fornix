@@ -75,11 +75,15 @@ type BatchResult struct {
 // workspace is rejected so that a process cannot accidentally become a global
 // worker without a scheduler policy.
 type Worker struct {
-	Store             *store.OperationStore
-	Handler           Handler
-	OwnerID           string
-	Limit             int
-	MaxActive         int
+	Store     *store.OperationStore
+	Handler   Handler
+	OwnerID   string
+	Limit     int
+	MaxActive int
+	// ReadOnlyOnly asks the Postgres claim to exclude unplanned, unknown, and
+	// effectful operation plans. It is the required mode for a generic server
+	// worker; adapter-owned workers may deliberately leave it false.
+	ReadOnlyOnly      bool
 	LeaseTTL          time.Duration
 	HeartbeatInterval time.Duration
 	PollInterval      time.Duration
@@ -145,7 +149,7 @@ func (w *Worker) RunOnce(ctx context.Context, workspaceID string) (BatchResult, 
 		return BatchResult{}, fmt.Errorf("%w: workspace_id is required", ErrWorkerNotConfigured)
 	}
 	claims, err := w.Store.ClaimReadyWithOptions(ctx, workspaceID, w.OwnerID, store.OperationClaimOptions{
-		Limit: w.limit(), TTL: w.leaseTTL(), MaxActive: w.MaxActive,
+		Limit: w.limit(), TTL: w.leaseTTL(), MaxActive: w.MaxActive, ReadOnlyOnly: w.ReadOnlyOnly,
 	})
 	if err != nil {
 		return BatchResult{}, fmt.Errorf("claim generic operations: %w", err)

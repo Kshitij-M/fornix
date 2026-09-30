@@ -1,95 +1,126 @@
-package connector_test
+package connector
 
 import (
+	"context"
 	"errors"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
+	"time"
 
-	"github.com/omaveda/fornix/internal/connector"
+	"github.com/omaveda/fornix/internal/testutil"
 )
 
-func TestDestinationPolicyAuthorizesOnlyConfiguredOriginSurface(t *testing.T) {
-	policy := connector.DestinationPolicy{
-		AllowedSchemes:      []string{"HTTPS", "https"},
-		AllowedHosts:        []string{"api.example.com"},
-		AllowedPathPrefixes: []string{"/v1", "/v1"},
+func testEgressPolicy(host string, private, redirects bool) EgressPolicy {
+	maxRedirects := 0
+	if redirects {
+		maxRedirects = 2
 	}
-	if err := policy.Normalize(); err != nil {
-		t.Fatalf("normalize policy: %v", err)
-	}
-
-	for _, target := range []string{
-		"https://api.example.com/v1/items",
-		"https://child.api.example.com/v1/items",
-		"https://api.example.com/v1",
-	} {
-		parsed, err := url.Parse(target)
-		if err != nil {
-			t.Fatalf("parse %s: %v", target, err)
-		}
-		if err := policy.AuthorizeURL(parsed); err != nil {
-			t.Errorf("expected %s to be authorized: %v", target, err)
-		}
-	}
-
-	for _, test := range []struct {
-		name   string
-		target string
-		want   error
-	}{
-		{name: "scheme", target: "http://api.example.com/v1/items", want: connector.ErrDestinationScheme},
-		{name: "host", target: "https://other.example.com/v1/items", want: connector.ErrDestinationHost},
-		{name: "path", target: "https://api.example.com/admin", want: connector.ErrDestinationPath},
-		{name: "credentials", target: "https://user:pass@api.example.com/v1/items", want: connector.ErrDestinationHost},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			parsed, err := url.Parse(test.target)
-			if err != nil {
-				t.Fatalf("parse %s: %v", test.target, err)
-			}
-			if err := policy.AuthorizeURL(parsed); !errors.Is(err, test.want) {
-				t.Fatalf("expected %v, got %v", test.want, err)
-			}
-		})
+	return EgressPolicy{
+		Destination: DestinationPolicy{
+			AllowedSchemes:       []string{"http"},
+			AllowedHosts:         []string{host},
+			AllowedPathPrefixes:  []string{"/"},
+			AllowPrivateNetworks: private,
+			AllowRedirects:       redirects,
+			MaxRedirects:         maxRedirects,
+		},
+		MaxRequestBytes:  3,
+		MaxResponseBytes: 3,
+		Timeout:          time.Second,
 	}
 }
 
-func TestDestinationPolicyRejectsUnboundedConfiguration(t *testing.T) {
-	tests := []connector.DestinationPolicy{
-		{AllowedSchemes: []string{"file"}, AllowedHosts: []string{"example.com"}},
-		{AllowedSchemes: []string{"https"}},
-		{AllowedSchemes: []string{"https"}, AllowedHosts: []string{"example.com"}, AllowedPathPrefixes: []string{"relative"}},
-		{AllowedSchemes: []string{"https"}, AllowedHosts: []string{"example.com"}, MaxRedirects: 11},
-	}
-	for index, policy := range tests {
-		if err := policy.Normalize(); !errors.Is(err, connector.ErrDestinationPolicy) {
-			t.Errorf("case %d: expected policy error, got %v", index, err)
+func TestEgressClientEnforcesRequestAndResponseBudgets(t *testing.T) {
+	testutil.RequireLocalHTTP(t)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path == "/request" {
+			_, _ = io.ReadAll(request.Body)
+			return
 		}
-	}
-}
-
-func TestDestinationPolicyStableHashIsOrderIndependent(t *testing.T) {
-	first := connector.DestinationPolicy{
-		AllowedSchemes:      []string{"https", "http"},
-		AllowedHosts:        []string{"b.example.com", "a.example.com"},
-		AllowedPathPrefixes: []string{"/v2", "/v1"},
-		AllowRedirects:      true,
-		MaxRedirects:        2,
-	}
-	second := connector.DestinationPolicy{
-		AllowedSchemes:      []string{"http", "https"},
-		AllowedHosts:        []string{"a.example.com", "b.example.com"},
-		AllowedPathPrefixes: []string{"/v1", "/v2"},
-		AllowRedirects:      true,
-		MaxRedirects:        2,
-	}
-	if err := first.Normalize(); err != nil {
+		_, _ = writer.Write([]byte("1234"))
+	}))
+	defer server.Close()
+	parsed, err := url.Parse(server.URL)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := second.Normalize(); err != nil {
+	client, err := NewEgressClient(testEgressPolicy(parsed.Hostname(), true, false), nil, EgressOptions{})
+	if err != nil {
 		t.Fatal(err)
 	}
-	if first.StableHash() != second.StableHash() {
-		t.Fatalf("expected equivalent policies to have the same hash: %s != %s", first.StableHash(), second.StableHash())
+
+	request, err := http.NewRequest(http.MethodPost, server.URL+"/request", strings.NewReader("1234"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Do(request); !errors.Is(err, ErrEgressRequest) {
+		t.Fatalf("oversized request error = %v, want ErrEgressRequest", err)
+	}
+
+	response, err := client.Get(server.URL + "/response")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer response.Body.Close()
+	if _, err := io.ReadAll(response.Body); !errors.Is(err, ErrEgressResponse) {
+		t.Fatalf("oversized response error = %v, want ErrEgressResponse", err)
 	}
 }
+
+func TestEgressClientRejectsPrivateDNSResolution(t *testing.T) {
+	client, err := NewEgressClient(testEgressPolicy("public.example.test", false, false), nil, EgressOptions{
+		Resolver: IPResolverFunc(func(context.Context, string, string) ([]net.IP, error) {
+			return []net.IP{net.ParseIP("127.0.0.1")}, nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodGet, "http://public.example.test/", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Do(request); !errors.Is(err, ErrDestinationHost) {
+		t.Fatalf("private DNS error = %v, want ErrDestinationHost", err)
+	}
+}
+
+func TestEgressClientRejectsRedirectsOutsidePolicy(t *testing.T) {
+	testutil.RequireLocalHTTP(t)
+	target := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		_, _ = writer.Write([]byte("target"))
+	}))
+	defer target.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		http.Redirect(writer, request, target.URL, http.StatusFound)
+	}))
+	defer source.Close()
+	host, err := url.Parse(source.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := NewEgressClient(testEgressPolicy(host.Hostname(), true, false), nil, EgressOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Get(source.URL); !errors.Is(err, ErrEgressRedirect) {
+		t.Fatalf("redirect error = %v, want ErrEgressRedirect", err)
+	}
+}
+
+func TestEgressClientRejectsUninspectableTransport(t *testing.T) {
+	policy := testEgressPolicy("example.test", false, false)
+	_, err := NewEgressClient(policy, &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) { return nil, nil })}, EgressOptions{})
+	if !errors.Is(err, ErrEgressTransport) {
+		t.Fatalf("custom transport error = %v, want ErrEgressTransport", err)
+	}
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) { return f(request) }

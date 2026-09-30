@@ -1,8 +1,9 @@
 # Loop 40 completion: Postgres workspace-isolation foundation
 
 Status: implemented as a generic-authority defense-in-depth foundation;
-production role separation and complete legacy-table policy coverage remain
-deployment gates.
+Loop 45 adds the role-separated qualification path and all-current-table
+policy coverage, while complete application-context qualification and
+credential authority remain deployment gates.
 
 Delivered:
 
@@ -15,6 +16,9 @@ Delivered:
   fail-closed reads, same-workspace writes, foreign-read invisibility, and
   foreign-write rejection without persisting fixtures;
 - `make qualification-workspace-isolation` and a redacted smoke entrypoint;
+- the Loop 45 migration and role-separated qualification path now cover every
+  current table carrying `workspace_id`, transfer ownership to a migration
+  role, verify a non-owner runtime role, and exercise scoped API-key lookup;
 - public deployment, cost, failure, acceptance, and limitation documentation.
 
 Measured local qualification:
@@ -29,7 +33,7 @@ Measured local qualification:
 - no model, tool, broker, or external network call is made by this slice.
 
 The result is intentionally narrower than a universal tenancy certification.
-The local development role still owns the tables, production must transfer
-ownership to a migration role and grant least privilege to the runtime role,
-and identity, retrieval, artifacts, tasks, and older compatibility surfaces
-still require staged policy coverage and adversarial qualification.
+Local development still uses an owner role. A deployment must run the
+qualification helper against its own PostgreSQL topology, complete the
+application-context matrix for every runtime path, and add credential-manager,
+pool-hygiene, backup, and adversarial qualification evidence.

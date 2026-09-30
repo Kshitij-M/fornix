@@ -11,9 +11,11 @@ import (
 	"github.com/omaveda/fornix/internal/adapters/sqlreadonly"
 	"github.com/omaveda/fornix/internal/connector"
 	"github.com/omaveda/fornix/internal/contracts"
+	"github.com/omaveda/fornix/internal/testutil"
 )
 
 func TestReferenceConnectorsPassSharedReadConformance(t *testing.T) {
+	testutil.RequireLocalHTTP(t)
 	workspace := "workspace-reference"
 	httpServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
@@ -32,26 +34,29 @@ func TestReferenceConnectorsPassSharedReadConformance(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	statement := "SELECT id FROM public.items"
-	sqlPayload := sqlreadonly.Payload{Statement: statement}
+	sqlPayload := sqlreadonly.Payload{SchemaVersion: 2, Schema: "public", Table: "items", Columns: []string{"id"}}
 	sqlPayloadBytes, _ := json.Marshal(sqlPayload)
 	sqlHash := connector.HashPayload(sqlPayloadBytes)
 	if err := payloads.Put(workspace, sqlHash, sqlPayloadBytes); err != nil {
 		t.Fatal(err)
 	}
-	describePayload := sqlreadonly.Payload{Schema: "public", Table: "items"}
+	describePayload := sqlreadonly.Payload{SchemaVersion: 2, Schema: "public", Table: "items"}
 	describePayloadBytes, _ := json.Marshal(describePayload)
 	describeHash := connector.HashPayload(describePayloadBytes)
 	if err := payloads.Put(workspace, describeHash, describePayloadBytes); err != nil {
 		t.Fatal(err)
 	}
-	explainPayload := sqlreadonly.Payload{Statement: statement}
+	explainPayload := sqlPayload
 	explainPayloadBytes, _ := json.Marshal(explainPayload)
 	explainHash := connector.HashPayload(explainPayloadBytes)
+	queryKey, err := sqlreadonly.QueryIdentityHash(sqlreadonly.QueryRequest{Schema: "public", Table: "items", Columns: []string{"id"}, Limit: sqlreadonly.DefaultMaxRows, MaxRows: sqlreadonly.DefaultMaxRows, MaxBytes: sqlreadonly.DefaultMaxResultBytes, Timeout: sqlreadonly.DefaultTimeout})
+	if err != nil {
+		t.Fatal(err)
+	}
 	sqlAdapter, err := sqlreadonly.NewConnector(sqlreadonly.Binding{ID: "reference_sql", WorkspaceID: workspace, DatabaseRef: "reference", AllowedSchemas: []string{"public"}, AllowedTables: []string{"public.items"}}, payloads.Resolve, &sqlreadonly.FixtureDatabase{
-		QueryResults:   map[string]sqlreadonly.QueryResult{connector.HashPayload([]byte(statement)): {Columns: []string{"id"}, Rows: [][]string{{"one"}}, Bytes: 3}},
-		DescribeResult: map[string]sqlreadonly.QueryResult{"public.items": {Columns: []string{"column_name", "data_type"}, Rows: [][]string{{"id", "text"}}, Bytes: 10}},
-		ExplainResults: map[string]sqlreadonly.QueryResult{connector.HashPayload([]byte(statement)): {Columns: []string{"QUERY PLAN"}, Rows: [][]string{{"Index Scan"}}, Bytes: 10}},
+		QueryResults:   map[string]sqlreadonly.QueryResult{queryKey: {Columns: []string{"id"}, Rows: [][]string{{"one"}}, Bytes: 3}},
+		DescribeResult: map[string]sqlreadonly.QueryResult{"public.items": {Columns: []string{"column_name", "data_type"}, Rows: [][]string{{"id", "text"}}, Bytes: 6}},
+		ExplainResults: map[string]sqlreadonly.QueryResult{queryKey: {Columns: []string{"QUERY PLAN"}, Rows: [][]string{{"Index Scan"}}, Bytes: 10}},
 	})
 	if err != nil {
 		t.Fatal(err)

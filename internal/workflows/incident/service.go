@@ -14,6 +14,7 @@ import (
 	"github.com/omaveda/fornix/internal/adapters/fakeincident"
 	"github.com/omaveda/fornix/internal/connector"
 	"github.com/omaveda/fornix/internal/contracts"
+	"github.com/omaveda/fornix/internal/effectdispatch"
 	"github.com/omaveda/fornix/internal/model"
 	"github.com/omaveda/fornix/internal/store"
 	workflowruntime "github.com/omaveda/fornix/internal/workflow"
@@ -36,18 +37,42 @@ var (
 // second scheduler or lease table; operation-linked workflow leases remain
 // the only worker ownership mechanism.
 type Service struct {
-	Incidents *store.IncidentStore
-	Workflows *store.WorkflowStore
-	Evidence  *store.EvidenceStore
-	Artifacts *store.ArtifactStore
-	Receipts  *store.WorkReceiptStore
-	Registry  *connector.Registry
-	Model     *model.Gateway
+	Incidents  *store.IncidentStore
+	Workflows  *store.WorkflowStore
+	Evidence   *store.EvidenceStore
+	Artifacts  *store.ArtifactStore
+	Receipts   *store.WorkReceiptStore
+	Registry   *connector.Registry
+	Model      *model.Gateway
+	Operations *store.OperationStore
+	Admission  *store.AdmissionStore
+	Dispatcher *effectdispatch.Dispatcher
+	Connector  *connector.Executor
 }
 
 // NewService creates the fake-first universal incident workflow service.
 func NewService(incidents *store.IncidentStore, workflows *store.WorkflowStore, evidence *store.EvidenceStore, artifacts *store.ArtifactStore, receipts *store.WorkReceiptStore, registry *connector.Registry, gateway *model.Gateway) *Service {
 	return &Service{Incidents: incidents, Workflows: workflows, Evidence: evidence, Artifacts: artifacts, Receipts: receipts, Registry: registry, Model: gateway}
+}
+
+// SetEffectDispatcher attaches the shared durable effect boundary to a
+// workflow service without changing the public constructor used by existing
+// integrations. A nil dispatcher keeps deterministic offline tests on the
+// legacy read-only path; production composition supplies all three stores.
+func (s *Service) SetEffectDispatcher(operations *store.OperationStore, admission *store.AdmissionStore, dispatcher *effectdispatch.Dispatcher) {
+	if s == nil {
+		return
+	}
+	s.Operations, s.Admission, s.Dispatcher = operations, admission, dispatcher
+}
+
+// SetConnectorExecutor supplies the same registered adapter executor used by
+// the HTTP operation surface. Sharing it keeps approval, authority, retry,
+// and schema checks identical across workflow and API entry points.
+func (s *Service) SetConnectorExecutor(executor *connector.Executor) {
+	if s != nil {
+		s.Connector = executor
+	}
 }
 
 // Start creates or resumes the deterministic incident workflow. The initial
@@ -426,6 +451,14 @@ func (s *Service) finalizeReceipt(ctx context.Context, run contracts.WorkflowRun
 type executor struct{ service *Service }
 
 func (e *executor) Execute(ctx context.Context, run contracts.WorkflowRun, state contracts.WorkflowStepState, step contracts.OperationStep) (contracts.WorkflowStepResult, error) {
+	return e.execute(ctx, run, state, step, store.WorkflowLease{}, "", 0)
+}
+
+func (e *executor) ExecuteWithLease(ctx context.Context, run contracts.WorkflowRun, state contracts.WorkflowStepState, step contracts.OperationStep, lease store.WorkflowLease, taskOwnerID string, taskFence uint64) (contracts.WorkflowStepResult, error) {
+	return e.execute(ctx, run, state, step, lease, taskOwnerID, taskFence)
+}
+
+func (e *executor) execute(ctx context.Context, run contracts.WorkflowRun, state contracts.WorkflowStepState, step contracts.OperationStep, lease store.WorkflowLease, taskOwnerID string, taskFence uint64) (contracts.WorkflowStepResult, error) {
 	if e == nil || e.service == nil {
 		return contracts.WorkflowStepResult{}, fmt.Errorf("incident executor is not configured")
 	}
@@ -439,13 +472,13 @@ func (e *executor) Execute(ctx context.Context, run contracts.WorkflowRun, state
 	case contracts.WorkflowStepValidation:
 		return e.report(ctx, run, state, step)
 	case contracts.WorkflowStepConnector:
-		return e.connector(ctx, run, state, step)
+		return e.connector(ctx, run, state, step, lease, taskOwnerID, taskFence)
 	default:
 		return contracts.WorkflowStepResult{}, fmt.Errorf("unsupported incident workflow step kind %q", step.Kind)
 	}
 }
 
-func (e *executor) connector(ctx context.Context, run contracts.WorkflowRun, state contracts.WorkflowStepState, step contracts.OperationStep) (contracts.WorkflowStepResult, error) {
+func (e *executor) connector(ctx context.Context, run contracts.WorkflowRun, state contracts.WorkflowStepState, step contracts.OperationStep, lease store.WorkflowLease, taskOwnerID string, taskFence uint64) (contracts.WorkflowStepResult, error) {
 	capability, ok := e.service.Registry.Lookup(step.Capability)
 	if !ok {
 		return contracts.WorkflowStepResult{}, connector.ErrCapabilityNotFound
@@ -467,6 +500,149 @@ func (e *executor) connector(ctx context.Context, run contracts.WorkflowRun, sta
 	operationPlan, err := admission.Capability.Plan(request)
 	if err != nil {
 		return contracts.WorkflowStepResult{}, err
+	}
+	operationRequest := request
+	if definition.Effect != contracts.EffectClassReadOnly && definition.Effect != contracts.EffectClassObservation {
+		if e.service.Dispatcher == nil || e.service.Operations == nil || e.service.Admission == nil {
+			return contracts.WorkflowStepResult{}, fmt.Errorf("durable incident effect authority is unavailable")
+		}
+		if !approved {
+			return contracts.WorkflowStepResult{}, ErrIncidentApprovalRequired
+		}
+		describer, ok := capability.(connector.EffectDescriber)
+		if !ok {
+			return contracts.WorkflowStepResult{}, fmt.Errorf("effectful incident capability does not describe a durable effect")
+		}
+		parent, getErr := e.service.Operations.Get(ctx, run.WorkspaceID, run.Operation.ID)
+		if getErr != nil {
+			return contracts.WorkflowStepResult{}, getErr
+		}
+		// The workflow operation is the durable parent authority; this request
+		// carries the remediation capability for the adapter invocation while
+		// retaining the parent operation identity for fencing and replay.
+		operationRequest = parent.Request
+		operationRequest.ID = parent.ID
+		operationRequest.RequestID = request.RequestID
+		operationRequest.IdempotencyKey = request.IdempotencyKey
+		operationRequest.CausationID = run.Operation.ID
+		operationRequest.CorrelationID = run.ID
+		operationRequest.Capability = step.Capability
+		operationRequest.Target = step.Target
+		operationRequest.InputHash = step.InputHash
+		operationRequest.Profile = step.Profile
+		if err := operationRequest.Normalize(); err != nil {
+			return contracts.WorkflowStepResult{}, err
+		}
+		effect, describeErr := describer.DescribeEffect(operationRequest)
+		if describeErr != nil {
+			return contracts.WorkflowStepResult{}, describeErr
+		}
+		policy := contracts.AdmissionPolicy{
+			WorkspaceID: run.WorkspaceID, PolicyID: "incident-workflow", Version: "1",
+			AllowedConnectors:    []contracts.ConnectorRef{definition.Ref.Connector},
+			AllowedResourceKinds: []string{step.Target.Kind}, AllowedActorIDs: []string{run.Actor.ID},
+			RequireTaskFence: parent.Request.Task != nil,
+		}
+		durableInput := contracts.AdmissionInput{
+			WorkspaceID: run.WorkspaceID, OperationID: run.Operation.ID, OperationHash: parent.OperationHash,
+			RequestID: request.RequestID, IdempotencyKey: "incident-admission-" + contracts.HashStrings(run.ID, step.ID, fmt.Sprint(state.Attempt))[:40],
+			Actor: run.Actor, Capability: definition, Target: step.Target, Policy: policy,
+			ConnectorAvailable: true, ResourceAllowed: true, EvidenceSatisfied: true,
+			TaskBound: parent.Request.Task != nil, TaskOwnerID: taskOwnerID, TaskFence: taskFence,
+			TaskFenceValid: parent.Request.Task == nil || (taskOwnerID != "" && taskFence != 0),
+		}
+		// The workflow's human approval is already durable in incident_approvals.
+		// Mirror that fact into generic approval state instead of trusting an
+		// unbound boolean in an adapter request.
+		preAdmission, preAdmissionErr := e.service.Admission.Admit(ctx, durableInput)
+		if preAdmissionErr != nil {
+			return contracts.WorkflowStepResult{}, preAdmissionErr
+		}
+		if preAdmission.Decision.Status == contracts.AdmissionAwaitingApproval {
+			if preAdmission.Approval == nil {
+				return contracts.WorkflowStepResult{}, fmt.Errorf("generic incident approval is missing")
+			}
+			approvalKey := "incident-generic-approval-" + contracts.HashStrings(run.ID, step.ID, fmt.Sprint(state.Attempt))[:40]
+			_, _, decideErr := e.service.Admission.DecideApproval(ctx, contracts.OperationApprovalDecision{
+				RequestID: approvalKey, IdempotencyKey: approvalKey, WorkspaceID: run.WorkspaceID,
+				ApprovalID: preAdmission.Approval.ID, Decision: contracts.ApprovalRequestApproved,
+				Actor:      contracts.ActorRef{ID: "incident-approval-controller", Kind: "system", WorkspaceID: run.WorkspaceID},
+				ReasonHash: contracts.HashStrings("incident-human-approval", run.ID, step.ID),
+			})
+			if decideErr != nil {
+				return contracts.WorkflowStepResult{}, decideErr
+			}
+		}
+		// The generic operation request stores the root capability; the
+		// authoritative remediation step is selected by StepID below.
+		if lease.OwnerID == "" || lease.Fence == 0 {
+			return contracts.WorkflowStepResult{}, store.ErrOperationLeaseMissing
+		}
+		parentTaskOwnerID, parentTaskFence := "", uint64(0)
+		if parent.Request.Task != nil {
+			parentTaskOwnerID, parentTaskFence = taskOwnerID, taskFence
+		}
+		dispatchResult, dispatchErr := e.service.Dispatcher.Dispatch(ctx, effectdispatch.Request{
+			Admission: durableInput, Operation: parent.Request, Definition: definition,
+			OwnerID: lease.OwnerID, Fence: lease.Fence, TaskOwnerID: parentTaskOwnerID, TaskFence: parentTaskFence,
+			StepID: step.ID, Attempt: state.Attempt, AttemptKey: request.IdempotencyKey, Effect: effect,
+			Authority:    contracts.EffectAuthority{SchemaCatalogHash: admission.SchemaCatalogHash, SchemaCatalogRevision: admission.SchemaCatalogRevision},
+			DomainLink:   &contracts.DomainEffectLink{DomainKind: contracts.DomainEffectKindIncidentStep, DomainID: incidentStepReference(run.ID, step.ID), DomainHash: operationRequest.StableHash(), LinkRole: contracts.DomainEffectLinkRolePrimary, IdempotencyKey: request.IdempotencyKey + ":domain-link"},
+			RecordResult: false,
+			Invoker: func(invokeCtx context.Context, authority contracts.EffectAuthority) (effectdispatch.InvocationResult, error) {
+				executor := e.service.Connector
+				if executor == nil {
+					executor = &connector.Executor{Registry: e.service.Registry}
+				}
+				outcome, executeErr := executor.Execute(invokeCtx, operationRequest, connector.AdmissionOptions{Principal: &principal, ApprovalGranted: true, Authority: &authority, RequireAuthority: true, ValidateAuthority: e.service.Operations.ValidateEffectAuthority})
+				if executeErr != nil {
+					return effectdispatch.InvocationResult{}, executeErr
+				}
+				return effectdispatch.InvocationResult{Result: outcome.Result}, nil
+			},
+		})
+		if dispatchErr != nil {
+			return contracts.WorkflowStepResult{}, dispatchErr
+		}
+		payload, _ := json.Marshal(map[string]any{"capability": step.Capability.Name, "target_hash": step.Target.StableHash(), "effect_id": dispatchResult.Effect.EffectID, "effect_state": dispatchResult.State.State})
+		evidence, evidenceErr := e.writeEvidence(ctx, run, step, payload, "connector")
+		if evidenceErr != nil {
+			return contracts.WorkflowStepResult{}, evidenceErr
+		}
+		return contracts.WorkflowStepResult{Status: contracts.WorkflowStepSucceeded, OutputHash: contracts.HashStrings("incident-effect", dispatchResult.Effect.EffectID, dispatchResult.State.ResponseHash), Evidence: []contracts.OperationEvidenceRef{evidence}, OutputBytes: int64(len(payload)), ExternalEffectStarted: true, Effect: &effect}, nil
+	}
+	if e.service.Operations == nil || e.service.Admission == nil {
+		return contracts.WorkflowStepResult{}, fmt.Errorf("durable incident connector admission is unavailable")
+	}
+	parent, err := e.service.Operations.Get(ctx, run.WorkspaceID, run.Operation.ID)
+	if err != nil {
+		return contracts.WorkflowStepResult{}, err
+	}
+	policy := contracts.AdmissionPolicy{
+		WorkspaceID: run.WorkspaceID, PolicyID: "incident-workflow", Version: "1",
+		AllowedConnectors:    []contracts.ConnectorRef{definition.Ref.Connector},
+		AllowedResourceKinds: []string{step.Target.Kind}, AllowedActorIDs: []string{run.Actor.ID},
+		RequireTaskFence: parent.Request.Task != nil,
+	}
+	durableInput := contracts.AdmissionInput{
+		WorkspaceID: run.WorkspaceID, OperationID: run.Operation.ID, OperationHash: parent.OperationHash,
+		RequestID: request.RequestID, IdempotencyKey: "incident-admission-" + contracts.HashStrings(run.ID, step.ID, fmt.Sprint(state.Attempt))[:40],
+		Actor: run.Actor, Capability: definition, Target: step.Target, Policy: policy,
+		SchemaCatalogHash: admission.SchemaCatalogHash, SchemaCatalogRevision: admission.SchemaCatalogRevision,
+		ConnectorAvailable: true, ResourceAllowed: true, EvidenceSatisfied: true,
+		TaskBound: parent.Request.Task != nil, TaskOwnerID: taskOwnerID, TaskFence: taskFence,
+		TaskFenceValid: parent.Request.Task == nil,
+	}
+	durableAdmission, err := e.service.Admission.Admit(ctx, durableInput)
+	if err != nil {
+		return contracts.WorkflowStepResult{}, err
+	}
+	if durableAdmission.Decision.Status != contracts.AdmissionAllowed {
+		retryable := durableAdmission.Decision.ReasonCode == contracts.AdmissionReasonRateLimited
+		return contracts.WorkflowStepResult{
+			Status:  contracts.WorkflowStepFailed,
+			Failure: &contracts.WorkflowFailure{Code: "admission_" + durableAdmission.Decision.ReasonCode, Retryable: retryable},
+		}, nil
 	}
 	operationResult, err := admission.Capability.Execute(ctx, request, operationPlan)
 	if err != nil {

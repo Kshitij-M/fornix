@@ -68,7 +68,7 @@ func TestOperationCapacityQualification(t *testing.T) {
 		"operation_effects", "operation_callbacks", "operation_leases",
 		"operation_links", "operation_results", "operation_admission_decisions",
 		"operation_approvals", "operation_approval_transitions", "operation_effect_state",
-		"operation_effect_transitions", "operation_effect_leases", "control_events",
+		"operation_effect_transitions", "operation_effect_leases", "operation_authority_links", "control_events",
 	}
 	if err := flushCapacityDatabaseStats(ctx, pool); err != nil {
 		t.Fatalf("flush capacity database stats before workload: %v", err)

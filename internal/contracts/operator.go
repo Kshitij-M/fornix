@@ -168,6 +168,7 @@ func (r WorkspaceBootstrapRequest) Normalize() (WorkspaceBootstrapRequest, error
 			PermissionAgentRead, PermissionModelInvoke, PermissionToolExecute,
 			PermissionToolApprove, PermissionEvaluationRead, PermissionEvaluationRun,
 			PermissionEvaluationWrite, PermissionReceiptRead, PermissionReceiptWrite,
+			PermissionQualificationRead, PermissionQualificationImport, PermissionQualificationAdmin,
 			PermissionSchedulerRun,
 		}
 	}

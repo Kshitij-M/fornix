@@ -90,24 +90,28 @@ func (r *OperationReference) Normalize() error {
 // field: an adapter must validate and canonicalize input before supplying its
 // hash and schema version.
 type OperationRequest struct {
-	SchemaVersion      int               `json:"schema_version,omitempty"`
-	ID                 string            `json:"id,omitempty"`
-	RequestID          string            `json:"request_id,omitempty"`
-	IdempotencyKey     string            `json:"idempotency_key"`
-	CausationID        string            `json:"causation_id,omitempty"`
-	CorrelationID      string            `json:"correlation_id,omitempty"`
-	WorkspaceID        string            `json:"workspace_id"`
-	Actor              ActorRef          `json:"actor"`
-	Task               *EntityRef        `json:"task,omitempty"`
-	Session            *EntityRef        `json:"session,omitempty"`
-	Capability         CapabilityRef     `json:"capability"`
-	Target             ResourceRef       `json:"target"`
-	InputType          string            `json:"input_type"`
-	InputSchemaVersion int               `json:"input_schema_version"`
-	InputSchemaHash    string            `json:"input_schema_hash"`
-	InputHash          string            `json:"input_hash"`
-	Profile            ExecutionProfile  `json:"profile"`
-	Metadata           map[string]string `json:"metadata,omitempty"`
+	SchemaVersion      int              `json:"schema_version,omitempty"`
+	ID                 string           `json:"id,omitempty"`
+	RequestID          string           `json:"request_id,omitempty"`
+	IdempotencyKey     string           `json:"idempotency_key"`
+	CausationID        string           `json:"causation_id,omitempty"`
+	CorrelationID      string           `json:"correlation_id,omitempty"`
+	WorkspaceID        string           `json:"workspace_id"`
+	Actor              ActorRef         `json:"actor"`
+	Task               *EntityRef       `json:"task,omitempty"`
+	Session            *EntityRef       `json:"session,omitempty"`
+	Capability         CapabilityRef    `json:"capability"`
+	Target             ResourceRef      `json:"target"`
+	InputType          string           `json:"input_type"`
+	InputSchemaVersion int              `json:"input_schema_version"`
+	InputSchemaHash    string           `json:"input_schema_hash"`
+	InputHash          string           `json:"input_hash"`
+	Profile            ExecutionProfile `json:"profile"`
+	// DeploymentAdmission is required by deployments that configure generic
+	// effect reservations to consume a current qualification decision. It is
+	// hash-only and is revalidated transactionally by the operation store.
+	DeploymentAdmission *DeploymentAdmissionReference `json:"deployment_admission,omitempty"`
+	Metadata            map[string]string             `json:"metadata,omitempty"`
 }
 
 // Normalize validates and canonicalizes the operation admission boundary.
@@ -184,6 +188,14 @@ func (r *OperationRequest) Normalize() error {
 	if err := r.Profile.Normalize(); err != nil {
 		return fmt.Errorf("operation profile: %w", err)
 	}
+	if r.DeploymentAdmission != nil {
+		if err := r.DeploymentAdmission.Normalize(); err != nil {
+			return fmt.Errorf("operation deployment_admission: %w", err)
+		}
+		if r.DeploymentAdmission.WorkspaceID != workspace {
+			return fmt.Errorf("operation deployment admission crosses workspace boundary")
+		}
+	}
 	if err := normalizeDomainMetadata(r.Metadata); err != nil {
 		return err
 	}
@@ -230,6 +242,10 @@ func cloneOperationRequest(r OperationRequest) OperationRequest {
 	if r.Session != nil {
 		session := *r.Session
 		r.Session = &session
+	}
+	if r.DeploymentAdmission != nil {
+		admission := *r.DeploymentAdmission
+		r.DeploymentAdmission = &admission
 	}
 	if r.Metadata != nil {
 		r.Metadata = make(map[string]string, len(r.Metadata))

@@ -40,19 +40,21 @@ const (
 )
 
 const (
-	ModelCallPending   = "pending"
-	ModelCallRunning   = "running"
-	ModelCallSucceeded = "succeeded"
-	ModelCallFailed    = "failed"
+	ModelCallPending          = "pending"
+	ModelCallRunning          = "running"
+	ModelCallSucceeded        = "succeeded"
+	ModelCallFailed           = "failed"
+	ModelCallRecoveryRequired = "recovery_required"
 )
 
 // ProviderRef identifies a provider route without carrying a credential.
 // Endpoint is a logical endpoint name or URL selected by configuration; the
 // provider owns how it resolves that value.
 type ProviderRef struct {
-	Provider string `json:"provider"`
-	Endpoint string `json:"endpoint,omitempty"`
-	Model    string `json:"model,omitempty"`
+	Provider         string                     `json:"provider"`
+	Endpoint         string                     `json:"endpoint,omitempty"`
+	Model            string                     `json:"model,omitempty"`
+	ExternalBoundary *ExternalBoundaryAuthority `json:"external_boundary,omitempty"`
 }
 
 // ModelEndpoint is the non-secret provider configuration used by a gateway.
@@ -81,12 +83,16 @@ type ModelMessage struct {
 }
 
 // ModelToolDefinition is the provider-neutral capability description sent to
-// a model. Parameters are JSON Schema and are treated as untrusted model
-// output at the loop boundary.
+// a model. In agent runs its description and parameters are derived from the
+// registered tool definition. DefinitionHash binds the persisted run catalog
+// to that definition and is internal metadata; provider adapters must not put
+// it on the provider wire. Parameters are guidance, not authorization, and
+// returned arguments remain untrusted at the loop boundary.
 type ModelToolDefinition struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	Parameters  json.RawMessage `json:"parameters,omitempty"`
+	Name           string          `json:"name"`
+	Description    string          `json:"description,omitempty"`
+	Parameters     json.RawMessage `json:"parameters,omitempty"`
+	DefinitionHash string          `json:"definition_hash,omitempty"`
 }
 
 // ModelToolCall is a structured model request to invoke one registered tool.
@@ -114,22 +120,27 @@ type ModelBudget struct {
 // ModelRequest is the immutable, provider-neutral input to one external
 // model operation. It deliberately contains no API key or other credential.
 type ModelRequest struct {
-	SchemaVersion  int                   `json:"schema_version"`
-	RequestID      string                `json:"request_id"`
-	IdempotencyKey string                `json:"idempotency_key"`
-	CausationID    string                `json:"causation_id,omitempty"`
-	CorrelationID  string                `json:"correlation_id,omitempty"`
-	WorkspaceID    string                `json:"workspace_id"`
-	Actor          ActorRef              `json:"actor,omitempty"`
-	Task           *EntityRef            `json:"task,omitempty"`
-	Session        *EntityRef            `json:"session,omitempty"`
-	Provider       ProviderRef           `json:"provider"`
-	Messages       []ModelMessage        `json:"messages,omitempty"`
-	Tools          []ModelToolDefinition `json:"tools,omitempty"`
-	Prompt         string                `json:"prompt,omitempty"`
-	Budget         ModelBudget           `json:"budget"`
-	RetryPolicy    RetryPolicy           `json:"retry_policy"`
-	Metadata       map[string]string     `json:"metadata,omitempty"`
+	SchemaVersion   int                   `json:"schema_version"`
+	RequestID       string                `json:"request_id"`
+	IdempotencyKey  string                `json:"idempotency_key"`
+	CausationID     string                `json:"causation_id,omitempty"`
+	CorrelationID   string                `json:"correlation_id,omitempty"`
+	WorkspaceID     string                `json:"workspace_id"`
+	Actor           ActorRef              `json:"actor,omitempty"`
+	Task            *EntityRef            `json:"task,omitempty"`
+	TaskOwnerID     string                `json:"task_owner_id,omitempty"`
+	TaskFence       uint64                `json:"task_fence,omitempty"`
+	AgentRun        *EntityRef            `json:"agent_run,omitempty"`
+	AgentRunOwnerID string                `json:"agent_run_owner_id,omitempty"`
+	AgentRunFence   uint64                `json:"agent_run_fence,omitempty"`
+	Session         *EntityRef            `json:"session,omitempty"`
+	Provider        ProviderRef           `json:"provider"`
+	Messages        []ModelMessage        `json:"messages,omitempty"`
+	Tools           []ModelToolDefinition `json:"tools,omitempty"`
+	Prompt          string                `json:"prompt,omitempty"`
+	Budget          ModelBudget           `json:"budget"`
+	RetryPolicy     RetryPolicy           `json:"retry_policy"`
+	Metadata        map[string]string     `json:"metadata,omitempty"`
 }
 
 // NewModelRequest creates a request with a safe identity. Callers that want
@@ -201,6 +212,27 @@ func (r *ModelRequest) Normalize() error {
 		if err := validateModelEntityRef(r.Task, "task", r.WorkspaceID); err != nil {
 			return err
 		}
+		if (strings.TrimSpace(r.TaskOwnerID) == "") != (r.TaskFence == 0) {
+			return fmt.Errorf("model task owner and fence must be supplied together")
+		}
+	}
+	r.TaskOwnerID = strings.TrimSpace(r.TaskOwnerID)
+	if r.Task == nil && (r.TaskOwnerID != "" || r.TaskFence != 0) {
+		return fmt.Errorf("model task fence requires a task")
+	}
+	r.AgentRunOwnerID = strings.TrimSpace(r.AgentRunOwnerID)
+	if r.AgentRun != nil {
+		if err := validateModelEntityRef(r.AgentRun, "agent_run", r.WorkspaceID); err != nil {
+			return err
+		}
+		if r.AgentRunOwnerID == "" || r.AgentRunFence == 0 {
+			return fmt.Errorf("model agent run owner and fence are required")
+		}
+		if r.AgentRunFence > uint64(1<<63-1) {
+			return fmt.Errorf("model agent run fence exceeds database range")
+		}
+	} else if r.AgentRunOwnerID != "" || r.AgentRunFence != 0 {
+		return fmt.Errorf("model agent run fence requires an agent run")
 	}
 	if r.Session != nil {
 		if err := validateModelEntityRef(r.Session, "session", r.WorkspaceID); err != nil {
@@ -291,8 +323,15 @@ func (c *ModelToolDefinition) Normalize() error {
 	}
 	c.Name = strings.TrimSpace(c.Name)
 	c.Description = strings.TrimSpace(c.Description)
+	c.DefinitionHash = strings.ToLower(strings.TrimSpace(c.DefinitionHash))
 	if c.Name == "" || len(c.Name) > 128 {
 		return fmt.Errorf("tool name is required and must be at most 128 characters")
+	}
+	if c.DefinitionHash != "" {
+		decoded, err := hex.DecodeString(c.DefinitionHash)
+		if err != nil || len(decoded) != sha256.Size {
+			return fmt.Errorf("tool definition_hash must be a SHA-256 hex digest")
+		}
 	}
 	if len(c.Parameters) == 0 {
 		c.Parameters = json.RawMessage(`{"type":"object"}`)
@@ -330,6 +369,12 @@ func normalizeModelProviderRef(ref *ProviderRef) error {
 	ref.Provider = strings.ToLower(strings.TrimSpace(ref.Provider))
 	ref.Endpoint = strings.TrimSpace(ref.Endpoint)
 	ref.Model = strings.TrimSpace(ref.Model)
+	ref.ExternalBoundary = CloneExternalBoundary(ref.ExternalBoundary)
+	if ref.ExternalBoundary != nil {
+		if err := ref.ExternalBoundary.Normalize(); err != nil {
+			return fmt.Errorf("provider external boundary: %w", err)
+		}
+	}
 	if ref.Provider == "" {
 		return fmt.Errorf("provider.provider is required")
 	}
@@ -630,6 +675,9 @@ type ModelCallRecord struct {
 	Metadata          map[string]string `json:"metadata,omitempty"`
 	Actor             ActorRef          `json:"actor,omitempty"`
 	Task              *EntityRef        `json:"task,omitempty"`
+	AgentRun          *EntityRef        `json:"agent_run,omitempty"`
+	AgentRunOwnerID   string            `json:"agent_run_owner_id,omitempty"`
+	AgentRunFence     uint64            `json:"agent_run_fence,omitempty"`
 	Session           *EntityRef        `json:"session,omitempty"`
 	Status            string            `json:"status"`
 	AttemptCount      int               `json:"attempt_count"`
@@ -692,8 +740,11 @@ func (r ModelRequest) EstimatedInputTokens() int {
 	return EstimateModelTokens(value)
 }
 
-// RequestHash is stable across generated request/correlation identities while
-// retaining the provider, prompt, messages, and all execution budgets.
+// RequestHash is stable across generated request/correlation and delivery
+// ownership identities while retaining the provider, prompt, messages, logical
+// task/run references, and all execution budgets. The owner/fence is an
+// authority proof, not logical input; changing it during takeover must not
+// turn a replay into a new provider request.
 func (r ModelRequest) RequestHash() (string, error) {
 	clone := r
 	if err := clone.Normalize(); err != nil {
@@ -703,6 +754,10 @@ func (r ModelRequest) RequestHash() (string, error) {
 	clone.IdempotencyKey = ""
 	clone.CausationID = ""
 	clone.CorrelationID = ""
+	clone.TaskOwnerID = ""
+	clone.TaskFence = 0
+	clone.AgentRunOwnerID = ""
+	clone.AgentRunFence = 0
 	b, err := json.Marshal(clone)
 	if err != nil {
 		return "", fmt.Errorf("hash model request: %w", err)

@@ -113,6 +113,32 @@ func TestAuthStoreAPIKeyLifecycleAndRBAC(t *testing.T) {
 	}
 }
 
+// TestAuthStoreAuthenticateWithRuntimeRole is invoked by the role-separated
+// qualification script after migrations and ownership transfer. It must not
+// apply migrations because the runtime role deliberately cannot access the
+// migration catalog.
+func TestAuthStoreAuthenticateWithRuntimeRole(t *testing.T) {
+	dsn := os.Getenv("FORNIX_RLS_TEST_DSN")
+	token := os.Getenv("FORNIX_RLS_AUTH_TOKEN")
+	if dsn == "" || token == "" {
+		t.Skip("FORNIX_RLS_TEST_DSN and FORNIX_RLS_AUTH_TOKEN are required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer pool.Close()
+	principal, err := NewAuthStore(pool).Authenticate(ctx, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if principal.WorkspaceID != "qualification-auth-workspace" || principal.ID != "qualification-auth-identity" || !principal.Has(contracts.PermissionModelInvoke) {
+		t.Fatalf("runtime principal=%+v", principal)
+	}
+}
+
 func TestAuthStoreExpiryCredentialLifecycleAndWorkspaceIsolation(t *testing.T) {
 	store, _, workspaceID := newIdentityTestStore(t)
 	ctx := context.Background()
@@ -198,6 +224,75 @@ func TestAuthStoreAuthorizationAuditIsIdempotentUnderConcurrentDuplicateRequests
 	}
 	if count != 1 {
 		t.Fatalf("duplicate authorization audit rows=%d", count)
+	}
+}
+
+func TestAuthStoreAuthorizationReplayFailsClosedOnChangedDecision(t *testing.T) {
+	auth, pool, workspaceID := newIdentityTestStore(t)
+	ctx := context.Background()
+	identity, err := auth.CreateIdentity(ctx, contracts.IdentityInput{WorkspaceID: workspaceID, Subject: "replay-grant", Permissions: []contracts.Permission{contracts.PermissionTaskRead}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, token, err := auth.CreateAPIKey(ctx, contracts.APIKeyInput{WorkspaceID: workspaceID, IdentityID: identity.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	principal, err := auth.Authenticate(ctx, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if decision, err := auth.Authorize(ctx, principal, "replayed-request", contracts.PermissionTaskRead, "task:list", "GET", "/v1/tasks"); err != nil || !decision.Allowed {
+		t.Fatalf("initial authorization decision=%+v err=%v", decision, err)
+	}
+
+	if _, err := pool.Exec(ctx, `DELETE FROM fornix.identity_role_bindings WHERE workspace_id=$1 AND identity_id=$2`, workspaceID, identity.ID); err != nil {
+		t.Fatalf("revoke task-read role binding: %v", err)
+	}
+	decision, err := auth.Authorize(ctx, principal, "replayed-request", contracts.PermissionTaskRead, "task:list", "GET", "/v1/tasks")
+	if !errors.Is(err, ErrAuthorizationDenied) || decision.Allowed || decision.Reason != "permission_denied" {
+		t.Fatalf("stale principal reused a revoked role grant: decision=%+v err=%v", decision, err)
+	}
+	revoked, err := auth.Authenticate(ctx, token)
+	if err != nil {
+		t.Fatalf("reauthenticate after permission revocation: %v", err)
+	}
+	decision, err = auth.Authorize(ctx, revoked, "replayed-request", contracts.PermissionTaskRead, "task:list", "GET", "/v1/tasks")
+	if !errors.Is(err, ErrAuthorizationDenied) || decision.Allowed || decision.Reason != "permission_denied" {
+		t.Fatalf("reauthenticated revoked role was not denied: decision=%+v err=%v", decision, err)
+	}
+
+	decision, err = auth.Authorize(ctx, principal, "replayed-request", contracts.PermissionTaskRead, "task:list", "POST", "/v1/tasks")
+	if !errors.Is(err, ErrAuthorizationDenied) || decision.Allowed || decision.Reason != "permission_denied" {
+		t.Fatalf("request ID reused after permission revocation was not denied: decision=%+v err=%v", decision, err)
+	}
+
+	var requestAuditRows int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM fornix.authorization_audit WHERE workspace_id=$1 AND request_id='replayed-request'`, workspaceID).Scan(&requestAuditRows); err != nil {
+		t.Fatal(err)
+	}
+	if requestAuditRows != 3 {
+		t.Fatalf("append-only allow/deny/route audit rows=%d, want 3", requestAuditRows)
+	}
+
+	if err := auth.RevokeAPIKey(ctx, workspaceID, principal.APIKeyID); err != nil {
+		t.Fatalf("revoke API key: %v", err)
+	}
+	decision, err = auth.Authorize(ctx, principal, "revoked-key-request", contracts.PermissionTaskRead, "task:list", "GET", "/v1/tasks")
+	if !errors.Is(err, ErrAuthorizationDenied) || decision.Allowed || decision.Reason != "credential_inactive" {
+		t.Fatalf("stale principal reused a revoked API key: decision=%+v err=%v", decision, err)
+	}
+}
+
+func TestAuthStoreAuthorizationRejectsForgedKeylessPrincipal(t *testing.T) {
+	auth, _, workspaceID := newIdentityTestStore(t)
+	principal := contracts.Principal{
+		ID: "caller-constructed", WorkspaceID: workspaceID, Kind: "user",
+		Permissions: []contracts.Permission{contracts.AdminWildcard}, Authenticated: true,
+	}
+	decision, err := auth.Authorize(context.Background(), principal, "keyless-request", contracts.PermissionTaskRead, "task:list", "GET", "/v1/tasks")
+	if !errors.Is(err, ErrAuthorizationDenied) || decision.Allowed || decision.Reason != "credential_inactive" {
+		t.Fatalf("caller-constructed principal bypassed durable authentication: decision=%+v err=%v", decision, err)
 	}
 }
 

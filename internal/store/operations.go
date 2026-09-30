@@ -28,24 +28,28 @@ const (
 )
 
 var (
-	ErrOperationNotFound       = errors.New("operation not found")
-	ErrOperationIdempotency    = errors.New("operation idempotency conflict")
-	ErrOperationTransition     = errors.New("invalid operation transition")
-	ErrOperationLeaseMissing   = errors.New("operation lease not found")
-	ErrOperationLeaseHeld      = errors.New("operation lease is held by another owner")
-	ErrOperationLeaseOwned     = errors.New("operation lease is not owned by this worker")
-	ErrOperationLeaseFenced    = errors.New("operation lease fence is stale")
-	ErrOperationLeaseExpired   = errors.New("operation lease is expired")
-	ErrOperationLeaseReleased  = errors.New("operation lease is released")
-	ErrOperationResourceBusy   = errors.New("operation resource is leased by another operation")
-	ErrOperationFenceExhausted = errors.New("operation lease fence is exhausted")
-	ErrOperationTaskFence      = errors.New("task-bound operation fence is invalid")
-	ErrOperationReplay         = errors.New("operation replay integrity failure")
-	ErrOperationWorkspace      = errors.New("operation workspace violation")
-	ErrOperationPlanConflict   = errors.New("operation plan conflicts with existing state")
-	ErrOperationResultNotFound = errors.New("operation result not found")
-	ErrOperationResultConflict = errors.New("operation result conflicts with existing state")
-	ErrOperationTerminal       = errors.New("operation is terminal")
+	ErrOperationNotFound                 = errors.New("operation not found")
+	ErrOperationIdempotency              = errors.New("operation idempotency conflict")
+	ErrOperationTransition               = errors.New("invalid operation transition")
+	ErrOperationLeaseMissing             = errors.New("operation lease not found")
+	ErrOperationLeaseHeld                = errors.New("operation lease is held by another owner")
+	ErrOperationLeaseOwned               = errors.New("operation lease is not owned by this worker")
+	ErrOperationLeaseFenced              = errors.New("operation lease fence is stale")
+	ErrOperationLeaseExpired             = errors.New("operation lease is expired")
+	ErrOperationLeaseReleased            = errors.New("operation lease is released")
+	ErrOperationResourceBusy             = errors.New("operation resource is leased by another operation")
+	ErrOperationFenceExhausted           = errors.New("operation lease fence is exhausted")
+	ErrOperationTaskFence                = errors.New("task-bound operation fence is invalid")
+	ErrOperationReplay                   = errors.New("operation replay integrity failure")
+	ErrOperationWorkspace                = errors.New("operation workspace violation")
+	ErrOperationPlanConflict             = errors.New("operation plan conflicts with existing state")
+	ErrOperationResultNotFound           = errors.New("operation result not found")
+	ErrOperationResultConflict           = errors.New("operation result conflicts with existing state")
+	ErrOperationTerminal                 = errors.New("operation is terminal")
+	ErrOperationAdmissionRequired        = errors.New("effectful operation requires deployment admission")
+	ErrOperationAdmissionUnavailable     = errors.New("deployment admission authority is unavailable")
+	ErrOperationExternalBoundaryRequired = errors.New("external effect requires controlled boundary authority")
+	ErrOperationExternalBoundaryMismatch = errors.New("external effect boundary does not match deployment evidence")
 )
 
 // Operation is the current projection of one generic operation. Raw inputs and
@@ -149,18 +153,28 @@ type OperationResultRecord struct {
 }
 
 type OperationResultInput struct {
-	WorkspaceID    string
-	OperationID    string
-	OwnerID        string
-	Fence          uint64
-	TaskOwnerID    string
-	TaskFence      uint64
-	Actor          contracts.ActorRef
-	RequestID      string
-	IdempotencyKey string
-	CausationID    string
-	CorrelationID  string
-	Result         contracts.OperationResult
+	WorkspaceID               string
+	OperationID               string
+	OwnerID                   string
+	Fence                     uint64
+	TaskOwnerID               string
+	TaskFence                 uint64
+	Actor                     contracts.ActorRef
+	RequestID                 string
+	IdempotencyKey            string
+	CausationID               string
+	CorrelationID             string
+	TrustPolicyHash           string
+	TrustPolicyRevision       string
+	CredentialLeaseID         string
+	CredentialLeaseFence      uint64
+	CredentialRevocationEpoch uint64
+	CredentialSourceVersion   string
+	CredentialSourceExpiresAt *time.Time
+	ExternalBoundary          *contracts.ExternalBoundaryAuthority
+	SchemaCatalogHash         string
+	SchemaCatalogRevision     string
+	Result                    contracts.OperationResult
 }
 
 type OperationResultWrite struct {
@@ -250,13 +264,164 @@ type OperationClaim struct {
 	ResourceLeases []OperationResourceLease
 }
 
+// ValidateEffectAuthority re-checks the live operation and task leases in one
+// Postgres transaction. It is useful for read-only qualification and for
+// validating an already committed dispatch intent; effectful dispatchers must
+// use BeginEffectDispatch so validation and durable intent share one commit.
+func (s *OperationStore) ValidateEffectAuthority(ctx context.Context, authority contracts.EffectAuthority) error {
+	if s == nil || s.pool == nil {
+		return errors.New("operation store is not configured")
+	}
+	if err := authority.Normalize(); err != nil {
+		return fmt.Errorf("normalize effect authority: %w", err)
+	}
+	tx, err := beginWorkspaceTx(ctx, s.pool, authority.WorkspaceID)
+	if err != nil {
+		return fmt.Errorf("begin effect authority validation: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := setWorkspaceContext(ctx, tx, authority.WorkspaceID); err != nil {
+		return err
+	}
+	if err := s.validateEffectAuthorityTx(ctx, tx, authority, contracts.ExternalEffectDispatching); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// validateEffectAuthorityTx performs the live authority check in a caller-
+// owned workspace transaction. expectedEffectState may be empty when the
+// caller is about to establish the first dispatching transition in this same
+// transaction; otherwise the existing state must match exactly.
+func (s *OperationStore) validateEffectAuthorityTx(ctx context.Context, tx pgx.Tx, authority contracts.EffectAuthority, expectedEffectState string) error {
+	operation, err := readOperationByID(ctx, tx, authority.WorkspaceID, authority.OperationID, true)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrOperationNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("read effect operation: %w", err)
+	}
+	if contracts.IsTerminalOperationStatus(operation.Status) {
+		return ErrOperationTerminal
+	}
+	if operation.OperationHash == "" {
+		return ErrOperationTransition
+	}
+	if _, err := s.validateLease(ctx, tx, OperationLease{
+		WorkspaceID: authority.WorkspaceID,
+		OperationID: authority.OperationID,
+		OwnerID:     authority.OperationOwnerID,
+		Fence:       authority.OperationFence,
+	}); err != nil {
+		return err
+	}
+	if err := validateOperationTaskFence(operation, authority.TaskOwnerID, authority.TaskFence); err != nil {
+		return err
+	}
+	if operation.Request.Task != nil {
+		if err := validateTaskFenceForOperationTx(ctx, tx, operation.Request.Task, authority.TaskOwnerID, authority.TaskFence); err != nil {
+			return err
+		}
+	}
+	if err := validateAgentRunEffectFenceTx(ctx, tx, authority.WorkspaceID, authority.AgentRunID, authority.AgentRunOwnerID, int64(authority.AgentRunFence)); err != nil {
+		return err
+	}
+	if authority.EffectID != "" {
+		var effect OperationEffect
+		var credentialFence, credentialEpoch int64
+		var egressHash, destinationHash, networkBoundary, networkHash string
+		if err := tx.QueryRow(ctx, `SELECT workspace_id,operation_id,step_id,attempt_id,effect_id,effect_class,boundary,idempotency_key,provider_request_id,provider_idempotency_supported,delivery_semantics,verification_required,verification_status,compensation_status,request_hash,schema_catalog_hash,schema_catalog_revision,credential_lease_id,credential_lease_fence,credential_revocation_epoch,credential_source_version,credential_source_expires_at,egress_policy_hash,destination_policy_hash,network_boundary,network_boundary_hash,created_at,verified_at FROM fornix.operation_effects WHERE workspace_id=$1 AND operation_id=$2 AND effect_id=$3 FOR SHARE`, authority.WorkspaceID, authority.OperationID, authority.EffectID).Scan(&effect.WorkspaceID, &effect.OperationID, &effect.StepID, &effect.AttemptID, &effect.EffectID, &effect.EffectClass, &effect.Boundary, &effect.IdempotencyKey, &effect.ProviderRequestID, &effect.ProviderIdempotency, &effect.DeliverySemantics, &effect.VerificationRequired, &effect.VerificationStatus, &effect.CompensationStatus, &effect.RequestHash, &effect.SchemaCatalogHash, &effect.SchemaCatalogRevision, &effect.CredentialLeaseID, &credentialFence, &credentialEpoch, &effect.CredentialSourceVersion, &effect.CredentialSourceExpiresAt, &egressHash, &destinationHash, &networkBoundary, &networkHash, &effect.CreatedAt, &effect.VerifiedAt); errors.Is(err, pgx.ErrNoRows) {
+			return ErrOperationTransition
+		} else if err != nil {
+			return fmt.Errorf("read effect authority reservation: %w", err)
+		}
+		if credentialFence < 0 || credentialEpoch < 0 {
+			return ErrOperationTransition
+		}
+		effect.CredentialLeaseFence, effect.CredentialRevocationEpoch = uint64(credentialFence), uint64(credentialEpoch)
+		var boundaryErr error
+		effect.ExternalBoundary, boundaryErr = boundaryFromColumns(egressHash, destinationHash, networkBoundary, networkHash)
+		if boundaryErr != nil {
+			return ErrOperationTransition
+		}
+		if authority.AttemptID != "" && effect.AttemptID != authority.AttemptID {
+			return ErrOperationLeaseFenced
+		}
+		if authority.RequestHash != "" && effect.RequestHash != authority.RequestHash {
+			return ErrOperationTransition
+		}
+		if authority.EffectReservationHash != "" {
+			candidate := contracts.ExternalEffect{WorkspaceID: effect.WorkspaceID, Boundary: effect.Boundary, Class: contracts.EffectClass(effect.EffectClass), DeliveryGuarantee: effect.DeliverySemantics, ProviderIdempotency: effect.ProviderIdempotency, VerificationRequired: effect.VerificationRequired, VerificationStatus: effect.VerificationStatus, CompensationStatus: effect.CompensationStatus}
+			if candidate.StableHash() != authority.EffectReservationHash {
+				return ErrOperationTransition
+			}
+		}
+		var effectState string
+		if err := tx.QueryRow(ctx, `SELECT state FROM fornix.operation_effect_state WHERE workspace_id=$1 AND effect_id=$2 FOR SHARE`, authority.WorkspaceID, authority.EffectID).Scan(&effectState); errors.Is(err, pgx.ErrNoRows) {
+			return ErrOperationTransition
+		} else if err != nil {
+			return fmt.Errorf("read live effect state: %w", err)
+		}
+		if expectedEffectState != "" && effectState != expectedEffectState {
+			return fmt.Errorf("%w: effect state %q does not match expected state %q", ErrOperationTransition, effectState, expectedEffectState)
+		}
+		if err := validateAuthorityFactsWithBoundary(ctx, tx, authority.WorkspaceID, effect.SchemaCatalogHash, effect.SchemaCatalogRevision, effect.CredentialLeaseID, effect.CredentialLeaseFence, effect.CredentialRevocationEpoch, effect.CredentialSourceVersion, effect.CredentialSourceExpiresAt, effect.ExternalBoundary, contracts.EffectClass(effect.EffectClass)); err != nil {
+			return fmt.Errorf("validate live effect authority facts: %w", err)
+		}
+	}
+	return nil
+}
+
+// BeginEffectDispatch atomically validates the live operation, task, agent-run,
+// credential, and effect authorities and commits the unique dispatch intent.
+// This transaction is the authorization linearization point: a lease takeover
+// that commits first rejects this call; a takeover after it does not revoke an
+// already-issued one-shot external-effect permit. External execution remains
+// at-least-once and is never held inside a database transaction.
+func (s *OperationStore) BeginEffectDispatch(ctx context.Context, authority contracts.EffectAuthority, update contracts.ExternalEffectUpdate) (EffectStateResult, error) {
+	if s == nil || s.pool == nil {
+		return EffectStateResult{}, errors.New("operation store is not configured")
+	}
+	if err := authority.Normalize(); err != nil {
+		return EffectStateResult{}, fmt.Errorf("normalize effect authority: %w", err)
+	}
+	if err := update.Normalize(); err != nil {
+		return EffectStateResult{}, fmt.Errorf("normalize dispatch intent: %w", err)
+	}
+	if update.State != contracts.ExternalEffectDispatching || update.LeaseKind != "" ||
+		update.WorkspaceID != authority.WorkspaceID || update.OperationID != authority.OperationID || update.EffectID != authority.EffectID ||
+		update.OwnerID != authority.OperationOwnerID || update.Fence != authority.OperationFence {
+		return EffectStateResult{}, fmt.Errorf("dispatch intent does not match its effect authority")
+	}
+	tx, err := beginWorkspaceTx(ctx, s.pool, authority.WorkspaceID)
+	if err != nil {
+		return EffectStateResult{}, fmt.Errorf("begin authorized dispatch intent: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	if err := s.validateEffectAuthorityTx(ctx, tx, authority, ""); err != nil {
+		return EffectStateResult{}, err
+	}
+	state, err := NewAdmissionStore(s.pool, s.events).UpdateEffectTx(ctx, tx, update)
+	if err != nil {
+		return EffectStateResult{}, err
+	}
+	if state.State.State != contracts.ExternalEffectDispatching {
+		return EffectStateResult{}, fmt.Errorf("%w: dispatch intent committed in state %q", ErrOperationTransition, state.State.State)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return EffectStateResult{}, fmt.Errorf("commit authorized dispatch intent: %w", err)
+	}
+	return state, nil
+}
+
 // OperationClaimOptions bounds one queue claim. MaxActive is a durable
 // workspace-wide cap; zero leaves the cap disabled for compatibility with
 // callers that already enforce concurrency elsewhere.
 type OperationClaimOptions struct {
-	Limit     int
-	TTL       time.Duration
-	MaxActive int
+	Limit        int
+	TTL          time.Duration
+	MaxActive    int
+	ReadOnlyOnly bool
 }
 
 // OperationResourceLease serializes one typed resource while an operation
@@ -306,35 +471,55 @@ type OperationAttempt struct {
 }
 
 type OperationEffectInput struct {
-	WorkspaceID string
-	OperationID string
-	StepID      string
-	AttemptID   string
-	OwnerID     string
-	Fence       uint64
-	Effect      contracts.ExternalEffect
-	RequestHash string
+	WorkspaceID               string
+	OperationID               string
+	StepID                    string
+	AttemptID                 string
+	OwnerID                   string
+	Fence                     uint64
+	Effect                    contracts.ExternalEffect
+	RequestHash               string
+	SchemaCatalogHash         string
+	SchemaCatalogRevision     string
+	CredentialLeaseID         string
+	CredentialLeaseFence      uint64
+	CredentialRevocationEpoch uint64
+	CredentialSourceVersion   string
+	CredentialSourceExpiresAt *time.Time
+	ExternalBoundary          *contracts.ExternalBoundaryAuthority
+	// RequireAllowedAdmission is set by the shared dispatcher and strict
+	// public effect path. It is opt-in so recovery fixtures can inspect and
+	// reconcile legacy reservations without rewriting their original decision.
+	RequireAllowedAdmission bool
 }
 
 type OperationEffect struct {
-	WorkspaceID          string
-	OperationID          string
-	StepID               string
-	AttemptID            string
-	EffectID             string
-	EffectClass          string
-	Boundary             string
-	IdempotencyKey       string
-	ProviderRequestID    string
-	ProviderIdempotency  bool
-	DeliverySemantics    string
-	VerificationRequired bool
-	VerificationStatus   string
-	CompensationStatus   string
-	RequestHash          string
-	ResponseHash         string
-	CreatedAt            time.Time
-	VerifiedAt           *time.Time
+	WorkspaceID               string
+	OperationID               string
+	StepID                    string
+	AttemptID                 string
+	EffectID                  string
+	EffectClass               string
+	Boundary                  string
+	IdempotencyKey            string
+	ProviderRequestID         string
+	ProviderIdempotency       bool
+	DeliverySemantics         string
+	VerificationRequired      bool
+	VerificationStatus        string
+	CompensationStatus        string
+	RequestHash               string
+	ResponseHash              string
+	SchemaCatalogHash         string
+	SchemaCatalogRevision     string
+	CredentialLeaseID         string
+	CredentialLeaseFence      uint64
+	CredentialRevocationEpoch uint64
+	CredentialSourceVersion   string
+	CredentialSourceExpiresAt *time.Time
+	ExternalBoundary          *contracts.ExternalBoundaryAuthority
+	CreatedAt                 time.Time
+	VerifiedAt                *time.Time
 }
 
 type OperationCallbackInput struct {
@@ -379,9 +564,12 @@ type OperationReplayResult struct {
 // OperationStore is the sole Postgres mutation boundary for generic operation
 // authority. Existing task/run/tool/evidence authorities remain unchanged.
 type OperationStore struct {
-	pool        *pgxpool.Pool
-	events      *EventStore
-	failureHook func(string) error
+	pool                       *pgxpool.Pool
+	events                     *EventStore
+	failureHook                func(string) error
+	deploymentEvidence         *DeploymentEvidenceStore
+	requireDeploymentAdmission bool
+	requireExternalBoundary    bool
 }
 
 func NewOperationStore(pool *pgxpool.Pool, events *EventStore) *OperationStore {
@@ -389,6 +577,27 @@ func NewOperationStore(pool *pgxpool.Pool, events *EventStore) *OperationStore {
 		events = NewEventStore(pool)
 	}
 	return &OperationStore{pool: pool, events: events}
+}
+
+// SetDeploymentAdmissionAuthority wires the existing deployment-evidence
+// authority into generic effect reservation. The operation store does not
+// copy release or verification rows; it only revalidates a request's
+// hash-only reference inside the reservation transaction.
+func (s *OperationStore) SetDeploymentAdmissionAuthority(authority *DeploymentEvidenceStore, required bool) {
+	if s == nil {
+		return
+	}
+	s.deploymentEvidence = authority
+	s.requireDeploymentAdmission = required
+}
+
+// SetExternalBoundaryAuthorityRequired enables strict production admission for
+// network effects. Development fake/read-only paths may leave it disabled;
+// the strict server configuration enables it automatically.
+func (s *OperationStore) SetExternalBoundaryAuthorityRequired(required bool) {
+	if s != nil {
+		s.requireExternalBoundary = required
+	}
 }
 
 // SetFailureHook creates deterministic transaction crash tests. It is nil in
@@ -405,7 +614,12 @@ func (s *OperationStore) Create(ctx context.Context, input OperationCreateInput)
 	if s == nil || s.pool == nil || s.events == nil {
 		return OperationCreateResult{}, errors.New("operation store is not configured")
 	}
-	tx, err := s.pool.Begin(ctx)
+	request := input.Request
+	if err := request.Normalize(); err != nil {
+		return OperationCreateResult{}, fmt.Errorf("normalize operation request: %w", err)
+	}
+	input.Request = request
+	tx, err := beginWorkspaceTx(ctx, s.pool, request.WorkspaceID)
 	if err != nil {
 		return OperationCreateResult{}, fmt.Errorf("begin operation create: %w", err)
 	}
@@ -526,17 +740,37 @@ func (s *OperationStore) Get(ctx context.Context, workspaceID, operationID strin
 		return Operation{}, errors.New("operation store is not configured")
 	}
 	workspaceID, operationID = strings.TrimSpace(workspaceID), strings.TrimSpace(operationID)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
 		return Operation{}, fmt.Errorf("begin operation read: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := setWorkspaceContext(ctx, tx, workspaceID); err != nil {
-		return Operation{}, err
-	}
 	value, err := readOperationByID(ctx, tx, workspaceID, operationID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Operation{}, ErrOperationNotFound
+	}
+	if err == nil {
+		err = tx.Commit(ctx)
+	}
+	return value, err
+}
+
+// GetEffect reads one immutable effect reservation inside its workspace. The
+// verifier uses this bounded identity snapshot to bind adapter proof input;
+// effect state transitions remain owned by AdmissionStore.
+func (s *OperationStore) GetEffect(ctx context.Context, workspaceID, effectID string) (OperationEffect, error) {
+	if s == nil || s.pool == nil {
+		return OperationEffect{}, errors.New("operation store is not configured")
+	}
+	workspaceID, effectID = strings.TrimSpace(workspaceID), strings.TrimSpace(effectID)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
+	if err != nil {
+		return OperationEffect{}, fmt.Errorf("begin effect read: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	value, err := readEffectByID(ctx, tx, workspaceID, effectID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return OperationEffect{}, ErrOperationNotFound
 	}
 	if err == nil {
 		err = tx.Commit(ctx)
@@ -551,7 +785,7 @@ func (s *OperationStore) AttachPlan(ctx context.Context, input OperationPlanInpu
 	if s == nil || s.pool == nil || s.events == nil {
 		return OperationPlanResult{}, errors.New("operation store is not configured")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, input.WorkspaceID)
 	if err != nil {
 		return OperationPlanResult{}, fmt.Errorf("begin operation plan: %w", err)
 	}
@@ -637,14 +871,11 @@ func (s *OperationStore) GetResult(ctx context.Context, workspaceID, operationID
 		return OperationResultRecord{}, errors.New("operation store is not configured")
 	}
 	workspaceID, operationID = strings.TrimSpace(workspaceID), strings.TrimSpace(operationID)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
 		return OperationResultRecord{}, fmt.Errorf("begin operation result read: %w", err)
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	if err := setWorkspaceContext(ctx, tx, workspaceID); err != nil {
-		return OperationResultRecord{}, err
-	}
 	record, err := readOperationResult(ctx, tx, workspaceID, operationID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return OperationResultRecord{}, ErrOperationResultNotFound
@@ -663,6 +894,33 @@ func (s *OperationStore) RecordResult(ctx context.Context, input OperationResult
 	if s == nil || s.pool == nil || s.events == nil {
 		return OperationResultWrite{}, errors.New("operation store is not configured")
 	}
+	tx, err := beginWorkspaceTx(ctx, s.pool, input.WorkspaceID)
+	if err != nil {
+		return OperationResultWrite{}, fmt.Errorf("begin operation result: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	result, err := s.RecordResultTx(ctx, tx, input)
+	if err != nil {
+		return OperationResultWrite{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return OperationResultWrite{}, fmt.Errorf("commit operation result: %w", err)
+	}
+	return result, nil
+}
+
+// RecordResultTx appends one fenced, workspace-scoped operation result to a
+// caller-owned transaction. It performs no commit and is intended for local
+// authority compositions that must atomically finalize an effect, its domain
+// link, and its operation result. The caller must use the same Postgres pool
+// and must not perform external I/O inside the transaction.
+func (s *OperationStore) RecordResultTx(ctx context.Context, tx pgx.Tx, input OperationResultInput) (OperationResultWrite, error) {
+	if s == nil || s.pool == nil || s.events == nil {
+		return OperationResultWrite{}, errors.New("operation store is not configured")
+	}
+	if tx == nil {
+		return OperationResultWrite{}, errors.New("operation result transaction is nil")
+	}
 	if err := input.Result.Normalize(); err != nil {
 		return OperationResultWrite{}, fmt.Errorf("normalize operation result: %w", err)
 	}
@@ -672,19 +930,7 @@ func (s *OperationStore) RecordResult(ctx context.Context, input OperationResult
 	if input.Result.StableHash() == "" {
 		return OperationResultWrite{}, ErrOperationResultConflict
 	}
-	tx, err := s.pool.Begin(ctx)
-	if err != nil {
-		return OperationResultWrite{}, fmt.Errorf("begin operation result: %w", err)
-	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	result, err := s.recordResultTx(ctx, tx, input)
-	if err != nil {
-		return OperationResultWrite{}, err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return OperationResultWrite{}, fmt.Errorf("commit operation result: %w", err)
-	}
-	return result, nil
+	return s.recordResultTx(ctx, tx, input)
 }
 
 func (s *OperationStore) recordResultTx(ctx context.Context, tx pgx.Tx, input OperationResultInput) (OperationResultWrite, error) {
@@ -733,6 +979,9 @@ func (s *OperationStore) recordResultTx(ctx context.Context, tx pgx.Tx, input Op
 	if _, err := s.validateLease(ctx, tx, OperationLease{WorkspaceID: input.WorkspaceID, OperationID: input.OperationID, OwnerID: input.OwnerID, Fence: input.Fence}); err != nil {
 		return OperationResultWrite{}, err
 	}
+	if err := mergeResultAuthorityFactsTx(ctx, tx, &input); err != nil {
+		return OperationResultWrite{}, fmt.Errorf("resolve operation authority facts: %w", err)
+	}
 	resultID := input.Result.ID
 	if resultID == "" {
 		resultID = contracts.NewID("operation-result")
@@ -769,6 +1018,16 @@ func (s *OperationStore) recordResultTx(ctx context.Context, tx pgx.Tx, input Op
 	if err != nil {
 		return OperationResultWrite{}, err
 	}
+	admission, err := admissionForOperationTx(ctx, tx, input.WorkspaceID, input.OperationID)
+	if err != nil {
+		return OperationResultWrite{}, fmt.Errorf("read operation admission authority: %w", err)
+	}
+	if _, _, err := appendAuthorityLinkTx(ctx, tx, authorityResultLink(input, transition.Operation, input.Result, resultID, resultHash, admission)); err != nil {
+		return OperationResultWrite{}, fmt.Errorf("append result authority link: %w", err)
+	}
+	if err := s.fail("operation_result_recorded"); err != nil {
+		return OperationResultWrite{}, err
+	}
 	record, err := readOperationResult(ctx, tx, input.WorkspaceID, input.OperationID)
 	if err != nil {
 		return OperationResultWrite{}, err
@@ -780,7 +1039,7 @@ func (s *OperationStore) AcquireLease(ctx context.Context, workspaceID, operatio
 	if s == nil || s.pool == nil {
 		return OperationLeaseResult{}, errors.New("operation store is not configured")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
 		return OperationLeaseResult{}, fmt.Errorf("begin operation lease acquire: %w", err)
 	}
@@ -1160,7 +1419,7 @@ func (s *OperationStore) ClaimReadyWithOptions(ctx context.Context, workspaceID,
 	if maxActive < 0 || maxActive > maxOperationActiveLimit {
 		return nil, fmt.Errorf("max_active must be between 0 and %d", maxOperationActiveLimit)
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("begin operation queue claim: %w", err)
 	}
@@ -1198,10 +1457,19 @@ func (s *OperationStore) ClaimReadyWithOptions(ctx context.Context, workspaceID,
 		WHERE o.workspace_id=$1
 		  AND o.status IN ('created','planned','admitted','awaiting_retry','verifying','recovery_required')
 		  AND (o.next_retry_at IS NULL OR o.next_retry_at <= clock_timestamp())
+		  AND ($3 = false OR (
+				 o.plan IS NOT NULL
+				 AND jsonb_array_length(COALESCE(o.plan->'steps', '[]'::jsonb)) > 0
+				 AND NOT EXISTS (
+					 SELECT 1
+					 FROM jsonb_array_elements(o.plan->'steps') AS step
+					 WHERE COALESCE(step->>'effect', '') NOT IN ('read_only', 'observation')
+				 )
+			))
 		  AND (l.operation_id IS NULL OR l.released_at IS NOT NULL OR l.lease_until <= clock_timestamp())
 		ORDER BY COALESCE(o.next_retry_at, o.created_at), o.created_at, o.id
 		FOR UPDATE OF o SKIP LOCKED
-		LIMIT $2`, workspaceID, limit)
+		LIMIT $2`, workspaceID, limit, options.ReadOnlyOnly)
 	if err != nil {
 		return nil, fmt.Errorf("select ready operations: %w", err)
 	}
@@ -1258,7 +1526,7 @@ func (s *OperationStore) RenewLease(ctx context.Context, lease OperationLease, t
 	if s == nil || s.pool == nil {
 		return OperationLease{}, errors.New("operation store is not configured")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, lease.WorkspaceID)
 	if err != nil {
 		return OperationLease{}, fmt.Errorf("begin operation lease renew: %w", err)
 	}
@@ -1304,7 +1572,7 @@ func (s *OperationStore) ReleaseLease(ctx context.Context, lease OperationLease)
 	if s == nil || s.pool == nil {
 		return errors.New("operation store is not configured")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, lease.WorkspaceID)
 	if err != nil {
 		return fmt.Errorf("begin operation lease release: %w", err)
 	}
@@ -1342,7 +1610,7 @@ func (s *OperationStore) Transition(ctx context.Context, input OperationTransiti
 	if err != nil {
 		return OperationTransitionResult{}, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, input.WorkspaceID)
 	if err != nil {
 		return OperationTransitionResult{}, fmt.Errorf("begin operation transition: %w", err)
 	}
@@ -1472,7 +1740,7 @@ func (s *OperationStore) ReserveAttempt(ctx context.Context, input OperationAtte
 	if !validHash(input.RequestHash) || input.Attempt < 1 || input.Fence == 0 || input.Fence > maxOperationFence || input.IdempotencyKey == "" || len(input.IdempotencyKey) > contracts.MaxIdempotencyLength || len(input.OwnerID) > contracts.MaxDomainIDLength || len(input.AttemptID) > contracts.MaxDomainIDLength {
 		return OperationAttempt{}, false, errors.New("attempt requires a request hash, positive attempt, fence, and idempotency key")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, input.WorkspaceID)
 	if err != nil {
 		return OperationAttempt{}, false, err
 	}
@@ -1565,7 +1833,7 @@ func (s *OperationStore) ReserveEffect(ctx context.Context, input OperationEffec
 	if effect.WorkspaceID != input.WorkspaceID || input.OperationID == "" || input.StepID == "" || input.AttemptID == "" || !validHash(input.RequestHash) {
 		return OperationEffect{}, false, ErrOperationWorkspace
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, input.WorkspaceID)
 	if err != nil {
 		return OperationEffect{}, false, err
 	}
@@ -1581,7 +1849,7 @@ func (s *OperationStore) ReserveEffect(ctx context.Context, input OperationEffec
 		return OperationEffect{}, false, err
 	}
 	if stored, err := readEffect(ctx, tx, input.WorkspaceID, input.AttemptID); err == nil {
-		if stored.RequestHash != input.RequestHash || stored.OperationID != input.OperationID || stored.StepID != input.StepID || storedEffectIdentityHash(stored) != effect.StableHash() {
+		if stored.RequestHash != input.RequestHash || stored.OperationID != input.OperationID || stored.StepID != input.StepID || storedEffectIdentityHash(stored) != effect.StableHash() || !storedEffectAuthorityMatches(stored, input) {
 			return OperationEffect{}, false, ErrOperationIdempotency
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -1593,6 +1861,32 @@ func (s *OperationStore) ReserveEffect(ctx context.Context, input OperationEffec
 	}
 	if contracts.IsTerminalOperationStatus(operation.Status) {
 		return OperationEffect{}, false, ErrOperationTerminal
+	}
+	if err := s.validateDeploymentAdmissionTx(ctx, tx, operation); err != nil {
+		return OperationEffect{}, false, err
+	}
+	if err := mergeEffectAuthorityFactsTx(ctx, tx, &input); err != nil {
+		return OperationEffect{}, false, fmt.Errorf("resolve effect authority facts: %w", err)
+	}
+	if input.RequireAllowedAdmission {
+		if err := requireDispatchableAdmissionTx(ctx, tx, input.WorkspaceID, input.OperationID); err != nil {
+			return OperationEffect{}, false, fmt.Errorf("validate dispatchable admission: %w", err)
+		}
+	}
+	if contracts.RequiresExternalBoundary(input.Effect.Class) && s.requireExternalBoundary && input.ExternalBoundary == nil {
+		return OperationEffect{}, false, ErrOperationExternalBoundaryRequired
+	}
+	if contracts.RequiresExternalBoundary(input.Effect.Class) && s.requireExternalBoundary && s.requireDeploymentAdmission {
+		reference := operation.Request.DeploymentAdmission
+		if reference == nil || reference.ExternalBoundaryHash == "" || reference.BoundaryEvidenceHash == "" {
+			return OperationEffect{}, false, ErrOperationExternalBoundaryMismatch
+		}
+		if input.ExternalBoundary == nil || reference.ExternalBoundaryHash != input.ExternalBoundary.StableHash() {
+			return OperationEffect{}, false, ErrOperationExternalBoundaryMismatch
+		}
+	}
+	if err := validateAuthorityFactsWithBoundary(ctx, tx, input.WorkspaceID, input.SchemaCatalogHash, input.SchemaCatalogRevision, input.CredentialLeaseID, input.CredentialLeaseFence, input.CredentialRevocationEpoch, input.CredentialSourceVersion, input.CredentialSourceExpiresAt, input.ExternalBoundary, input.Effect.Class); err != nil {
+		return OperationEffect{}, false, fmt.Errorf("validate effect authority facts: %w", err)
 	}
 	if operation.Request.Task != nil {
 		if input.OwnerID != operation.TaskOwnerID || operation.TaskFence == 0 {
@@ -1622,7 +1916,11 @@ func (s *OperationStore) ReserveEffect(ctx context.Context, input OperationEffec
 	if attemptOwner != input.OwnerID || attemptFence <= 0 || uint64(attemptFence) != input.Fence {
 		return OperationEffect{}, false, ErrOperationLeaseFenced
 	}
-	inserted, err := tx.Exec(ctx, `INSERT INTO fornix.operation_effects(workspace_id,operation_id,step_id,attempt_id,effect_id,effect_class,boundary,idempotency_key,provider_request_id,provider_idempotency_supported,delivery_semantics,verification_required,verification_status,compensation_status,request_hash) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT DO NOTHING`, input.WorkspaceID, input.OperationID, input.StepID, input.AttemptID, effect.ID, effect.Class, effect.Boundary, effect.IdempotencyKey, effect.ProviderRequestID, effect.ProviderIdempotency, effect.DeliveryGuarantee, effect.VerificationRequired, effect.VerificationStatus, effect.CompensationStatus, input.RequestHash)
+	egressHash, destinationHash, networkBoundary, networkHash, err := boundaryColumns(input.ExternalBoundary)
+	if err != nil {
+		return OperationEffect{}, false, err
+	}
+	inserted, err := tx.Exec(ctx, `INSERT INTO fornix.operation_effects(workspace_id,operation_id,step_id,attempt_id,effect_id,effect_class,boundary,idempotency_key,provider_request_id,provider_idempotency_supported,delivery_semantics,verification_required,verification_status,compensation_status,request_hash,schema_catalog_hash,schema_catalog_revision,credential_lease_id,credential_lease_fence,credential_revocation_epoch,credential_source_version,credential_source_expires_at,egress_policy_hash,destination_policy_hash,network_boundary,network_boundary_hash) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26) ON CONFLICT DO NOTHING`, input.WorkspaceID, input.OperationID, input.StepID, input.AttemptID, effect.ID, effect.Class, effect.Boundary, effect.IdempotencyKey, effect.ProviderRequestID, effect.ProviderIdempotency, effect.DeliveryGuarantee, effect.VerificationRequired, effect.VerificationStatus, effect.CompensationStatus, input.RequestHash, input.SchemaCatalogHash, input.SchemaCatalogRevision, input.CredentialLeaseID, int64(input.CredentialLeaseFence), int64(input.CredentialRevocationEpoch), input.CredentialSourceVersion, input.CredentialSourceExpiresAt, egressHash, destinationHash, networkBoundary, networkHash)
 	if err != nil {
 		return OperationEffect{}, false, err
 	}
@@ -1651,6 +1949,23 @@ func (s *OperationStore) ReserveEffect(ctx context.Context, input OperationEffec
 	return stored, inserted.RowsAffected() == 1, nil
 }
 
+func (s *OperationStore) validateDeploymentAdmissionTx(ctx context.Context, tx pgx.Tx, operation Operation) error {
+	reference := operation.Request.DeploymentAdmission
+	if reference == nil {
+		if s.requireDeploymentAdmission {
+			return ErrOperationAdmissionRequired
+		}
+		return nil
+	}
+	if s.deploymentEvidence == nil {
+		return ErrOperationAdmissionUnavailable
+	}
+	if err := s.deploymentEvidence.ValidateAdmissionReferenceTx(ctx, tx, *reference, time.Now().UTC()); err != nil {
+		return fmt.Errorf("validate deployment admission: %w", err)
+	}
+	return nil
+}
+
 func (s *OperationStore) RecordCallback(ctx context.Context, input OperationCallbackInput) (OperationCallback, bool, error) {
 	if s == nil || s.pool == nil {
 		return OperationCallback{}, false, errors.New("operation store is not configured")
@@ -1659,7 +1974,7 @@ func (s *OperationStore) RecordCallback(ctx context.Context, input OperationCall
 	if input.WorkspaceID == "" || input.OperationID == "" || input.OwnerID == "" || input.Fence == 0 || input.Fence > maxOperationFence || input.CallbackID == "" || input.CallbackKind == "" || !validHash(input.RequestHash) || (input.ResponseHash != "" && !validHash(input.ResponseHash)) || strings.TrimSpace(input.Status) == "" || len(input.CallbackID) > contracts.MaxDomainIDLength || len(input.CallbackKind) > contracts.MaxDomainNameLength || len(input.Status) > 128 {
 		return OperationCallback{}, false, errors.New("callback identity, owner, fence, status, and hashes are required")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, input.WorkspaceID)
 	if err != nil {
 		return OperationCallback{}, false, err
 	}
@@ -2032,21 +2347,34 @@ func validateTaskFenceForOperationTx(ctx context.Context, tx pgx.Tx, task *contr
 	if err != nil || taskID <= 0 {
 		return ErrOperationTaskFence
 	}
-	var currentOwner string
-	var currentFence int64
+	// Match TaskStore's mutation lock order: task row first, lease row second.
+	// A joined `FOR UPDATE OF l, t` can acquire row locks in a planner-selected
+	// order and deadlock with Renew/Complete when each holds the other row.
 	var assigned *string
 	err = tx.QueryRow(ctx, `
-		SELECT l.owner_id, l.fence, t.assigned_session
-		FROM fornix.task_execution_leases l
-		JOIN fornix.tasks t ON t.workspace_id=l.workspace_id AND t.id=l.task_id
-		WHERE l.workspace_id=$1 AND l.task_id=$2
-		  AND l.released_at IS NULL AND l.lease_until > clock_timestamp()
-		FOR UPDATE OF l, t`, task.WorkspaceID, taskID).Scan(&currentOwner, &currentFence, &assigned)
+		SELECT assigned_session
+		FROM fornix.tasks
+		WHERE workspace_id=$1 AND id=$2
+		FOR UPDATE`, task.WorkspaceID, taskID).Scan(&assigned)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrOperationTaskFence
 	}
 	if err != nil {
-		return fmt.Errorf("validate operation task fence: %w", err)
+		return fmt.Errorf("lock operation task for fence validation: %w", err)
+	}
+	var currentOwner string
+	var currentFence int64
+	err = tx.QueryRow(ctx, `
+		SELECT owner_id, fence
+		FROM fornix.task_execution_leases
+		WHERE workspace_id=$1 AND task_id=$2
+		  AND released_at IS NULL AND lease_until > clock_timestamp()
+		FOR UPDATE`, task.WorkspaceID, taskID).Scan(&currentOwner, &currentFence)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrOperationTaskFence
+	}
+	if err != nil {
+		return fmt.Errorf("lock operation task lease for fence validation: %w", err)
 	}
 	if currentFence <= 0 || uint64(currentFence) != fence || currentOwner != strings.TrimSpace(owner) || assigned == nil || *assigned != strings.TrimSpace(owner) {
 		return ErrOperationTaskFence
@@ -2144,6 +2472,10 @@ func readOperationQuery(ctx context.Context, queryer interface {
 	return value, nil
 }
 
+func storedEffectAuthorityMatches(stored OperationEffect, input OperationEffectInput) bool {
+	return stored.SchemaCatalogHash == input.SchemaCatalogHash && stored.SchemaCatalogRevision == input.SchemaCatalogRevision && stored.CredentialLeaseID == input.CredentialLeaseID && stored.CredentialLeaseFence == input.CredentialLeaseFence && stored.CredentialRevocationEpoch == input.CredentialRevocationEpoch && stored.CredentialSourceVersion == input.CredentialSourceVersion && sameOptionalTime(stored.CredentialSourceExpiresAt, input.CredentialSourceExpiresAt) && sameExternalBoundary(stored.ExternalBoundary, input.ExternalBoundary)
+}
+
 func readOperationResult(ctx context.Context, queryer interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }, workspaceID, operationID string) (OperationResultRecord, error) {
@@ -2203,20 +2535,31 @@ func readAttemptByKey(ctx context.Context, queryer interface {
 func readEffect(ctx context.Context, queryer interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }, workspaceID, attemptID string) (OperationEffect, error) {
-	return readEffectQuery(ctx, queryer, `SELECT workspace_id,operation_id,step_id,attempt_id,effect_id,effect_class,boundary,idempotency_key,provider_request_id,provider_idempotency_supported,delivery_semantics,verification_required,verification_status,compensation_status,request_hash,response_hash,created_at,verified_at FROM fornix.operation_effects WHERE workspace_id=$1 AND attempt_id=$2`, workspaceID, attemptID)
+	return readEffectQuery(ctx, queryer, `SELECT workspace_id,operation_id,step_id,attempt_id,effect_id,effect_class,boundary,idempotency_key,provider_request_id,provider_idempotency_supported,delivery_semantics,verification_required,verification_status,compensation_status,request_hash,response_hash,schema_catalog_hash,schema_catalog_revision,credential_lease_id,credential_lease_fence,credential_revocation_epoch,credential_source_version,credential_source_expires_at,egress_policy_hash,destination_policy_hash,network_boundary,network_boundary_hash,created_at,verified_at FROM fornix.operation_effects WHERE workspace_id=$1 AND attempt_id=$2`, workspaceID, attemptID)
 }
 
 func readEffectByID(ctx context.Context, queryer interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }, workspaceID, effectID string) (OperationEffect, error) {
-	return readEffectQuery(ctx, queryer, `SELECT workspace_id,operation_id,step_id,attempt_id,effect_id,effect_class,boundary,idempotency_key,provider_request_id,provider_idempotency_supported,delivery_semantics,verification_required,verification_status,compensation_status,request_hash,response_hash,created_at,verified_at FROM fornix.operation_effects WHERE workspace_id=$1 AND effect_id=$2`, workspaceID, effectID)
+	return readEffectQuery(ctx, queryer, `SELECT workspace_id,operation_id,step_id,attempt_id,effect_id,effect_class,boundary,idempotency_key,provider_request_id,provider_idempotency_supported,delivery_semantics,verification_required,verification_status,compensation_status,request_hash,response_hash,schema_catalog_hash,schema_catalog_revision,credential_lease_id,credential_lease_fence,credential_revocation_epoch,credential_source_version,credential_source_expires_at,egress_policy_hash,destination_policy_hash,network_boundary,network_boundary_hash,created_at,verified_at FROM fornix.operation_effects WHERE workspace_id=$1 AND effect_id=$2`, workspaceID, effectID)
 }
 
 func readEffectQuery(ctx context.Context, queryer interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }, query string, args ...any) (OperationEffect, error) {
 	var value OperationEffect
-	if err := queryer.QueryRow(ctx, query, args...).Scan(&value.WorkspaceID, &value.OperationID, &value.StepID, &value.AttemptID, &value.EffectID, &value.EffectClass, &value.Boundary, &value.IdempotencyKey, &value.ProviderRequestID, &value.ProviderIdempotency, &value.DeliverySemantics, &value.VerificationRequired, &value.VerificationStatus, &value.CompensationStatus, &value.RequestHash, &value.ResponseHash, &value.CreatedAt, &value.VerifiedAt); err != nil {
+	var credentialFence, credentialEpoch int64
+	var egressHash, destinationHash, networkBoundary, networkHash string
+	if err := queryer.QueryRow(ctx, query, args...).Scan(&value.WorkspaceID, &value.OperationID, &value.StepID, &value.AttemptID, &value.EffectID, &value.EffectClass, &value.Boundary, &value.IdempotencyKey, &value.ProviderRequestID, &value.ProviderIdempotency, &value.DeliverySemantics, &value.VerificationRequired, &value.VerificationStatus, &value.CompensationStatus, &value.RequestHash, &value.ResponseHash, &value.SchemaCatalogHash, &value.SchemaCatalogRevision, &value.CredentialLeaseID, &credentialFence, &credentialEpoch, &value.CredentialSourceVersion, &value.CredentialSourceExpiresAt, &egressHash, &destinationHash, &networkBoundary, &networkHash, &value.CreatedAt, &value.VerifiedAt); err != nil {
+		return OperationEffect{}, err
+	}
+	if credentialFence < 0 || credentialEpoch < 0 {
+		return OperationEffect{}, ErrOperationIdempotency
+	}
+	value.CredentialLeaseFence, value.CredentialRevocationEpoch = uint64(credentialFence), uint64(credentialEpoch)
+	var err error
+	value.ExternalBoundary, err = boundaryFromColumns(egressHash, destinationHash, networkBoundary, networkHash)
+	if err != nil {
 		return OperationEffect{}, err
 	}
 	return value, nil

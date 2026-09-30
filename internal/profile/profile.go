@@ -237,6 +237,33 @@ func (s *Store) Load() (Metadata, error) {
 	if _, err := ensurePrivateDirectory(s.root); err != nil {
 		return Metadata{}, err
 	}
+	return s.loadExisting()
+}
+
+// LoadReadOnly loads an existing profile without creating directories or
+// changing permissions. It is intended for diagnostics that must not mutate
+// local profile state. Missing or insecure roots fail closed.
+func (s *Store) LoadReadOnly() (Metadata, error) {
+	if s == nil {
+		return Metadata{}, ErrInvalidRoot
+	}
+	info, err := os.Lstat(s.root)
+	if errors.Is(err, os.ErrNotExist) {
+		return Metadata{}, ErrNotFound
+	}
+	if err != nil {
+		return Metadata{}, fmt.Errorf("inspect profile directory: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return Metadata{}, ErrUnsafePath
+	}
+	if info.Mode().Perm() != DirectoryMode {
+		return Metadata{}, ErrInsecurePermissions
+	}
+	return s.loadExisting()
+}
+
+func (s *Store) loadExisting() (Metadata, error) {
 	path := filepath.Join(s.root, metadataFilename)
 	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {

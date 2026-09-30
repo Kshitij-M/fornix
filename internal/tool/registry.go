@@ -83,6 +83,7 @@ func (r *Registry) Names() []string {
 
 func cloneDefinition(def contracts.ToolDefinition) contracts.ToolDefinition {
 	def.ArgvPrefix = append([]string(nil), def.ArgvPrefix...)
+	def.PathArgvIndexes = append([]int(nil), def.PathArgvIndexes...)
 	def.AllowedEnvKeys = append([]string(nil), def.AllowedEnvKeys...)
 	return def
 }

@@ -46,6 +46,7 @@ func TestRenderManifestHasSafeDeterministicDefaults(t *testing.T) {
 	forbidden := []string{
 		"5432:5432",
 		"0.0.0.0:8201",
+		"docker.sock",
 		"FORNIX_AUTH_MODE: \"development\"",
 		":latest",
 		"{{",
@@ -115,5 +116,15 @@ func TestManifestRejectsRepositoryPathTraversalAndMissingDirectory(t *testing.T)
 		if err := config.Validate(); !errors.Is(err, ErrInvalidManifestConfig) {
 			t.Errorf("repository path %q error = %v, want ErrInvalidManifestConfig", path, err)
 		}
+	}
+}
+
+func TestDevelopmentComposeDoesNotExposeDockerDaemonSocket(t *testing.T) {
+	compose, err := os.ReadFile(filepath.Join("..", "..", "compose.yaml"))
+	if err != nil {
+		t.Fatalf("read development Compose manifest: %v", err)
+	}
+	if strings.Contains(strings.ToLower(string(compose)), "docker.sock") {
+		t.Fatal("development Compose must not expose the Docker daemon socket to the control plane")
 	}
 }

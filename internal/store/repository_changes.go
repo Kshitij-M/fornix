@@ -174,7 +174,7 @@ func (s *RepositoryChangeStore) Propose(ctx context.Context, input ChangeProposa
 		status = contracts.ChangeRejected
 	}
 
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, request.WorkspaceID)
 	if err != nil {
 		return contracts.ChangeProposal{}, false, fmt.Errorf("begin change proposal: %w", err)
 	}
@@ -307,7 +307,7 @@ func validateChangePacketBudget(packet contracts.ChangePacket, budget contracts.
 
 // Get reads a proposal and its immutable operation/artifact references.
 func (s *RepositoryChangeStore) Get(ctx context.Context, workspaceID, proposalID string) (contracts.ChangeProposal, error) {
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, strings.TrimSpace(workspaceID))
 	if err != nil {
 		return contracts.ChangeProposal{}, err
 	}
@@ -343,7 +343,7 @@ func (s *RepositoryChangeStore) Approve(ctx context.Context, request contracts.C
 		request.Actor.WorkspaceID = request.WorkspaceID
 	}
 	actorJSON, _ := json.Marshal(request.Actor)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, request.WorkspaceID)
 	if err != nil {
 		return contracts.ChangeApproval{}, contracts.ChangeProposal{}, false, err
 	}
@@ -429,7 +429,7 @@ func (s *RepositoryChangeStore) BeginApplication(ctx context.Context, request co
 		request.Actor.WorkspaceID = request.WorkspaceID
 	}
 	actorJSON, _ := json.Marshal(request.Actor)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, request.WorkspaceID)
 	if err != nil {
 		return contracts.ChangeApplication{}, contracts.ChangeProposal{}, false, err
 	}
@@ -515,7 +515,7 @@ func (s *RepositoryChangeStore) FinalizeApplication(ctx context.Context, input C
 	actorJSON, _ := json.Marshal(input.Actor)
 	conflictJSON, _ := jsonStringOrEmpty(input.Conflict)
 	failureJSON, _ := jsonStringOrEmpty(input.Failure)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, input.WorkspaceID)
 	if err != nil {
 		return contracts.ChangeApplication{}, contracts.ChangeProposal{}, err
 	}
@@ -604,7 +604,7 @@ func (s *RepositoryChangeStore) Disclose(ctx context.Context, request contracts.
 	if err != nil {
 		return contracts.ChangeDisclosureResult{}, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, normalized.WorkspaceID)
 	if err != nil {
 		return contracts.ChangeDisclosureResult{}, err
 	}

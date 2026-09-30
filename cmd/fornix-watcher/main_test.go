@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/omaveda/fornix/internal/testutil"
 )
 
 // ---------- ignore-pattern matcher ----------
@@ -78,6 +80,7 @@ func newTestWatcher(t *testing.T, debounceMs int) *watcher {
 }
 
 func TestDebounce_CoalescesRapidEvents(t *testing.T) {
+	testutil.RequireLocalHTTP(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		rw.WriteHeader(http.StatusOK)
 	}))
@@ -173,6 +176,7 @@ func TestRequeueWithBackoff_Caps(t *testing.T) {
 // ---------- 5xx requeue end-to-end ----------
 
 func TestProcess_5xx_RequeuesNoDrop(t *testing.T) {
+	testutil.RequireLocalHTTP(t)
 	var attempts atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		attempts.Add(1)
@@ -203,6 +207,7 @@ func TestProcess_5xx_RequeuesNoDrop(t *testing.T) {
 }
 
 func TestProcess_4xx_DropsNoRequeue(t *testing.T) {
+	testutil.RequireLocalHTTP(t)
 	srv := httptest.NewServer(http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
 		http.Error(rw, "bad", http.StatusBadRequest)
 	}))
@@ -226,6 +231,7 @@ func TestProcess_4xx_DropsNoRequeue(t *testing.T) {
 // ---------- /healthz endpoint ----------
 
 func TestHealthz_ServesMetrics(t *testing.T) {
+	testutil.RequireLocalHTTP(t)
 	w := newTestWatcher(t, 50)
 	w.metrics.startedAt = time.Now()
 	w.metrics.eventsSinceStart.Store(7)

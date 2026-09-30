@@ -118,6 +118,87 @@ func TestToolRunStoreConcurrentReservationAndTerminalReplay(t *testing.T) {
 	}()
 }
 
+func TestToolEffectFinalizerUsesCallerTransactionAndStableResultIdentity(t *testing.T) {
+	store, pool, workspace := newToolRunTestStore(t)
+	ctx := context.Background()
+	request := durableToolRequest(workspace, "effect-finalizer-transaction")
+	run, duplicate, err := store.Reserve(ctx, request, contracts.ToolModeAutomatic)
+	if err != nil || duplicate {
+		t.Fatalf("reserve run=%+v duplicate=%t err=%v", run, duplicate, err)
+	}
+	run, err = store.MarkStarted(ctx, run)
+	if err != nil || run.Status != contracts.ToolRunRunning {
+		t.Fatalf("start run=%+v err=%v", run, err)
+	}
+	result := contracts.ToolResult{Status: contracts.ToolRunSucceeded, Stdout: "verified result"}
+	resultHash := result.Hash()
+
+	rolledBack, err := beginWorkspaceTx(ctx, pool, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinalizeEffectResultTx(ctx, rolledBack, run, result, resultHash); err != nil {
+		_ = rolledBack.Rollback(ctx)
+		t.Fatalf("stage tool finalization: %v", err)
+	}
+	inside, err := readToolRunTx(ctx, rolledBack, workspace, run.IdempotencyKey)
+	if err != nil || inside.Status != contracts.ToolRunSucceeded || inside.Result == nil || inside.Result.ContentHash != resultHash {
+		_ = rolledBack.Rollback(ctx)
+		t.Fatalf("uncommitted tool result=%+v err=%v", inside, err)
+	}
+	if err := rolledBack.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	afterRollback, err := store.Get(ctx, workspace, run.IdempotencyKey)
+	if err != nil || afterRollback.Status != contracts.ToolRunRunning || afterRollback.Result != nil {
+		t.Fatalf("tool result escaped caller rollback: run=%+v err=%v", afterRollback, err)
+	}
+
+	committed, err := beginWorkspaceTx(ctx, pool, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinalizeEffectResultTx(ctx, committed, run, result, resultHash); err != nil {
+		_ = committed.Rollback(ctx)
+		t.Fatalf("stage canonical tool finalization: %v", err)
+	}
+	if err := committed.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	final, err := store.Get(ctx, workspace, run.IdempotencyKey)
+	if err != nil || final.Status != contracts.ToolRunSucceeded || final.Result == nil || final.Result.ContentHash != resultHash {
+		t.Fatalf("committed tool result=%+v err=%v", final, err)
+	}
+	duplicateTx, err := beginWorkspaceTx(ctx, pool, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinalizeEffectResultTx(ctx, duplicateTx, run, result, resultHash); err != nil {
+		_ = duplicateTx.Rollback(ctx)
+		t.Fatalf("exact terminal duplicate was rejected: %v", err)
+	}
+	if err := duplicateTx.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	conflictTx, err := beginWorkspaceTx(ctx, pool, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conflicting := contracts.ToolResult{Status: contracts.ToolRunSucceeded, Stdout: "different result"}
+	if err := store.FinalizeEffectResultTx(ctx, conflictTx, run, conflicting, conflicting.Hash()); !errors.Is(err, ErrToolResultHashConflict) {
+		_ = conflictTx.Rollback(ctx)
+		t.Fatalf("conflicting terminal result error=%v, want hash conflict", err)
+	}
+	_ = conflictTx.Rollback(ctx)
+	var succeededEvents int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM fornix.control_events WHERE workspace_id=$1 AND event_type=$2`, workspace, contracts.ToolEventSucceeded).Scan(&succeededEvents); err != nil {
+		t.Fatal(err)
+	}
+	if succeededEvents != 1 {
+		t.Fatalf("tool success events=%d want 1", succeededEvents)
+	}
+}
+
 func TestToolRunStoreInteractiveApprovalIsDurableAndAudited(t *testing.T) {
 	store, pool, workspace := newToolRunTestStore(t)
 	request := durableToolRequest(workspace, "approval-run")
@@ -171,5 +252,55 @@ func TestToolRunStoreTaskFenceRejectsStaleWorker(t *testing.T) {
 	}
 	if _, err := store.MarkStarted(context.Background(), run); !errors.Is(err, ErrTaskLeaseFenced) {
 		t.Fatalf("stale start error=%v", err)
+	}
+}
+
+func TestToolRunStoreAgentRunFenceRejectsStaleWorker(t *testing.T) {
+	store, pool, workspace := newToolRunTestStore(t)
+	ctx := context.Background()
+	runs := NewAgentRunStore(pool, NewEventStore(pool))
+	run, _, err := runs.Reserve(ctx, durableAgentRequest(workspace, "tool-agent-fence"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, `DELETE FROM fornix.agent_run_worker_leases WHERE workspace_id=$1`, workspace)
+		_, _ = pool.Exec(ctx, `DELETE FROM fornix.agent_runs WHERE workspace_id=$1`, workspace)
+		_, _ = pool.Exec(ctx, `DELETE FROM fornix.control_events WHERE workspace_id=$1`, workspace)
+	})
+	first, err := runs.AcquireAgentRunLease(ctx, workspace, run.ID, "worker-a", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := durableToolRequest(workspace, "tool-agent-fence-effect")
+	request.AgentRun = &contracts.EntityRef{ID: run.ID, Kind: "agent_run", WorkspaceID: workspace}
+	request.AgentRunOwnerID, request.AgentRunFence = first.Lease.OwnerID, first.Lease.Fence
+	reserved, existing, err := store.Reserve(ctx, request, contracts.ToolModeAutomatic)
+	if err != nil || existing {
+		t.Fatalf("reserve=%+v existing=%t err=%v", reserved, existing, err)
+	}
+	if err := runs.ReleaseAgentRunLease(ctx, first.Lease); err != nil {
+		t.Fatal(err)
+	}
+	second, err := runs.AcquireAgentRunLease(ctx, workspace, run.ID, "worker-b", time.Second)
+	if err != nil || second.Lease.Fence <= first.Lease.Fence {
+		t.Fatalf("takeover=%+v err=%v", second, err)
+	}
+	replayRequest := request
+	replayRequest.AgentRunOwnerID, replayRequest.AgentRunFence = second.Lease.OwnerID, second.Lease.Fence
+	replayed, duplicate, err := store.Reserve(ctx, replayRequest, contracts.ToolModeAutomatic)
+	expectedHash, hashErr := request.RequestHash()
+	if err != nil || hashErr != nil || !duplicate || replayed.RequestHash != expectedHash {
+		t.Fatalf("takeover duplicate was not replayable: %+v duplicate=%t err=%v", replayed, duplicate, err)
+	}
+	if _, err := store.MarkStarted(ctx, reserved); !errors.Is(err, ErrAgentRunLeaseFenced) {
+		t.Fatalf("stale tool start error=%v", err)
+	}
+	recorded, err := store.Get(ctx, workspace, request.IdempotencyKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recorded.Status != contracts.ToolRunPending || recorded.AgentRunFence != first.Lease.Fence {
+		t.Fatalf("stale worker changed tool ledger: %+v", recorded)
 	}
 }

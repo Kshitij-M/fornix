@@ -16,6 +16,7 @@ import (
 	pgvector "github.com/pgvector/pgvector-go"
 
 	"github.com/omaveda/fornix/internal/contracts"
+	fornixstore "github.com/omaveda/fornix/internal/store"
 )
 
 // Store owns read-only retrieval. It deliberately does not cache, mutate
@@ -76,6 +77,9 @@ func (s *Store) Retrieve(ctx context.Context, request contracts.RetrievalRequest
 		return Result{}, fmt.Errorf("begin retrieval snapshot: %w", err)
 	}
 	defer func() { _ = tx.Rollback(context.Background()) }()
+	if err := fornixstore.SetWorkspaceContext(ctx, tx, normalized.WorkspaceID); err != nil {
+		return Result{}, err
+	}
 
 	set := &candidateSet{byKey: make(map[string]candidate)}
 	trace := contracts.RetrievalTrace{PlanHash: PlanHash(plan), Stages: make([]contracts.RetrievalStageTrace, 0, len(plan.Stages))}

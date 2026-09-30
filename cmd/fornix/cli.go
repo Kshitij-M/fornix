@@ -91,6 +91,8 @@ func runCLI(args []string) error {
 		return cli.runCommand(parts[1:])
 	case "operation":
 		return cli.operationCommand(parts[1:])
+	case "workflow":
+		return cli.workflowCommand(parts[1:])
 	case "runs":
 		return cli.runCommand(append([]string{"list"}, parts[1:]...))
 	case "retrieve":
@@ -111,6 +113,8 @@ func runCLI(args []string) error {
 		return cli.validationCommand(parts[1:])
 	case "policy":
 		return cli.policyCommand(parts[1:])
+	case "qualification":
+		return cli.qualificationCommand(parts[1:])
 	case "incident":
 		return cli.incidentCommand(parts[1:])
 	case "reference-workflow":
@@ -179,7 +183,9 @@ Work:
   change      Propose, approve, apply, and disclose repository changes
   validation  Run and inspect post-change validation
   policy      Inspect and resolve validation policy packs
+  qualification Run, merge, sign, validate, import, hash, and inspect readiness evidence
 	 operation   Create, claim, execute, lease, renew, release, effect recovery, and replay operations
+		workflow    Create, lease, advance, approve, verify, cancel, replay, and receipt workflows
   incident    Run the bounded multi-domain incident workflow
 
 Identity and diagnostics:
@@ -221,7 +227,7 @@ func printCompletion(args []string) error {
 }
 
 func completionScript(shell string) (string, error) {
-	const commands = "start stop restart status logs doctor setup demo run task ingest retrieve evaluation receipt artifact evidence change validation policy operation metrics workspace identity role api-key upgrade uninstall support version completion help"
+	const commands = "start stop restart status logs doctor setup demo run task ingest retrieve evaluation receipt artifact evidence change validation policy qualification operation metrics workspace identity role api-key upgrade uninstall support version completion help"
 	switch strings.ToLower(strings.TrimSpace(shell)) {
 	case "bash":
 		return fmt.Sprintf(`_fornix_complete() {
@@ -441,6 +447,155 @@ func (c *operatorCLI) runCommand(args []string) error {
 		return c.requestPrint(http.MethodPost, "/v1/agent/run/"+valueArg(args[1:], "id", "")+"/replay?workspace_id="+url.QueryEscape(c.workspace), map[string]any{}, false)
 	default:
 		return fmt.Errorf("unknown run command %q", args[0])
+	}
+}
+
+// workflowCommand exposes the domain-neutral durable workflow control plane.
+// Leases are explicit: the CLI never hides ownership acquisition or silently
+// refreshes a fencing token.
+func (c *operatorCLI) workflowCommand(args []string) error {
+	if len(args) == 0 {
+		return errors.New("workflow requires create, get, lease, renew, release, advance, approve, verify, cancel, replay, or receipt")
+	}
+	switch args[0] {
+	case "create":
+		path := "/v1/workflows"
+		requestFile := valueArg(args[1:], "request-file", "")
+		if requestFile == "" {
+			return errors.New("workflow create requires --request-file PATH")
+		}
+		payload, err := readBoundedJSONFile(requestFile, 1<<20)
+		if err != nil {
+			return err
+		}
+		var request contracts.WorkflowCreateRequest
+		if err := json.Unmarshal(payload, &request); err != nil {
+			return fmt.Errorf("decode workflow request: %w", err)
+		}
+		request.WorkspaceID = c.workspace
+		key := valueArg(args[1:], "idempotency", "")
+		if key == "" {
+			key = "workflow:create:" + c.workspace + ":" + sha256String(string(payload))
+		}
+		request.Idempotency = key
+		return c.requestPrintWithHeaders(http.MethodPost, path, request, false, map[string]string{"Idempotency-Key": key})
+	case "get":
+		id := valueArg(args[1:], "id", "")
+		if id == "" {
+			return errors.New("workflow get requires --id ID")
+		}
+		return c.requestPrint(http.MethodGet, "/v1/workflows/"+url.PathEscape(id)+"?workspace_id="+url.QueryEscape(c.workspace), nil, false)
+	case "lease":
+		id := valueArg(args[1:], "id", "")
+		if id == "" {
+			return errors.New("workflow lease requires --id ID")
+		}
+		path := "/v1/workflows/" + url.PathEscape(id) + "/lease?workspace_id=" + url.QueryEscape(c.workspace)
+		return c.requestPrint(http.MethodPost, path, map[string]any{"ttl_ms": int64Value(args[1:], "ttl-ms", 30000)}, false)
+	case "renew", "release", "advance", "approve", "cancel":
+		id := valueArg(args[1:], "id", "")
+		if id == "" {
+			return fmt.Errorf("workflow %s requires --id ID", args[0])
+		}
+		fence := uint64Value(args[1:], "fence", 0)
+		if fence == 0 {
+			return fmt.Errorf("workflow %s requires --fence FENCE", args[0])
+		}
+		headers := map[string]string{
+			"X-Operation-Fence": strconv.FormatUint(fence, 10),
+			"Idempotency-Key":   "workflow:" + args[0] + ":" + c.workspace + ":" + id,
+		}
+		if taskFence := uint64Value(args[1:], "task-fence", 0); taskFence != 0 {
+			headers["X-Task-Fence"] = strconv.FormatUint(taskFence, 10)
+		}
+		path := "/v1/workflows/" + url.PathEscape(id) + "/" + args[0] + "?workspace_id=" + url.QueryEscape(c.workspace)
+		body := any(nil)
+		switch args[0] {
+		case "renew":
+			body = map[string]any{"ttl_ms": int64Value(args[1:], "ttl-ms", 30000)}
+		case "approve":
+			stepID := valueArg(args[1:], "step-id", "")
+			if stepID == "" {
+				return errors.New("workflow approve requires --step-id ID")
+			}
+			body = map[string]any{"step_id": stepID}
+		}
+		return c.requestPrintWithHeaders(http.MethodPost, path, body, false, headers)
+	case "verify":
+		id := valueArg(args[1:], "id", "")
+		if id == "" {
+			return errors.New("workflow verify requires --id ID")
+		}
+		operationFence := uint64Value(args[1:], "fence", 0)
+		if operationFence == 0 {
+			return errors.New("workflow verify requires --fence FENCE")
+		}
+		effectFence := uint64Value(args[1:], "effect-fence", 0)
+		if effectFence == 0 {
+			return errors.New("workflow verify requires --effect-fence FENCE")
+		}
+		stepID := valueArg(args[1:], "step-id", "")
+		if stepID == "" {
+			return errors.New("workflow verify requires --step-id ID")
+		}
+		expectedEffectVersion := int64Value(args[1:], "expected-effect-version", 0)
+		if expectedEffectVersion < 1 {
+			return errors.New("workflow verify requires --expected-effect-version VERSION")
+		}
+		expectedLinkVersion := int64Value(args[1:], "expected-link-version", 0)
+		if expectedLinkVersion < 1 {
+			return errors.New("workflow verify requires --expected-link-version VERSION")
+		}
+		idempotencyKey := valueArg(args[1:], "idempotency", "")
+		if idempotencyKey == "" {
+			// Identical proof state replays the same attempt; a later attempt
+			// against newer effect/link versions receives a fresh key.
+			proofIdentity := strings.Join([]string{
+				c.workspace, id, stepID,
+				strconv.FormatInt(expectedEffectVersion, 10),
+				strconv.FormatInt(expectedLinkVersion, 10),
+			}, "\x00")
+			idempotencyKey = "workflow:verify:" + sha256String(proofIdentity)
+		}
+		body := contracts.WorkflowVerifyRequest{
+			StepID: stepID, EffectFence: effectFence, ExpectedEffectVer: expectedEffectVersion,
+			ExpectedLinkVersion: expectedLinkVersion, IdempotencyKey: idempotencyKey,
+			TaskFence: uint64Value(args[1:], "task-fence", 0),
+		}
+		headers := map[string]string{
+			"X-Operation-Fence": strconv.FormatUint(operationFence, 10),
+			"X-Effect-Fence":    strconv.FormatUint(effectFence, 10),
+			"Idempotency-Key":   idempotencyKey,
+		}
+		if body.TaskFence != 0 {
+			headers["X-Task-Fence"] = strconv.FormatUint(body.TaskFence, 10)
+		}
+		path := "/v1/workflows/" + url.PathEscape(id) + "/verify?workspace_id=" + url.QueryEscape(c.workspace)
+		return c.requestPrintWithHeaders(http.MethodPost, path, body, false, headers)
+	case "replay":
+		id := valueArg(args[1:], "id", "")
+		if id == "" {
+			return errors.New("workflow replay requires --id ID")
+		}
+		path := "/v1/workflows/" + url.PathEscape(id) + "/replay?workspace_id=" + url.QueryEscape(c.workspace)
+		body := map[string]any{"from_version": int64Value(args[1:], "from-version", 0), "limit": intValue(args[1:], "limit", 4096)}
+		return c.requestPrint(http.MethodPost, path, body, false)
+	case "receipt":
+		id := valueArg(args[1:], "id", "")
+		if id == "" {
+			return errors.New("workflow receipt requires --id ID")
+		}
+		path := "/v1/workflows/" + url.PathEscape(id) + "/receipt?workspace_id=" + url.QueryEscape(c.workspace)
+		if level := valueArg(args[1:], "level", ""); level != "" {
+			path += "&level=" + url.QueryEscape(level)
+		}
+		if valueArg(args[1:], "finalize", "false") == "true" {
+			key := "workflow:receipt:" + c.workspace + ":" + id
+			return c.requestPrintWithHeaders(http.MethodPost, path, nil, false, map[string]string{"Idempotency-Key": key})
+		}
+		return c.requestPrint(http.MethodGet, path, nil, false)
+	default:
+		return fmt.Errorf("unknown workflow command %q", args[0])
 	}
 }
 

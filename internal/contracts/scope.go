@@ -17,12 +17,15 @@ const (
 	MaxDomainIDLength          = 128
 	MaxDomainNameLength        = 128
 	MaxDomainVersionLength     = 64
-	MaxDomainSchemaVersion     = 1024
-	MaxDomainHashLength        = 64
-	MaxDomainMetadataEntries   = 32
-	MaxDomainMetadataKeyLength = 64
-	MaxDomainMetadataValueLen  = 128
-	MaxDomainReferences        = 128
+	// MaxCredentialSourceVersionLength bounds opaque managed-secret version
+	// metadata without pretending that it is a domain version identifier.
+	MaxCredentialSourceVersionLength = 128
+	MaxDomainSchemaVersion           = 1024
+	MaxDomainHashLength              = 64
+	MaxDomainMetadataEntries         = 32
+	MaxDomainMetadataKeyLength       = 64
+	MaxDomainMetadataValueLen        = 128
+	MaxDomainReferences              = 128
 )
 
 var (

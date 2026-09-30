@@ -41,6 +41,9 @@ func (s *server) handleOperatorBootstrap(w http.ResponseWriter, r *http.Request)
 	if err := registerIncidentConnector(s.connectorRegistry, result.Workspace.ID); err != nil {
 		log.Printf("register incident connector %s: %v", result.Workspace.ID, err)
 	}
+	if err := registerFakeDomainsConnector(s.connectorRegistry, result.Workspace.ID); err != nil {
+		log.Printf("register fake domain connector %s: %v", result.Workspace.ID, err)
+	}
 	if err := s.connectorRegistry.TrustWorkspace(result.Workspace.ID, "workspace-builtins-v1"); err != nil {
 		log.Printf("trust workspace connectors %s: %v", result.Workspace.ID, err)
 	}

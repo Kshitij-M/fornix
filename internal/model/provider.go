@@ -17,10 +17,11 @@ import (
 )
 
 var (
-	ErrProviderNotFound   = errors.New("model provider not found")
-	ErrProviderDuplicate  = errors.New("model provider already registered")
-	ErrModelCallInFlight  = errors.New("model call already in progress")
-	ErrModelCallCompleted = errors.New("model call already completed")
+	ErrProviderNotFound          = errors.New("model provider not found")
+	ErrProviderDuplicate         = errors.New("model provider already registered")
+	ErrModelCallInFlight         = errors.New("model call already in progress")
+	ErrModelCallCompleted        = errors.New("model call already completed")
+	ErrModelCallRecoveryRequired = errors.New("model call requires external outcome recovery")
 )
 
 // StreamSink receives provider-neutral events. Providers must not put secrets
@@ -46,6 +47,40 @@ type Provider interface {
 	Complete(context.Context, contracts.ModelRequest) (contracts.ModelResponse, error)
 	Stream(context.Context, contracts.ModelRequest, StreamSink) (contracts.ModelResponse, error)
 	Embed(context.Context, EmbeddingRequest) ([]float32, error)
+}
+
+// BoundaryProvider exposes the exact redacted egress envelope constructed by
+// a provider. It is optional for deterministic fake providers, which never
+// cross a network boundary.
+type BoundaryProvider interface {
+	BoundaryAuthority() contracts.ExternalBoundaryAuthority
+}
+
+// EmbeddingProvider is an explicit capability boundary. Providers that only
+// implement chat cannot accidentally receive an embedding request merely
+// because they are present in the general model registry.
+type EmbeddingProvider interface {
+	Provider
+	EmbedScoped(context.Context, contracts.EmbeddingRequest) (contracts.EmbeddingResponse, error)
+}
+
+// EmbeddingReconciler is an explicit provider capability for resolving an
+// already-dispatched request. It receives hashes and provider identity only;
+// implementations must query their own idempotency/result API and must not
+// regenerate an embedding from source text.
+type EmbeddingReconciler interface {
+	EmbeddingProvider
+	ReconcileEmbedding(context.Context, contracts.EmbeddingReconciliationRequest) (contracts.EmbeddingResponse, error)
+}
+
+// EffectRunner is the generic durable boundary used by production
+// composition. The callback is invoked only after the runner has reserved a
+// fenced operation/effect identity. Implementations must preserve the
+// provider's at-least-once semantics and must not expose credentials through
+// the callback contract.
+type EffectRunner interface {
+	RunComplete(context.Context, contracts.ModelRequest, contracts.ProviderRef, int, func(context.Context) (contracts.ModelResponse, error)) (contracts.ModelResponse, error)
+	RunStream(context.Context, contracts.ModelRequest, contracts.ProviderRef, int, StreamSink, func(context.Context, StreamSink) (contracts.ModelResponse, error)) (contracts.ModelResponse, error)
 }
 
 // Registry is an explicit provider registry. Registration is all-or-nothing;

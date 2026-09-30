@@ -36,9 +36,14 @@ type Result struct {
 // expiry. The model/tool orchestrator is bounded by the run's persisted
 // budgets.
 type Worker struct {
-	Store             *store.AgentRunStore
-	Orchestrator      *agentloop.Orchestrator
-	OwnerID           string
+	Store        *store.AgentRunStore
+	Orchestrator *agentloop.Orchestrator
+	OwnerID      string
+	// ListWorkspaces is required when Run is called without an explicit
+	// workspace. The server supplies a bounded, deterministic Postgres-backed
+	// implementation. Keeping enumeration outside AgentRunStore avoids ever
+	// opening a cross-workspace transaction under one RLS context.
+	ListWorkspaces    func(context.Context) ([]string, error)
 	LeaseTTL          time.Duration
 	HeartbeatInterval time.Duration
 	PollInterval      time.Duration
@@ -136,6 +141,12 @@ func (w *Worker) Run(ctx context.Context, workspaceID string) error {
 	if interval <= 0 || interval > contracts.MaxAgentRunPoll {
 		interval = contracts.DefaultAgentRunPoll
 	}
+	if strings.TrimSpace(workspaceID) == "" {
+		if w.ListWorkspaces == nil {
+			return fmt.Errorf("%w: workspace enumeration is required for multi-workspace polling", ErrWorkerNotConfigured)
+		}
+		return w.runAllWorkspaces(ctx, interval)
+	}
 	for {
 		result, err := w.RunOnce(ctx, workspaceID)
 		if err != nil && !errors.Is(err, context.Canceled) {
@@ -153,6 +164,40 @@ func (w *Worker) Run(ctx context.Context, workspaceID string) error {
 				}
 			}
 			continue
+		}
+		if !waitForPoll(ctx, interval) {
+			return ctx.Err()
+		}
+	}
+}
+
+// runAllWorkspaces refreshes the bounded workspace inventory on every poll.
+// This lets a newly bootstrapped workspace join the scheduler without a
+// process restart while preserving one explicit workspace transaction per
+// claim. A workspace listing failure is surfaced instead of silently turning
+// the scheduler into a no-op.
+func (w *Worker) runAllWorkspaces(ctx context.Context, interval time.Duration) error {
+	for {
+		workspaces, err := w.ListWorkspaces(ctx)
+		if err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return fmt.Errorf("list agent-run workspaces: %w", err)
+		}
+		for _, workspaceID := range workspaces {
+			workspaceID = strings.TrimSpace(workspaceID)
+			if workspaceID == "" {
+				continue
+			}
+			if _, err := w.RunOnce(ctx, workspaceID); err != nil && !errors.Is(err, context.Canceled) && ctx.Err() == nil {
+				// A claim/execution failure is durable state. Continue to the next
+				// workspace so one unhealthy tenant cannot starve the others.
+				continue
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
 		}
 		if !waitForPoll(ctx, interval) {
 			return ctx.Err()

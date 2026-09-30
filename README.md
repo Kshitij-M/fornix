@@ -192,6 +192,9 @@ The current implementation includes the following tested slices:
 - bounded agent runs and a Postgres-backed single-node scheduler;
 - workspace identities, RBAC, hashed/expirable/revocable/rotatable API keys,
   credential references, and authorization audit records;
+- controlled outbound policy plus managed credential source-version/expiry
+  binding, and opt-in Ed25519-signed capability-schema catalogs with durable
+  Postgres publication, monotonic revisions, and fail-closed admission;
 - content-addressed Postgres artifacts, output links, retention/integrity
   operations, observations, cost accounting, offline evaluation, and
   retrieval-surface capture;
@@ -238,10 +241,10 @@ connectors, effects, policy, and workflows first-class:
 | [#45](https://github.com/Kshitij-M/fornix/issues/45) | Connector and capability registry | Implemented alpha slice; process-local |
 | [#39](https://github.com/Kshitij-M/fornix/issues/39) | Durable generic operation authority | Alpha foundation implemented; final qualification and adapter integration remain |
 | [#46](https://github.com/Kshitij-M/fornix/issues/46) | Universal policy, approvals, and external effects | Alpha Postgres admission/effect foundation; connector qualification remains |
-| [#43](https://github.com/Kshitij-M/fornix/issues/43) | HTTP/API and read-only SQL connectors | Alpha bounded reference adapters implemented; production qualification remains |
+| [#43](https://github.com/Kshitij-M/fornix/issues/43) | HTTP/API and read-only SQL connectors | Alpha bounded reference adapters; SQL v2 accepts only structured queries (no caller-authored SQL); production qualification remains |
 | [#44](https://github.com/Kshitij-M/fornix/issues/44) | Durable multi-step workflow runtime | Alpha foundation implemented; qualification remains |
 | [#42](https://github.com/Kshitij-M/fornix/issues/42) | Multi-domain reference workflow | Fake-first alpha workflow implemented; production qualification remains |
-| [#40](https://github.com/Kshitij-M/fornix/issues/40) | Universal production qualification | In progress: authority, RLS, capacity, queue-claim, and adapter-worker qualification slices; production security, fairness, HA, recovery, backup/restore, and operational evidence remain |
+| [#40](https://github.com/Kshitij-M/fornix/issues/40) | Universal production qualification | In progress: authority, RLS, capacity, queue-claim, adapter-worker, managed-credential, signed-schema, effect-dispatch, and embedding-recovery qualification slices; production security, fairness, HA, live-provider, backup/restore, and operational evidence remain |
 
 This roadmap is not a claim that the complete universal production platform
 already exists. It is the sequence for extending the implemented control-plane
@@ -455,7 +458,8 @@ Fornix is intentionally being developed as a sequence of small, testable
 control-plane slices that lead toward safe autonomous production-system work.
 Repository maintenance is the first adapter and qualification path. The
 current alpha still lacks a fully automated agent-to-change workflow, OAuth/SSO,
-external KMS or secret-manager integration, PostgreSQL row-level security,
+a deployment-specific KMS or secret-manager adapter and a hosted production deployment
+that has completed the role-separated PostgreSQL/RLS qualification,
 general background evaluation and ingestion scheduling, multi-agent execution
 graphs, a general sandbox provider, external artifact storage, deployment-
 specific backup/PITR/HA operations, and capacity benchmarks. A destructive

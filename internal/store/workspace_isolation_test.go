@@ -41,27 +41,38 @@ func TestPostgresWorkspaceIsolationQualification(t *testing.T) {
 		t.Fatalf("qualification requires a non-superuser NOBYPASSRLS role")
 	}
 
-	var protected int
+	var total, protected int
 	if err := pool.QueryRow(ctx, `
-		SELECT count(*)
+		SELECT count(*), count(*) FILTER (WHERE c.relrowsecurity)
 		FROM pg_class c
 		JOIN pg_namespace n ON n.oid = c.relnamespace
 		WHERE n.nspname = 'fornix'
-		  AND c.relname IN (
-			'operations', 'operation_idempotency', 'operation_transitions',
-			'operation_resources', 'operation_steps', 'operation_attempts',
-			'operation_effects', 'operation_callbacks', 'operation_leases',
-			'operation_links', 'operation_results',
-			'operation_admission_decisions', 'operation_approvals',
-			'operation_approval_transitions', 'operation_effect_state',
-			'operation_effect_transitions', 'operation_effect_leases',
-			'operation_resource_leases', 'operation_resource_lease_history'
-		  )
-		  AND c.relrowsecurity`).Scan(&protected); err != nil {
+		  AND c.relkind IN ('r', 'p')
+		  AND c.relname <> 'schema_migrations'
+		  AND EXISTS (
+			SELECT 1 FROM pg_attribute a
+			WHERE a.attrelid = c.oid AND a.attname IN ('workspace_id', 'audit_workspace_id') AND NOT a.attisdropped
+		  )`).Scan(&total, &protected); err != nil {
 		t.Fatalf("inspect RLS policies: %v", err)
 	}
-	if protected != 19 {
-		t.Fatalf("expected RLS on all 19 generic authority tables, got %d", protected)
+	if total == 0 || protected != total {
+		t.Fatalf("expected RLS on every workspace-scoped table, got %d/%d", protected, total)
+	}
+	var policies int
+	if err := pool.QueryRow(ctx, `
+		SELECT count(*)
+		FROM pg_policies p
+		JOIN pg_class c ON c.relname = p.tablename
+		JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = p.schemaname
+		WHERE p.schemaname = 'fornix' AND p.policyname = 'workspace_scope_isolation'
+		  AND EXISTS (
+			SELECT 1 FROM pg_attribute a
+			WHERE a.attrelid = c.oid AND a.attname IN ('workspace_id', 'audit_workspace_id') AND NOT a.attisdropped
+		  )`).Scan(&policies); err != nil {
+		t.Fatalf("inspect workspace policies: %v", err)
+	}
+	if policies != total {
+		t.Fatalf("expected one workspace policy per scoped table, got %d/%d", policies, total)
 	}
 
 	tx, err := pool.Begin(ctx)

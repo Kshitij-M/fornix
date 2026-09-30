@@ -59,6 +59,31 @@ func TestWorkflowStepResultRejectsCrossWorkspaceArtifact(t *testing.T) {
 	}
 }
 
+func TestWorkflowRetryWaitMustMatchRetryState(t *testing.T) {
+	deadline := time.Now().UTC().Add(time.Minute)
+	valid := WorkflowStepResult{
+		Status: WorkflowStepAwaitingRetry,
+		Wait:   &WorkflowWait{Kind: WorkflowWaitRetry, Token: "retry-token", ExpiresAt: &deadline},
+	}
+	if err := valid.Normalize("workspace-a"); err != nil {
+		t.Fatalf("valid retry wait rejected: %v", err)
+	}
+	wrongWait := WorkflowStepResult{
+		Status: WorkflowStepAwaitingRetry,
+		Wait:   &WorkflowWait{Kind: WorkflowWaitApproval, Token: "approval-token"},
+	}
+	if err := wrongWait.Normalize("workspace-a"); err == nil {
+		t.Fatal("awaiting_retry accepted a non-retry wait")
+	}
+	wrongState := WorkflowStepResult{
+		Status: WorkflowStepAwaitingApproval,
+		Wait:   &WorkflowWait{Kind: WorkflowWaitRetry, Token: "retry-token", ExpiresAt: &deadline},
+	}
+	if err := wrongState.Normalize("workspace-a"); err == nil {
+		t.Fatal("non-retry state accepted a retry wait")
+	}
+}
+
 func workflowTestPlan(t *testing.T, workspace, hash string) OperationPlan {
 	t.Helper()
 	plan := OperationPlan{ID: "plan-1", OperationID: "operation-1", OperationHash: hash, WorkspaceID: workspace, Actor: ActorRef{ID: "actor-1", Kind: "operator", WorkspaceID: workspace}, Steps: []OperationStep{

@@ -96,7 +96,7 @@ func (s *PolicyStore) Create(ctx context.Context, request contracts.PolicyCreate
 	requestHash := request.RequestHash()
 	actor, _ := json.Marshal(request.Actor)
 	packJSON, _ := json.Marshal(request.Pack)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, request.WorkspaceID)
 	if err != nil {
 		return contracts.ValidationPolicyVersion{}, false, fmt.Errorf("begin policy create: %w", err)
 	}
@@ -181,7 +181,20 @@ func (s *PolicyStore) Get(ctx context.Context, workspaceID, policyID, version st
 	if s == nil || s.pool == nil {
 		return contracts.ValidationPolicyVersion{}, fmt.Errorf("policy store is not configured")
 	}
-	return readPolicyVersion(ctx, s.pool, strings.TrimSpace(workspaceID), strings.TrimSpace(policyID), strings.TrimSpace(version))
+	workspaceID, policyID, version = strings.TrimSpace(workspaceID), strings.TrimSpace(policyID), strings.TrimSpace(version)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
+	if err != nil {
+		return contracts.ValidationPolicyVersion{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	value, err := readPolicyVersion(ctx, tx, workspaceID, policyID, version)
+	if err != nil {
+		return contracts.ValidationPolicyVersion{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return contracts.ValidationPolicyVersion{}, err
+	}
+	return value, nil
 }
 
 // List returns policy versions ordered newest-first by creation time and then
@@ -207,24 +220,21 @@ func (s *PolicyStore) List(ctx context.Context, workspaceID string, limit int, c
 		query = `SELECT policy_id,version FROM fornix.validation_policy_versions WHERE workspace_id=$1 AND (created_at,policy_id,version) < (SELECT created_at,policy_id,version FROM fornix.validation_policy_versions WHERE workspace_id=$1 AND policy_id=$2 AND version=$3) ORDER BY created_at DESC,policy_id,version LIMIT $4`
 		args = []any{workspaceID, parts[0], parts[1], limit + 1}
 	}
-	rows, err := s.pool.Query(ctx, query, args...)
+	var pairs [][2]string
+	err := workspaceQueryRows(ctx, s.pool, workspaceID, query, args, func(rows pgx.Rows) error {
+		pairs = make([][2]string, 0, limit+1)
+		for rows.Next() {
+			var policyID, version string
+			if err := rows.Scan(&policyID, &version); err != nil {
+				return err
+			}
+			pairs = append(pairs, [2]string{policyID, version})
+		}
+		return nil
+	})
 	if err != nil {
 		return PolicyPage{}, err
 	}
-	pairs := make([][2]string, 0, limit+1)
-	for rows.Next() {
-		var policyID, version string
-		if err := rows.Scan(&policyID, &version); err != nil {
-			rows.Close()
-			return PolicyPage{}, err
-		}
-		pairs = append(pairs, [2]string{policyID, version})
-	}
-	if err := rows.Err(); err != nil {
-		rows.Close()
-		return PolicyPage{}, err
-	}
-	rows.Close()
 	// Use the bounded query result as the capacity rather than the raw API
 	// value. This keeps the allocation visibly tied to data already limited by
 	// the query and avoids turning a caller-controlled integer into a memory
@@ -273,7 +283,7 @@ func (s *PolicyStore) lifecycle(ctx context.Context, request contracts.PolicyLif
 	request.Policy.SchemaVersion = contracts.PolicySchemaVersion
 	requestHash := request.RequestHash()
 	actor, _ := json.Marshal(request.Actor)
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, request.WorkspaceID)
 	if err != nil {
 		return contracts.ValidationPolicyVersion{}, false, err
 	}
@@ -397,8 +407,9 @@ func (s *PolicyStore) Default(ctx context.Context, workspaceID string) (contract
 	if s == nil || s.pool == nil {
 		return contracts.ValidationPolicyVersion{}, fmt.Errorf("policy store is not configured")
 	}
+	workspaceID = strings.TrimSpace(workspaceID)
 	var policyID, version string
-	err := s.pool.QueryRow(ctx, `SELECT policy_id,version FROM fornix.validation_policy_defaults WHERE workspace_id=$1`, strings.TrimSpace(workspaceID)).Scan(&policyID, &version)
+	err := workspaceQueryRow(ctx, s.pool, workspaceID, `SELECT policy_id,version FROM fornix.validation_policy_defaults WHERE workspace_id=$1`, []any{workspaceID}, func(row pgx.Row) error { return row.Scan(&policyID, &version) })
 	if errors.Is(err, pgx.ErrNoRows) {
 		return contracts.ValidationPolicyVersion{}, ErrPolicyDefaultMissing
 	}
@@ -520,30 +531,27 @@ func (s *PolicyStore) Audit(ctx context.Context, workspaceID, policyID, version 
 		query = `SELECT id,workspace_id,policy_id,version,policy_hash,operation,from_status,to_status,actor,request_id,idempotency_key,allowed,reason,created_at FROM fornix.validation_policy_audit WHERE workspace_id=$1 AND ($2='' OR policy_id=$2) AND ($3='' OR version=$3) AND id>$4 ORDER BY id LIMIT $5`
 		args = []any{strings.TrimSpace(workspaceID), strings.TrimSpace(policyID), strings.TrimSpace(version), id, limit + 1}
 	}
-	rows, err := s.pool.Query(ctx, query, args...)
+	var page PolicyAuditPage
+	err := workspaceQueryRows(ctx, s.pool, strings.TrimSpace(workspaceID), query, args, func(rows pgx.Rows) error {
+		page = PolicyAuditPage{Items: make([]contracts.PolicyAuditRecord, 0, contracts.MaxPolicyPageSize)}
+		for rows.Next() {
+			var item contracts.PolicyAuditRecord
+			var actorJSON []byte
+			var from, to string
+			if err := rows.Scan(&item.ID, &item.WorkspaceID, &item.PolicyID, &item.Version, &item.PolicyHash, &item.Operation, &from, &to, &actorJSON, &item.RequestID, &item.IdempotencyKey, &item.Allowed, &item.Reason, &item.CreatedAt); err != nil {
+				return err
+			}
+			item.SchemaVersion = contracts.PolicySchemaVersion
+			item.FromStatus = contracts.PolicyLifecycleStatus(from)
+			item.ToStatus = contracts.PolicyLifecycleStatus(to)
+			if err := json.Unmarshal(actorJSON, &item.Actor); err != nil {
+				return err
+			}
+			page.Items = append(page.Items, item)
+		}
+		return nil
+	})
 	if err != nil {
-		return PolicyAuditPage{}, err
-	}
-	defer rows.Close()
-	// The query is limited to MaxPolicyPageSize+1 before rows are materialized;
-	// cap the response allocation by the fixed server-side envelope.
-	page := PolicyAuditPage{Items: make([]contracts.PolicyAuditRecord, 0, contracts.MaxPolicyPageSize)}
-	for rows.Next() {
-		var item contracts.PolicyAuditRecord
-		var actorJSON []byte
-		var from, to string
-		if err := rows.Scan(&item.ID, &item.WorkspaceID, &item.PolicyID, &item.Version, &item.PolicyHash, &item.Operation, &from, &to, &actorJSON, &item.RequestID, &item.IdempotencyKey, &item.Allowed, &item.Reason, &item.CreatedAt); err != nil {
-			return PolicyAuditPage{}, err
-		}
-		item.SchemaVersion = contracts.PolicySchemaVersion
-		item.FromStatus = contracts.PolicyLifecycleStatus(from)
-		item.ToStatus = contracts.PolicyLifecycleStatus(to)
-		if err := json.Unmarshal(actorJSON, &item.Actor); err != nil {
-			return PolicyAuditPage{}, err
-		}
-		page.Items = append(page.Items, item)
-	}
-	if err := rows.Err(); err != nil {
 		return PolicyAuditPage{}, err
 	}
 	if len(page.Items) > limit {

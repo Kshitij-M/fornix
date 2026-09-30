@@ -1,8 +1,10 @@
 package policy
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/omaveda/fornix/internal/contracts"
 )
@@ -99,6 +101,9 @@ func TestAdmissionFailsClosedForMissingFactsAndUnsafePolicy(t *testing.T) {
 		},
 		"fence": func(in *contracts.AdmissionInput) { in.TaskBound = true; in.TaskFenceValid = false },
 		"quota": func(in *contracts.AdmissionInput) { in.QuotaOperations = in.Policy.MaxOperationsPerWindow },
+		"capability rate": func(in *contracts.AdmissionInput) {
+			in.CapabilityOperationsInWindow = in.Capability.RateLimitPerMinute
+		},
 	}
 	for name, mutate := range tests {
 		t.Run(name, func(t *testing.T) {
@@ -117,6 +122,75 @@ func TestAdmissionFailsClosedForMissingFactsAndUnsafePolicy(t *testing.T) {
 	input.Policy.EffectRules = []contracts.AdmissionEffectRule{{Effect: contracts.EffectClassIrreversibleWrite, Mode: contracts.PolicyApprovalAutomatic}}
 	if _, err := Evaluate(input); err == nil {
 		t.Fatal("unsafe automatic irreversible-write policy was accepted")
+	}
+}
+
+func TestAdmissionCapabilityRateLimitBoundaryAndRuntimeFactHash(t *testing.T) {
+	input := admissionInput(t, contracts.EffectClassReadOnly)
+	input.Capability.RateLimitPerMinute = 2
+	input.Capability.Ref.DefinitionHash = ""
+	if err := input.Capability.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	input.CapabilityOperationsInWindow = 1
+	if err := input.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	underLimitHash := input.StableHash()
+	allowed, err := Evaluate(input)
+	if err != nil || allowed.Decision.Status != contracts.AdmissionAllowed {
+		t.Fatalf("one operation below limit decision=%+v err=%v", allowed.Decision, err)
+	}
+
+	atLimit := input
+	atLimit.CapabilityOperationsInWindow = 2
+	retryAt := time.Date(2030, time.January, 2, 3, 4, 5, 0, time.UTC)
+	atLimit.CapabilityRetryAt = &retryAt
+	if got := atLimit.StableHash(); got != underLimitHash {
+		t.Fatalf("runtime capability count changed logical input hash: %s != %s", got, underLimitHash)
+	}
+	denied, err := Evaluate(atLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if denied.Decision.Status != contracts.AdmissionDenied || denied.Decision.ReasonCode != contracts.AdmissionReasonRateLimited {
+		t.Fatalf("at-limit decision=%+v, want explicit rate-limit denial", denied.Decision)
+	}
+	if denied.Decision.RetryAt == nil || !denied.Decision.RetryAt.Equal(retryAt) {
+		t.Fatalf("rate-limit decision retry_at=%v, want %s", denied.Decision.RetryAt, retryAt)
+	}
+	withoutRetry := atLimit
+	withoutRetry.CapabilityRetryAt = nil
+	withoutDeadline, err := Evaluate(withoutRetry)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withoutDeadline.Decision.DecisionHash == denied.Decision.DecisionHash {
+		t.Fatal("durable retry deadline was omitted from the admission decision hash")
+	}
+
+	negative := input
+	negative.CapabilityOperationsInWindow = -1
+	if err := negative.Normalize(); err == nil {
+		t.Fatal("negative store-derived capability count was accepted")
+	}
+
+	var callerInput contracts.AdmissionInput
+	if err := json.Unmarshal([]byte(`{"capability_operations_in_window":2}`), &callerInput); err != nil {
+		t.Fatal(err)
+	}
+	if callerInput.CapabilityOperationsInWindow != 0 {
+		t.Fatalf("caller controlled store-derived count: %d", callerInput.CapabilityOperationsInWindow)
+	}
+	raw, err := json.Marshal(atLimit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(raw), "capability_operations_in_window") {
+		t.Fatal("store-derived capability count leaked into serialized admission input")
+	}
+	if strings.Contains(string(raw), "capability_retry_at") {
+		t.Fatal("store-derived retry deadline leaked into serialized admission input")
 	}
 }
 

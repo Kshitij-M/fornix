@@ -74,6 +74,16 @@ const (
 	// PermissionOperationExecute permits leasing and advancing a generic
 	// operation. It never grants access to a connector or credential by itself.
 	PermissionOperationExecute Permission = "operation:execute"
+	// Qualification permissions govern deployment-owned qualification trust
+	// metadata and signed-result imports. They do not grant runtime effects or
+	// access to private signing keys.
+	PermissionQualificationRead   Permission = "qualification:read"
+	PermissionQualificationImport Permission = "qualification:import"
+	PermissionQualificationAdmin  Permission = "qualification:admin"
+	// PermissionLegacyGlobalAdmin is a migration-only capability for historical
+	// coordination, federation, and router routes whose tables predate
+	// workspace isolation. It is never implied by workspace access.
+	PermissionLegacyGlobalAdmin Permission = "legacy:global_admin"
 )
 
 // AdminWildcard is written with no whitespace on the wire. The named
@@ -87,7 +97,7 @@ var knownPermissions = map[Permission]struct{}{
 	PermissionEvidenceRead: {}, PermissionEvidenceWrite: {},
 	PermissionAgentRun: {}, PermissionAgentRead: {}, PermissionSchedulerRun: {},
 	PermissionWorkspaceRead: {}, PermissionWorkspaceWrite: {},
-	PermissionIdentityAdmin: {}, PermissionCredentialUse: {}, PermissionEvaluationRead: {}, PermissionEvaluationRun: {}, PermissionEvaluationWrite: {}, PermissionReceiptRead: {}, PermissionReceiptWrite: {}, PermissionChangeRead: {}, PermissionChangePropose: {}, PermissionChangeApprove: {}, PermissionChangeApply: {}, PermissionChangeValidate: {}, PermissionChangeDisclose: {}, PermissionPolicyRead: {}, PermissionPolicyCreate: {}, PermissionPolicyActivate: {}, PermissionPolicyRetire: {}, PermissionPolicyResolve: {}, PermissionPolicyCompare: {}, PermissionOperationRead: {}, PermissionOperationCreate: {}, PermissionOperationExecute: {}, AdminWildcard: {},
+	PermissionIdentityAdmin: {}, PermissionCredentialUse: {}, PermissionEvaluationRead: {}, PermissionEvaluationRun: {}, PermissionEvaluationWrite: {}, PermissionReceiptRead: {}, PermissionReceiptWrite: {}, PermissionChangeRead: {}, PermissionChangePropose: {}, PermissionChangeApprove: {}, PermissionChangeApply: {}, PermissionChangeValidate: {}, PermissionChangeDisclose: {}, PermissionPolicyRead: {}, PermissionPolicyCreate: {}, PermissionPolicyActivate: {}, PermissionPolicyRetire: {}, PermissionPolicyResolve: {}, PermissionPolicyCompare: {}, PermissionOperationRead: {}, PermissionOperationCreate: {}, PermissionOperationExecute: {}, PermissionQualificationRead: {}, PermissionQualificationImport: {}, PermissionQualificationAdmin: {}, PermissionLegacyGlobalAdmin: {}, AdminWildcard: {},
 }
 
 // Principal is the authenticated caller presented to authorization checks.
@@ -214,6 +224,8 @@ type AuthorizationDecision struct {
 	Actor         AuditActor `json:"actor"`
 	Permission    Permission `json:"permission"`
 	Resource      string     `json:"resource,omitempty"`
+	Method        string     `json:"method,omitempty"`
+	Path          string     `json:"path,omitempty"`
 	Allowed       bool       `json:"allowed"`
 	Reason        string     `json:"reason"`
 	DecisionHash  string     `json:"decision_hash"`
@@ -285,7 +297,7 @@ func NormalizePermissions(values []Permission) ([]Permission, error) {
 // Hash returns the stable identity of the decision, excluding timestamps so a
 // retry of the same authorization input compares equal.
 func (d AuthorizationDecision) Hash() string {
-	value := fmt.Sprintf("%d|%s|%s|%s|%s|%s|%s|%t|%s", d.SchemaVersion, d.RequestID, d.WorkspaceID, d.Actor.ID, d.Actor.Kind, d.Actor.APIKeyID, d.Permission, d.Allowed, d.Resource)
+	value := fmt.Sprintf("%d|%s|%s|%s|%s|%s|%s|%s|%s|%t|%s|%s|%s", d.SchemaVersion, d.RequestID, d.WorkspaceID, d.Actor.ID, d.Actor.Kind, d.Actor.APIKeyID, d.Permission, d.Resource, d.Reason, d.Allowed, strings.ToUpper(strings.TrimSpace(d.Method)), strings.TrimSpace(d.Path), d.Actor.WorkspaceID)
 	digest := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(digest[:])
 }

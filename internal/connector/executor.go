@@ -84,9 +84,31 @@ func (e *Executor) Execute(ctx context.Context, request contracts.OperationReque
 		policy.MaxAttempts = requestMaxAttempts
 	}
 	attempts := 0
+	var authorityCapability AuthorityAwareCapability
+	if options.Authority != nil {
+		authorityCapability, _ = admission.Capability.(AuthorityAwareCapability)
+	}
+	requireAuthority := options.RequireAuthority || e.Registry.isEffectAuthorityRequired()
+	if requireAuthority && admission.Definition.Effect != contracts.EffectClassReadOnly && admission.Definition.Effect != contracts.EffectClassObservation && authorityCapability == nil {
+		return ExecutionOutcome{}, ErrAuthorityExecution
+	}
+	if requireAuthority && admission.Definition.Effect != contracts.EffectClassReadOnly && admission.Definition.Effect != contracts.EffectClassObservation && admission.Authority == nil {
+		return ExecutionOutcome{}, ErrAuthorityExecution
+	}
 	for attempts < policy.MaxAttempts {
 		attempts++
-		result, executeErr := admission.Capability.Execute(runCtx, admission.Request, plan)
+		var result contracts.OperationResult
+		var executeErr error
+		if authorityCapability != nil && admission.Authority != nil {
+			if options.ValidateAuthority != nil {
+				if err := options.ValidateAuthority(runCtx, *admission.Authority); err != nil {
+					return ExecutionOutcome{}, fmt.Errorf("validate live effect authority before dispatch: %w", err)
+				}
+			}
+			result, executeErr = authorityCapability.ExecuteWithAuthority(runCtx, admission.Request, plan, *admission.Authority)
+		} else {
+			result, executeErr = admission.Capability.Execute(runCtx, admission.Request, plan)
+		}
 		if executeErr == nil {
 			if err := validateResult(admission.Request, admission.Definition, result); err != nil {
 				return ExecutionOutcome{}, err

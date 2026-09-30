@@ -14,6 +14,7 @@ import (
 	"github.com/omaveda/fornix/internal/adapters/fakeincident"
 	"github.com/omaveda/fornix/internal/connector"
 	"github.com/omaveda/fornix/internal/contracts"
+	"github.com/omaveda/fornix/internal/effectdispatch"
 	"github.com/omaveda/fornix/internal/model"
 	"github.com/omaveda/fornix/internal/store"
 )
@@ -68,7 +69,11 @@ func newIncidentTestHarness(t *testing.T) *incidentTestHarness {
 		t.Fatal(err)
 	}
 	gateway := model.NewGateway(providers, store.NewModelCallStore(pool))
-	harness := &incidentTestHarness{service: NewService(store.NewIncidentStore(pool, events, evidence), workflows, evidence, artifacts, receipts, registry, gateway), pool: pool, workspace: workspace}
+	admission := store.NewAdmissionStore(pool, events)
+	service := NewService(store.NewIncidentStore(pool, events, evidence), workflows, evidence, artifacts, receipts, registry, gateway)
+	service.SetEffectDispatcher(operations, admission, &effectdispatch.Dispatcher{Operations: operations, Admission: admission, Links: store.NewDomainEffectLinkStore(pool)})
+	service.SetConnectorExecutor(&connector.Executor{Registry: registry})
+	harness := &incidentTestHarness{service: service, pool: pool, workspace: workspace}
 	t.Cleanup(func() {
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cleanupCancel()
@@ -98,6 +103,8 @@ func newIncidentTestHarness(t *testing.T) *incidentTestHarness {
 			`DELETE FROM fornix.operation_resources WHERE workspace_id=$1`,
 			`DELETE FROM fornix.operation_steps WHERE workspace_id=$1`,
 			`DELETE FROM fornix.operation_leases WHERE workspace_id=$1`,
+			`DELETE FROM fornix.operation_authority_links WHERE workspace_id=$1`,
+			`DELETE FROM fornix.operation_admission_decisions WHERE workspace_id=$1`,
 			`DELETE FROM fornix.operation_idempotency WHERE workspace_id=$1`,
 			`DELETE FROM fornix.operations WHERE workspace_id=$1`,
 			`DELETE FROM fornix.provenance_edges WHERE workspace_id=$1`,
@@ -137,6 +144,13 @@ func TestIncidentWorkflowEndToEndDuplicateApprovalConflictIsolationAndReplay(t *
 	if first.Workflow.Status != contracts.WorkflowStatusAwaitingApproval || first.Incident.Status != contracts.IncidentStatusAwaitingApproval {
 		t.Fatalf("workflow did not pause for approval: status=%s incident=%s failure=%+v", first.Workflow.Status, first.Incident.Status, first.Workflow.Failure)
 	}
+	var readAdmissions int
+	if err := h.pool.QueryRow(ctx, `SELECT count(*)::int FROM fornix.operation_admission_decisions WHERE workspace_id=$1 AND operation_id=$2 AND status <> 'denied'`, h.workspace, first.Workflow.Operation.ID).Scan(&readAdmissions); err != nil {
+		t.Fatal(err)
+	}
+	if readAdmissions != 2 {
+		t.Fatalf("incident read connector admissions=%d, want incident and runbook reads", readAdmissions)
+	}
 	duplicate, err := h.service.Start(ctx, request)
 	if err != nil {
 		t.Fatal(err)
@@ -149,7 +163,11 @@ func TestIncidentWorkflowEndToEndDuplicateApprovalConflictIsolationAndReplay(t *
 		t.Fatal(err)
 	}
 	if approved.Workflow.Status != contracts.WorkflowStatusSucceeded || approved.Incident.Status != contracts.IncidentStatusResolved || approved.Receipt == nil || !approved.ReplayVerify {
-		t.Fatalf("approved workflow did not complete with receipt/replay: %+v", approved)
+		failure := ""
+		if approved.Workflow.Failure != nil {
+			failure = fmt.Sprintf("%+v", *approved.Workflow.Failure)
+		}
+		t.Fatalf("approved workflow did not complete with receipt/replay: status=%s incident=%s failure=%s", approved.Workflow.Status, approved.Incident.Status, failure)
 	}
 	approvedAgain, err := h.service.Approve(ctx, h.workspace, first.Workflow.ID, "approve", "approval:external-1", request.Actor)
 	if err != nil {

@@ -2,12 +2,60 @@ package model
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/omaveda/fornix/internal/contracts"
 )
+
+// RequestEvidence returns a bounded structural summary of a model request.
+// It intentionally records lengths, roles, and content hashes rather than
+// prompts, message bodies, tool schemas, or arbitrary metadata values. This
+// is the durable evidence form; providers still receive the original request
+// only inside the immediate call boundary.
+func RequestEvidence(request contracts.ModelRequest) ([]byte, error) {
+	type messageSummary struct {
+		Role         string `json:"role"`
+		ContentHash  string `json:"content_hash,omitempty"`
+		ContentBytes int    `json:"content_bytes"`
+		ToolCalls    int    `json:"tool_calls,omitempty"`
+	}
+	type evidence struct {
+		SchemaVersion int              `json:"schema_version"`
+		WorkspaceID   string           `json:"workspace_id"`
+		RequestID     string           `json:"request_id"`
+		Provider      string           `json:"provider"`
+		Model         string           `json:"model"`
+		MessageCount  int              `json:"message_count"`
+		PromptBytes   int              `json:"prompt_bytes"`
+		PromptHash    string           `json:"prompt_hash,omitempty"`
+		Messages      []messageSummary `json:"messages,omitempty"`
+		ToolCount     int              `json:"tool_count"`
+		MetadataKeys  []string         `json:"metadata_keys,omitempty"`
+	}
+	result := evidence{SchemaVersion: request.SchemaVersion, WorkspaceID: request.WorkspaceID, RequestID: request.RequestID, Provider: request.Provider.Provider, Model: request.Provider.Model, MessageCount: len(request.Messages), PromptBytes: len([]byte(request.Prompt)), ToolCount: len(request.Tools)}
+	if request.Prompt != "" {
+		digest := sha256.Sum256([]byte(request.Prompt))
+		result.PromptHash = hex.EncodeToString(digest[:])
+	}
+	for _, message := range request.Messages {
+		summary := messageSummary{Role: message.Role, ContentBytes: len([]byte(message.Content)), ToolCalls: len(message.ToolCalls)}
+		if message.Content != "" {
+			digest := sha256.Sum256([]byte(message.Content))
+			summary.ContentHash = hex.EncodeToString(digest[:])
+		}
+		result.Messages = append(result.Messages, summary)
+	}
+	for key := range request.Metadata {
+		result.MetadataKeys = append(result.MetadataKeys, key)
+	}
+	sort.Strings(result.MetadataKeys)
+	return RedactJSON(result)
+}
 
 var bearerPattern = regexp.MustCompile(`(?i)bearer\s+[a-z0-9._~+/=-]+`)
 var secretKeyPattern = regexp.MustCompile(`(?i)(api[_-]?key|authorization|access[_-]?token|refresh[_-]?token|secret|password|credential)`)

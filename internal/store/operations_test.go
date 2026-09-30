@@ -82,6 +82,30 @@ func TestOperationRequestHashExcludesDeliveryIdentity(t *testing.T) {
 	}
 }
 
+func TestOperationDeploymentAdmissionModeFailsClosed(t *testing.T) {
+	request := operationTestRequest(t, "unit-workspace", "admission-mode-key")
+	operation := Operation{Request: request}
+	strict := &OperationStore{requireDeploymentAdmission: true}
+	if err := strict.validateDeploymentAdmissionTx(context.Background(), nil, operation); !errors.Is(err, ErrOperationAdmissionRequired) {
+		t.Fatalf("missing strict admission reference error=%v", err)
+	}
+	optional := &OperationStore{}
+	if err := optional.validateDeploymentAdmissionTx(context.Background(), nil, operation); err != nil {
+		t.Fatalf("optional admission reference error=%v", err)
+	}
+	reference := contracts.DeploymentAdmissionReference{
+		WorkspaceID: request.WorkspaceID, DeploymentID: "deployment-a", ReleaseID: "release-a",
+		ReleaseHash: testHash("release"), ArtifactKind: contracts.DeploymentArtifactImage,
+		ArtifactHash: testHash("artifact"), TrustSnapshotRevision: 1,
+		TrustSnapshotHash: testHash("snapshot"), GateHash: testHash("gate"), DecisionHash: testHash("decision"),
+	}
+	request.DeploymentAdmission = &reference
+	operation.Request = request
+	if err := optional.validateDeploymentAdmissionTx(context.Background(), nil, operation); !errors.Is(err, ErrOperationAdmissionUnavailable) {
+		t.Fatalf("missing admission authority error=%v", err)
+	}
+}
+
 func TestOperationEventEscapesJSONPointerOperationIDs(t *testing.T) {
 	request := operationTestRequest(t, "unit-workspace", "pointer-key")
 	request.ID = "operation/with-token"
@@ -276,7 +300,7 @@ func TestTerminalOperationRejectsNewLeasesAndAdmissions(t *testing.T) {
 }
 
 func TestOperationResultCrashBeforeCommitLeavesNoResult(t *testing.T) {
-	operationStore, _, workspace := newOperationTestStore(t)
+	operationStore, pool, workspace := newOperationTestStore(t)
 	request := operationTestRequest(t, workspace, "execute-result-crash-key")
 	created, err := operationStore.Create(context.Background(), OperationCreateInput{Request: request, Plan: func() *contracts.OperationPlan { plan := operationTestPlan(t, request); return &plan }()})
 	if err != nil {
@@ -311,6 +335,13 @@ func TestOperationResultCrashBeforeCommitLeavesNoResult(t *testing.T) {
 	operationStore.SetFailureHook(nil)
 	if _, err := operationStore.GetResult(context.Background(), workspace, created.Operation.ID); !errors.Is(err, ErrOperationResultNotFound) {
 		t.Fatalf("result survived rollback: %v", err)
+	}
+	var authorityLinks int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM fornix.operation_authority_links WHERE workspace_id=$1 AND operation_id=$2 AND stage='result'`, workspace, created.Operation.ID).Scan(&authorityLinks); err != nil {
+		t.Fatal(err)
+	}
+	if authorityLinks != 0 {
+		t.Fatalf("result authority link survived rollback: %d", authorityLinks)
 	}
 	current, err := operationStore.Get(context.Background(), workspace, created.Operation.ID)
 	if err != nil {
@@ -474,6 +505,34 @@ func TestOperationIntegrationStaleFenceAndWorkspaceIsolation(t *testing.T) {
 	}
 }
 
+func TestOperationIntegrationEffectAuthorityRevalidatesLiveFence(t *testing.T) {
+	store, _, workspace := newOperationTestStore(t)
+	created, err := store.Create(context.Background(), OperationCreateInput{Request: operationTestRequest(t, workspace, "authority-fence")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.AcquireLease(context.Background(), workspace, created.Operation.ID, "worker-a", 20*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority := contracts.EffectAuthority{WorkspaceID: workspace, OperationID: created.Operation.ID, OperationOwnerID: first.Lease.OwnerID, OperationFence: first.Lease.Fence}
+	if err := store.ValidateEffectAuthority(context.Background(), authority); err != nil {
+		t.Fatalf("live authority validation error=%v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	second, err := store.AcquireLease(context.Background(), workspace, created.Operation.ID, "worker-b", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ValidateEffectAuthority(context.Background(), authority); !errors.Is(err, ErrOperationLeaseFenced) && !errors.Is(err, ErrOperationLeaseExpired) {
+		t.Fatalf("stale authority validation error=%v, want fence/expiry rejection", err)
+	}
+	current := contracts.EffectAuthority{WorkspaceID: workspace, OperationID: created.Operation.ID, OperationOwnerID: second.Lease.OwnerID, OperationFence: second.Lease.Fence}
+	if err := store.ValidateEffectAuthority(context.Background(), current); err != nil {
+		t.Fatalf("takeover authority validation error=%v", err)
+	}
+}
+
 func TestOperationIntegrationCreateCrashRollsBack(t *testing.T) {
 	store, _, workspace := newOperationTestStore(t)
 	store.SetFailureHook(func(point string) error {
@@ -500,14 +559,23 @@ func TestOperationIntegrationCreateCrashRollsBack(t *testing.T) {
 }
 
 func TestOperationIntegrationAttemptsEffectsAndCallbacksAreFencedAndIdempotent(t *testing.T) {
-	store, _, workspace := newOperationTestStore(t)
+	store, pool, workspace := newOperationTestStore(t)
+	admissionStore := NewAdmissionStore(pool, NewEventStore(pool))
+	definition := admissionDefinition(t, workspace, contracts.EffectClassReversibleWrite, false)
 	request := operationTestRequest(t, workspace, "attempt-create")
+	request.Capability = definition.Ref
+	if err := request.Normalize(); err != nil {
+		t.Fatal(err)
+	}
 	plan := operationTestPlan(t, request)
 	created, err := store.Create(context.Background(), OperationCreateInput{Request: request, Plan: &plan})
 	if err != nil {
 		t.Fatal(err)
 	}
-	firstLease, err := store.AcquireLease(context.Background(), workspace, created.Operation.ID, "worker-a", 20*time.Millisecond)
+	if _, err := admissionStore.Admit(context.Background(), admissionInputForOperation(t, created.Operation, definition, admissionPolicy(t, workspace, definition), "attempt-effect-admission")); err != nil {
+		t.Fatalf("durable effect admission: %v", err)
+	}
+	firstLease, err := store.AcquireLease(context.Background(), workspace, created.Operation.ID, "worker-a", 250*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -591,7 +659,7 @@ func TestOperationIntegrationAttemptsEffectsAndCallbacksAreFencedAndIdempotent(t
 		t.Fatalf("attempt binding fixture inserted=%v err=%v", inserted, err)
 	}
 
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
 	secondLease, err := store.AcquireLease(context.Background(), workspace, created.Operation.ID, "worker-b", time.Minute)
 	if err != nil {
 		t.Fatal(err)
@@ -723,6 +791,7 @@ func newOperationTestStore(t *testing.T) (*OperationStore, *pgxpool.Pool, string
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.operation_approvals WHERE workspace_id=$1`, workspace)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.operation_admission_decisions WHERE workspace_id=$1`, workspace)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.operation_results WHERE workspace_id=$1`, workspace)
+		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.operation_authority_links WHERE workspace_id=$1`, workspace)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.operations WHERE workspace_id=$1`, workspace)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.task_execution_leases WHERE workspace_id=$1`, workspace)
 		_, _ = pool.Exec(cleanupCtx, `DELETE FROM fornix.tasks WHERE workspace_id=$1`, workspace)

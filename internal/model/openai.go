@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +18,7 @@ import (
 	"time"
 
 	"github.com/omaveda/fornix/internal/contracts"
+	"github.com/omaveda/fornix/internal/credentials"
 )
 
 // CredentialResolver resolves a named credential reference at call time. The
@@ -31,17 +34,30 @@ type OpenAIConfig struct {
 	HTTPClient        *http.Client
 	Timeout           time.Duration
 	ResolveCredential CredentialResolver
+	// CredentialLease is the production credential boundary. When configured,
+	// the provider acquires a short-lived, workspace/purpose-bound lease for
+	// each request and releases it after the call. Secret material never enters
+	// the model request contract or durable evidence.
+	CredentialLease credentials.LeaseResolver
+	CredentialTTL   time.Duration
+	// AllowEnvironmentCredentials is an explicit development compatibility
+	// switch. Production callers must provide CredentialLease instead.
+	AllowEnvironmentCredentials bool
 }
 
 // OpenAIProvider adapts chat-completions-compatible HTTP endpoints with
 // bounded retries, redaction, and optional provider idempotency headers.
 type OpenAIProvider struct {
-	endpoint          contracts.ModelEndpoint
-	apiKey            string
-	requireAPIKey     bool
-	client            *http.Client
-	timeout           time.Duration
-	resolveCredential CredentialResolver
+	endpoint                    contracts.ModelEndpoint
+	apiKey                      string
+	requireAPIKey               bool
+	client                      *http.Client
+	timeout                     time.Duration
+	resolveCredential           CredentialResolver
+	credentialLease             credentials.LeaseResolver
+	credentialTTL               time.Duration
+	allowEnvironmentCredentials bool
+	boundary                    contracts.ExternalBoundaryAuthority
 }
 
 // NewOpenAIProvider validates an OpenAI-compatible endpoint without making a
@@ -67,30 +83,36 @@ func NewOpenAIProvider(cfg OpenAIConfig) (*OpenAIProvider, error) {
 	if cfg.Timeout > contracts.MaxModelTimeout {
 		return nil, fmt.Errorf("openai timeout exceeds %s", contracts.MaxModelTimeout)
 	}
-	client := cfg.HTTPClient
-	if client == nil {
-		client = &http.Client{Timeout: cfg.Timeout}
+	client, err := providerHTTPClient(endpoint, cfg.Timeout, cfg.HTTPClient, contracts.MaxModelEvidenceBytes*4, contracts.MaxModelEvidenceBytes*4)
+	if err != nil {
+		return nil, err
 	}
-	if client.Timeout == 0 {
-		client.Timeout = cfg.Timeout
+	boundary, err := providerBoundaryAuthority(endpoint, cfg.Timeout, contracts.MaxModelEvidenceBytes*4, contracts.MaxModelEvidenceBytes*4)
+	if err != nil {
+		return nil, err
 	}
 	return &OpenAIProvider{
 		endpoint: endpoint, apiKey: strings.TrimSpace(cfg.APIKey),
 		requireAPIKey: cfg.RequireAPIKey, client: client,
 		timeout: cfg.Timeout, resolveCredential: cfg.ResolveCredential,
+		credentialLease: cfg.CredentialLease, credentialTTL: cfg.CredentialTTL,
+		allowEnvironmentCredentials: cfg.AllowEnvironmentCredentials,
+		boundary:                    boundary,
 	}, nil
 }
 
-func (p *OpenAIProvider) Name() string                      { return "openai" }
-func (p *OpenAIProvider) Aliases() []string                 { return []string{"openai-compatible"} }
-func (p *OpenAIProvider) Endpoint() contracts.ModelEndpoint { return p.endpoint }
+func (p *OpenAIProvider) Name() string                                           { return "openai" }
+func (p *OpenAIProvider) Aliases() []string                                      { return []string{"openai-compatible"} }
+func (p *OpenAIProvider) Endpoint() contracts.ModelEndpoint                      { return p.endpoint }
+func (p *OpenAIProvider) BoundaryAuthority() contracts.ExternalBoundaryAuthority { return p.boundary }
 
 // Complete executes one bounded non-streaming chat-completion request.
 func (p *OpenAIProvider) Complete(ctx context.Context, request contracts.ModelRequest) (contracts.ModelResponse, error) {
-	apiKey, err := p.credential()
+	apiKey, validateCredential, release, err := p.credential(ctx, request)
 	if err != nil {
 		return contracts.ModelResponse{}, err
 	}
+	defer release()
 	body, model, err := p.buildRequest(request, false)
 	if err != nil {
 		return contracts.ModelResponse{}, p.safeError(err, apiKey)
@@ -103,7 +125,12 @@ func (p *OpenAIProvider) Complete(ctx context.Context, request contracts.ModelRe
 	if err != nil {
 		return contracts.ModelResponse{}, p.safeError(err, apiKey)
 	}
-	response, err := p.client.Do(httpRequest)
+	if validateCredential != nil {
+		if err := validateCredential(ctx); err != nil {
+			return contracts.ModelResponse{}, p.safeError(&FailureError{Failure: contracts.ModelFailure{Code: contracts.ModelFailureAuthentication, Message: "credential lease authority rejected use", Provider: p.Name()}}, apiKey)
+		}
+	}
+	response, err := credentials.DoCredentialRequest(p.client, httpRequest)
 	if err != nil {
 		return contracts.ModelResponse{}, p.safeError(classifyHTTPError(p.Name(), err, 0, nil), apiKey)
 	}
@@ -126,10 +153,18 @@ func (p *OpenAIProvider) Complete(ctx context.Context, request contracts.ModelRe
 		return contracts.ModelResponse{}, p.safeError(&FailureError{Failure: contracts.ModelFailure{Code: contracts.ModelFailureEmptyResponse, Message: "model response has no choices", Provider: p.Name()}, Evidence: wire}, apiKey)
 	}
 	usage := parseOpenAIUsage(parsed.Usage)
+	toolCalls, err := parseOpenAIToolCalls(parsed.Choices[0].Message.ToolCalls)
+	if err != nil {
+		return contracts.ModelResponse{}, p.safeError(&FailureError{Failure: contracts.ModelFailure{Code: contracts.ModelFailureProvider, Message: "provider returned an invalid tool call", Provider: p.Name()}, Evidence: wire}, apiKey)
+	}
+	_, internalNames, err := openAIToolNameMappings(request.Tools)
+	if err != nil || restoreOpenAIToolNames(toolCalls, internalNames) != nil {
+		return contracts.ModelResponse{}, p.safeError(&FailureError{Failure: contracts.ModelFailure{Code: contracts.ModelFailureProvider, Message: "provider returned a tool outside the registered catalog", Provider: p.Name()}, Evidence: wire}, apiKey)
+	}
 	result := contracts.ModelResponse{
 		Provider:          contracts.ProviderRef{Provider: p.Name(), Model: model},
 		Content:           redactCredentialText(parsed.Choices[0].Message.Content, apiKey),
-		ToolCalls:         parseOpenAIToolCalls(parsed.Choices[0].Message.ToolCalls),
+		ToolCalls:         toolCalls,
 		FinishReason:      parsed.Choices[0].FinishReason,
 		Usage:             usage,
 		Cost:              p.cost(usage),
@@ -142,10 +177,14 @@ func (p *OpenAIProvider) Complete(ctx context.Context, request contracts.ModelRe
 // Stream adapts server-sent chat completion events and refuses fallback after
 // content has been emitted.
 func (p *OpenAIProvider) Stream(ctx context.Context, request contracts.ModelRequest, sink StreamSink) (contracts.ModelResponse, error) {
-	apiKey, err := p.credential()
+	if len(request.Tools) > 0 {
+		return contracts.ModelResponse{}, &FailureError{Failure: contracts.ModelFailure{Code: contracts.ModelFailureInvalidRequest, Message: "OpenAI-compatible streaming tool responses are not supported by this provider adapter", Provider: p.Name()}}
+	}
+	apiKey, validateCredential, release, err := p.credential(ctx, request)
 	if err != nil {
 		return contracts.ModelResponse{}, err
 	}
+	defer release()
 	body, model, err := p.buildRequest(request, true)
 	if err != nil {
 		return contracts.ModelResponse{}, p.safeError(err, apiKey)
@@ -158,7 +197,12 @@ func (p *OpenAIProvider) Stream(ctx context.Context, request contracts.ModelRequ
 	if err != nil {
 		return contracts.ModelResponse{}, p.safeError(err, apiKey)
 	}
-	response, err := p.client.Do(httpRequest)
+	if validateCredential != nil {
+		if err := validateCredential(ctx); err != nil {
+			return contracts.ModelResponse{}, p.safeError(&FailureError{Failure: contracts.ModelFailure{Code: contracts.ModelFailureAuthentication, Message: "credential lease authority rejected use", Provider: p.Name()}}, apiKey)
+		}
+	}
+	response, err := credentials.DoCredentialRequest(p.client, httpRequest)
 	if err != nil {
 		return contracts.ModelResponse{}, p.safeError(classifyHTTPError(p.Name(), err, 0, nil), apiKey)
 	}
@@ -217,6 +261,9 @@ func (p *OpenAIProvider) Stream(ctx context.Context, request contracts.ModelRequ
 				if choice.FinishReason != "" {
 					finishReason = choice.FinishReason
 				}
+				if len(choice.Delta.ToolCalls) > 0 {
+					return contracts.ModelResponse{}, p.safeError(&FailureError{Failure: contracts.ModelFailure{Code: contracts.ModelFailureInvalidRequest, Message: "OpenAI-compatible streaming tool responses are not supported by this provider adapter", Provider: p.Name(), ContentEmitted: content.Len() > 0}, Evidence: wire.Bytes()}, apiKey)
+				}
 				if choice.Delta.Content != "" {
 					delta := redactCredentialText(choice.Delta.Content, apiKey)
 					if budgetErr := appendBoundedStreamContent(&content, &contentRunes, delta, request.Budget, p.Name(), wire.Bytes()); budgetErr != nil {
@@ -252,23 +299,54 @@ func (p *OpenAIProvider) Embed(context.Context, EmbeddingRequest) ([]float32, er
 	return nil, &FailureError{Failure: contracts.ModelFailure{Code: contracts.ModelFailureProvider, Message: "openai embedding capability is not configured", Provider: p.Name()}}
 }
 
-func (p *OpenAIProvider) credential() (string, error) {
-	if p.resolveCredential != nil && p.endpoint.CredentialRef != "" {
+func (p *OpenAIProvider) credential(ctx context.Context, request contracts.ModelRequest) (string, func(context.Context) error, func(), error) {
+	if p.credentialLease != nil && p.endpoint.CredentialRef != "" {
+		ttl := p.credentialTTL
+		if ttl <= 0 {
+			ttl = credentials.DefaultLeaseTTL
+		}
+		lease, err := p.credentialLease.Acquire(ctx, request.WorkspaceID, p.endpoint.CredentialRef, "model:"+p.Name(), ttl)
+		if err != nil {
+			lease.Secret.Clear()
+			return "", nil, func() {}, &FailureError{Failure: contracts.ModelFailure{Code: contracts.ModelFailureAuthentication, Message: "credential lease acquisition failed", Provider: p.Name()}}
+		}
+		if err := lease.Validate(request.WorkspaceID, p.endpoint.CredentialRef, "model:"+p.Name(), time.Now().UTC()); err != nil {
+			_ = credentials.ReleaseLeaseBounded(p.credentialLease, lease)
+			return "", nil, func() {}, &FailureError{Failure: contracts.ModelFailure{Code: contracts.ModelFailureAuthentication, Message: "credential lease scope is invalid", Provider: p.Name()}}
+		}
+		if err := p.credentialLease.ValidateLease(ctx, lease); err != nil {
+			_ = credentials.ReleaseLeaseBounded(p.credentialLease, lease)
+			return "", nil, func() {}, &FailureError{Failure: contracts.ModelFailure{Code: contracts.ModelFailureAuthentication, Message: "credential lease authority rejected use", Provider: p.Name()}}
+		}
+		secretBytes := lease.Secret.Bytes()
+		secret := string(secretBytes)
+		for index := range secretBytes {
+			secretBytes[index] = 0
+		}
+		validate := func(validateCtx context.Context) error {
+			return p.credentialLease.ValidateLease(validateCtx, lease)
+		}
+		release := func() {
+			_ = credentials.ReleaseLeaseBounded(p.credentialLease, lease)
+		}
+		return secret, validate, release, nil
+	}
+	if p.resolveCredential != nil && p.endpoint.CredentialRef != "" && p.allowEnvironmentCredentials {
 		value, err := p.resolveCredential(p.endpoint.CredentialRef)
 		if err != nil {
-			return "", &FailureError{Failure: contracts.ModelFailure{Code: contracts.ModelFailureAuthentication, Message: "credential resolution failed", Provider: p.Name()}}
+			return "", nil, func() {}, &FailureError{Failure: contracts.ModelFailure{Code: contracts.ModelFailureAuthentication, Message: "credential resolution failed", Provider: p.Name()}}
 		}
 		if strings.TrimSpace(value) != "" {
-			return strings.TrimSpace(value), nil
+			return strings.TrimSpace(value), nil, func() {}, nil
 		}
 	}
 	if strings.TrimSpace(p.apiKey) != "" {
-		return p.apiKey, nil
+		return p.apiKey, nil, func() {}, nil
 	}
 	if p.requireAPIKey {
-		return "", &FailureError{Failure: contracts.ModelFailure{Code: contracts.ModelFailureAuthentication, Message: "provider credential is not configured", Provider: p.Name()}}
+		return "", nil, func() {}, &FailureError{Failure: contracts.ModelFailure{Code: contracts.ModelFailureAuthentication, Message: "provider credential is not configured", Provider: p.Name()}}
 	}
-	return "", nil
+	return "", nil, func() {}, nil
 }
 
 func (p *OpenAIProvider) safeError(err error, credential string) error {
@@ -293,20 +371,36 @@ func (p *OpenAIProvider) buildRequest(request contracts.ModelRequest, stream boo
 	if model == "" {
 		return openAIRequest{}, "", &FailureError{Failure: contracts.ModelFailure{Code: contracts.ModelFailureInvalidRequest, Message: "model is required", Provider: p.Name()}}
 	}
+	providerNames, _, err := openAIToolNameMappings(request.Tools)
+	if err != nil {
+		return openAIRequest{}, "", &FailureError{Failure: contracts.ModelFailure{Code: contracts.ModelFailureInvalidRequest, Message: "tool catalog contains incompatible function names", Provider: p.Name()}}
+	}
 	messages := make([]openAIMessage, 0, len(request.Messages)+2)
 	for _, message := range request.Messages {
 		calls := make([]openAIToolCall, 0, len(message.ToolCalls))
 		for _, call := range message.ToolCalls {
-			calls = append(calls, openAIToolCall{ID: call.ID, Type: "function", Function: openAIFunctionCall{Arguments: string(call.Arguments), Name: call.ToolID}})
+			name := call.ToolID
+			if mapped, ok := providerNames[name]; ok {
+				name = mapped
+			} else if !validOpenAIToolName(name) {
+				return openAIRequest{}, "", &FailureError{Failure: contracts.ModelFailure{Code: contracts.ModelFailureInvalidRequest, Message: "tool-call history contains an unmapped function name", Provider: p.Name()}}
+			}
+			calls = append(calls, openAIToolCall{ID: call.ID, Type: "function", Function: openAIFunctionCall{Arguments: string(call.Arguments), Name: name}})
 		}
-		messages = append(messages, openAIMessage{Role: message.Role, Content: message.Content, Name: message.Name, ToolCallID: message.ToolCallID, ToolCalls: calls})
+		messageName := message.Name
+		if mapped, ok := providerNames[messageName]; ok {
+			messageName = mapped
+		} else if messageName != "" && !validOpenAIToolName(messageName) {
+			return openAIRequest{}, "", &FailureError{Failure: contracts.ModelFailure{Code: contracts.ModelFailureInvalidRequest, Message: "message history contains an incompatible name", Provider: p.Name()}}
+		}
+		messages = append(messages, openAIMessage{Role: message.Role, Content: message.Content, Name: messageName, ToolCallID: message.ToolCallID, ToolCalls: calls})
 	}
 	if len(messages) == 0 {
 		messages = append(messages, openAIMessage{Role: "user", Content: request.Prompt})
 	}
 	tools := make([]openAIToolDefinition, 0, len(request.Tools))
 	for _, definition := range request.Tools {
-		tools = append(tools, openAIToolDefinition{Type: "function", Function: openAIFunctionDefinition{Name: definition.Name, Description: definition.Description, Parameters: definition.Parameters}})
+		tools = append(tools, openAIToolDefinition{Type: "function", Function: openAIFunctionDefinition{Name: providerNames[definition.Name], Description: definition.Description, Parameters: definition.Parameters}})
 	}
 	return openAIRequest{Model: model, Messages: messages, Tools: tools, Stream: stream, StreamOptions: streamOptions(stream), MaxTokens: request.Budget.MaxOutputTokens}, model, nil
 }
@@ -393,19 +487,28 @@ type openAIFunctionCall struct {
 	Arguments string `json:"arguments"`
 }
 
-func parseOpenAIToolCalls(raw []openAIToolCall) []contracts.ModelToolCall {
+func parseOpenAIToolCalls(raw []openAIToolCall) ([]contracts.ModelToolCall, error) {
 	out := make([]contracts.ModelToolCall, 0, len(raw))
+	seenIDs := make(map[string]struct{}, len(raw))
 	for _, call := range raw {
 		arguments := json.RawMessage(call.Function.Arguments)
 		if len(arguments) == 0 {
 			arguments = json.RawMessage(`{}`)
 		}
 		if !json.Valid(arguments) {
-			continue
+			return nil, fmt.Errorf("provider tool-call arguments are not valid JSON")
 		}
-		out = append(out, contracts.ModelToolCall{ID: strings.TrimSpace(call.ID), ToolID: strings.TrimSpace(call.Function.Name), Arguments: arguments})
+		modelCall := contracts.ModelToolCall{ID: strings.TrimSpace(call.ID), ToolID: strings.TrimSpace(call.Function.Name), Arguments: arguments}
+		if err := modelCall.Normalize(); err != nil {
+			return nil, err
+		}
+		if _, duplicate := seenIDs[modelCall.ID]; duplicate {
+			return nil, fmt.Errorf("provider returned duplicate tool-call IDs")
+		}
+		seenIDs[modelCall.ID] = struct{}{}
+		out = append(out, modelCall)
 	}
-	return out
+	return out, nil
 }
 
 type openAIResponse struct {
@@ -442,6 +545,61 @@ type openAIError struct {
 	Message string `json:"message"`
 	Type    string `json:"type"`
 	Code    any    `json:"code"`
+}
+
+func openAIToolNameMappings(tools []contracts.ModelToolDefinition) (map[string]string, map[string]string, error) {
+	providerNames := make(map[string]string, len(tools))
+	internalNames := make(map[string]string, len(tools))
+	canonicalNames := make(map[string]struct{}, len(tools))
+	for _, definition := range tools {
+		name := strings.TrimSpace(definition.Name)
+		if name == "" {
+			return nil, nil, fmt.Errorf("tool function name is empty")
+		}
+		canonicalName := strings.ToLower(name)
+		if _, duplicate := canonicalNames[canonicalName]; duplicate {
+			return nil, nil, fmt.Errorf("internal tool function name is ambiguous")
+		}
+		canonicalNames[canonicalName] = struct{}{}
+		providerName := name
+		if !validOpenAIToolName(name) {
+			digest := sha256.Sum256([]byte(name))
+			providerName = "f_" + hex.EncodeToString(digest[:31])
+		}
+		if existing, duplicate := internalNames[providerName]; duplicate && existing != name {
+			return nil, nil, fmt.Errorf("provider tool function name collision")
+		}
+		if existing, duplicate := providerNames[name]; duplicate && existing != providerName {
+			return nil, nil, fmt.Errorf("internal tool function name collision")
+		}
+		providerNames[name] = providerName
+		internalNames[providerName] = name
+	}
+	return providerNames, internalNames, nil
+}
+
+func validOpenAIToolName(name string) bool {
+	if len(name) == 0 || len(name) > 64 {
+		return false
+	}
+	for _, char := range name {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') || char == '_' || char == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func restoreOpenAIToolNames(calls []contracts.ModelToolCall, internalNames map[string]string) error {
+	for i := range calls {
+		internalName, ok := internalNames[calls[i].ToolID]
+		if !ok {
+			return fmt.Errorf("provider tool-call name is not in the registered catalog")
+		}
+		calls[i].ToolID = internalName
+	}
+	return nil
 }
 
 func parseOpenAIUsage(usage *openAIUsage) contracts.ModelUsage {

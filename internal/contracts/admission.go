@@ -55,6 +55,7 @@ const (
 	AdmissionReasonStaleFence           = "stale_fence"
 	AdmissionReasonBudgetExceeded       = "budget_exceeded"
 	AdmissionReasonQuotaExceeded        = "quota_exceeded"
+	AdmissionReasonRateLimited          = "rate_limit_exceeded"
 	AdmissionReasonPolicyDenied         = "policy_denied"
 	AdmissionReasonApprovalRequired     = "approval_required"
 	AdmissionReasonApproved             = "approved"
@@ -97,6 +98,12 @@ type AdmissionPolicy struct {
 	MaxCostPerWindowMicros int64                 `json:"max_cost_per_window_micros"`
 	QuotaWindowSeconds     int                   `json:"quota_window_seconds"`
 	ApprovalTTLSeconds     int                   `json:"approval_ttl_seconds"`
+	// AllowAutonomousExternalCommunication is an explicit policy decision for
+	// bounded model/provider work. It does not make arbitrary outbound
+	// communication automatic: the capability, connector, actor, workspace,
+	// credential, and effect authority still have to pass admission. When false,
+	// external communication remains approval-gated.
+	AllowAutonomousExternalCommunication bool `json:"allow_autonomous_external_communication,omitempty"`
 }
 
 // Normalize validates and canonicalizes an admission policy. Its hash is the
@@ -141,7 +148,7 @@ func (p *AdmissionPolicy) Normalize() error {
 			return fmt.Errorf("duplicate admission policy effect rule %q", rule.Effect)
 		}
 		seenEffects[rule.Effect] = struct{}{}
-		if (rule.Effect == EffectClassIrreversibleWrite || rule.Effect == EffectClassExternalCommunication) && rule.Mode == PolicyApprovalAutomatic {
+		if (rule.Effect == EffectClassIrreversibleWrite || (rule.Effect == EffectClassExternalCommunication && !p.AllowAutonomousExternalCommunication)) && rule.Mode == PolicyApprovalAutomatic {
 			return fmt.Errorf("%s cannot be automatic", rule.Effect)
 		}
 	}
@@ -231,27 +238,44 @@ func (s *CredentialState) Normalize() error {
 // evaluation. Verified facts such as connector health and credential state
 // must come from an authoritative adapter or identity store.
 type AdmissionInput struct {
-	SchemaVersion       int                  `json:"schema_version"`
-	WorkspaceID         string               `json:"workspace_id"`
-	OperationID         string               `json:"operation_id"`
-	OperationHash       string               `json:"operation_hash"`
-	RequestID           string               `json:"request_id"`
-	IdempotencyKey      string               `json:"idempotency_key"`
-	Actor               ActorRef             `json:"actor"`
-	Capability          CapabilityDefinition `json:"capability"`
-	Target              ResourceRef          `json:"target"`
-	Policy              AdmissionPolicy      `json:"policy"`
-	CredentialStates    []CredentialState    `json:"credential_states,omitempty"`
-	ConnectorAvailable  bool                 `json:"connector_available"`
-	ResourceAllowed     bool                 `json:"resource_allowed"`
-	EvidenceSatisfied   bool                 `json:"evidence_satisfied"`
-	TaskBound           bool                 `json:"task_bound"`
-	TaskOwnerID         string               `json:"task_owner_id,omitempty"`
-	TaskFence           uint64               `json:"task_fence,omitempty"`
-	TaskFenceValid      bool                 `json:"task_fence_valid"`
-	RequestedCostMicros int64                `json:"requested_cost_micros"`
-	QuotaOperations     int                  `json:"quota_operations"`
-	QuotaCostMicros     int64                `json:"quota_cost_micros"`
+	SchemaVersion  int                  `json:"schema_version"`
+	WorkspaceID    string               `json:"workspace_id"`
+	OperationID    string               `json:"operation_id"`
+	OperationHash  string               `json:"operation_hash"`
+	RequestID      string               `json:"request_id"`
+	IdempotencyKey string               `json:"idempotency_key"`
+	Actor          ActorRef             `json:"actor"`
+	Capability     CapabilityDefinition `json:"capability"`
+	Target         ResourceRef          `json:"target"`
+	Policy         AdmissionPolicy      `json:"policy"`
+	// Trust and credential fields are references to verified runtime authority,
+	// never secret material. They are carried into the authority-link record
+	// when present and are intentionally bounded.
+	TrustPolicyHash              string                     `json:"trust_policy_hash,omitempty"`
+	TrustPolicyRevision          string                     `json:"trust_policy_revision,omitempty"`
+	SchemaCatalogHash            string                     `json:"schema_catalog_hash,omitempty"`
+	SchemaCatalogRevision        string                     `json:"schema_catalog_revision,omitempty"`
+	CredentialLeaseID            string                     `json:"credential_lease_id,omitempty"`
+	CredentialLeaseFence         uint64                     `json:"credential_lease_fence,omitempty"`
+	CredentialRevocationEpoch    uint64                     `json:"credential_revocation_epoch,omitempty"`
+	CredentialSourceVersion      string                     `json:"credential_source_version,omitempty"`
+	CredentialSourceExpiresAt    *time.Time                 `json:"credential_source_expires_at,omitempty"`
+	ExternalBoundary             *ExternalBoundaryAuthority `json:"external_boundary,omitempty"`
+	CredentialStates             []CredentialState          `json:"credential_states,omitempty"`
+	ConnectorAvailable           bool                       `json:"connector_available"`
+	ResourceAllowed              bool                       `json:"resource_allowed"`
+	EvidenceSatisfied            bool                       `json:"evidence_satisfied"`
+	TaskBound                    bool                       `json:"task_bound"`
+	TaskOwnerID                  string                     `json:"task_owner_id,omitempty"`
+	TaskFence                    uint64                     `json:"task_fence,omitempty"`
+	TaskFenceValid               bool                       `json:"task_fence_valid"`
+	RequestedCostMicros          int64                      `json:"requested_cost_micros"`
+	QuotaOperations              int                        `json:"quota_operations"`
+	QuotaCostMicros              int64                      `json:"quota_cost_micros"`
+	CapabilityOperationsInWindow int                        `json:"-"`
+	// CapabilityRetryAt is a database-derived runtime fact used only when the
+	// capability rate window is full. Callers cannot supply or serialize it.
+	CapabilityRetryAt *time.Time `json:"-"`
 }
 
 // Normalize validates all nested references and prevents policy/capability
@@ -303,8 +327,61 @@ func (in *AdmissionInput) Normalize() error {
 	if in.Policy.WorkspaceID != workspace {
 		return fmt.Errorf("admission policy crosses workspace boundary")
 	}
-	if in.RequestedCostMicros < 0 || in.QuotaOperations < 0 || in.QuotaCostMicros < 0 {
+	if in.TrustPolicyHash, err = normalizeDomainHash(in.TrustPolicyHash, "admission trust_policy_hash", false); err != nil {
+		return err
+	}
+	if in.TrustPolicyRevision != "" {
+		if in.TrustPolicyRevision, err = normalizeDomainIdentifier(in.TrustPolicyRevision, "admission trust_policy_revision", MaxDomainVersionLength, true); err != nil {
+			return err
+		}
+	}
+	if in.SchemaCatalogHash, err = normalizeDomainHash(in.SchemaCatalogHash, "admission schema_catalog_hash", false); err != nil {
+		return err
+	}
+	if in.SchemaCatalogRevision != "" {
+		if in.SchemaCatalogRevision, err = normalizeDomainIdentifier(in.SchemaCatalogRevision, "admission schema_catalog_revision", MaxDomainVersionLength, true); err != nil {
+			return err
+		}
+	}
+	in.CredentialSourceVersion = strings.TrimSpace(in.CredentialSourceVersion)
+	if len(in.CredentialSourceVersion) > MaxCredentialSourceVersionLength {
+		return fmt.Errorf("admission credential source version is too large")
+	}
+	if in.CredentialSourceVersion == "" && in.CredentialSourceExpiresAt != nil {
+		return fmt.Errorf("admission credential source expiry requires source version")
+	}
+	if in.CredentialSourceExpiresAt != nil {
+		expiry := in.CredentialSourceExpiresAt.UTC()
+		in.CredentialSourceExpiresAt = &expiry
+	}
+	if in.CredentialLeaseID != "" {
+		if in.CredentialLeaseID, err = normalizeDomainIdentifier(in.CredentialLeaseID, "admission credential_lease_id", MaxDomainIDLength, true); err != nil {
+			return err
+		}
+		if in.CredentialLeaseFence == 0 || in.CredentialRevocationEpoch == 0 {
+			return fmt.Errorf("admission credential lease requires positive fence and revocation epoch")
+		}
+	} else if in.CredentialLeaseFence != 0 || in.CredentialRevocationEpoch != 0 {
+		return fmt.Errorf("admission credential fence requires credential lease_id")
+	}
+	if in.CredentialLeaseID == "" && (in.CredentialSourceVersion != "" || in.CredentialSourceExpiresAt != nil) {
+		return fmt.Errorf("admission credential source facts require credential lease_id")
+	}
+	in.ExternalBoundary = CloneExternalBoundary(in.ExternalBoundary)
+	if in.ExternalBoundary != nil {
+		if err := in.ExternalBoundary.Normalize(); err != nil {
+			return fmt.Errorf("admission external boundary: %w", err)
+		}
+	}
+	if in.RequestedCostMicros < 0 || in.QuotaOperations < 0 || in.QuotaCostMicros < 0 || in.CapabilityOperationsInWindow < 0 {
 		return fmt.Errorf("admission cost and quota values cannot be negative")
+	}
+	if in.CapabilityRetryAt != nil {
+		if in.CapabilityRetryAt.IsZero() || in.CapabilityOperationsInWindow < in.Capability.RateLimitPerMinute {
+			return fmt.Errorf("admission capability retry time requires an exhausted rate window")
+		}
+		retryAt := in.CapabilityRetryAt.UTC()
+		in.CapabilityRetryAt = &retryAt
 	}
 	if len(in.CredentialStates) > MaxAdmissionCredentialStates {
 		return fmt.Errorf("too many credential states")
@@ -338,10 +415,21 @@ func (in AdmissionInput) StableHash() string {
 	in.EvidenceSatisfied = false
 	in.CredentialStates = nil
 	in.TaskOwnerID, in.TaskFence, in.TaskFenceValid = "", 0, false
-	// QuotaOperations and QuotaCostMicros are transaction-local observations,
+	// Credential lease identity is caller intent; the live fence and
+	// revocation epoch are runtime facts recorded in the authority link.
+	in.CredentialLeaseFence, in.CredentialRevocationEpoch = 0, 0
+	// Catalog and managed-source identity are verified runtime authority facts.
+	// They are retained in the append-only authority link, but do not create a
+	// second logical admission when a retry carries a refreshed observation.
+	in.SchemaCatalogHash, in.SchemaCatalogRevision = "", ""
+	in.CredentialSourceVersion, in.CredentialSourceExpiresAt = "", nil
+	in.ExternalBoundary = nil
+	// QuotaOperations, QuotaCostMicros, and CapabilityOperationsInWindow are
+	// transaction-local observations,
 	// not caller intent. Excluding them keeps a retried idempotent command tied
 	// to the same request even when other admissions changed the window.
-	in.QuotaOperations, in.QuotaCostMicros = 0, 0
+	in.QuotaOperations, in.QuotaCostMicros, in.CapabilityOperationsInWindow = 0, 0, 0
+	in.CapabilityRetryAt = nil
 	raw, _ := json.Marshal(in)
 	digest := sha256.Sum256(raw)
 	return hex.EncodeToString(digest[:])
@@ -369,6 +457,7 @@ type AdmissionDecision struct {
 	ReasonCode     string        `json:"reason_code"`
 	ApprovalID     string        `json:"approval_id,omitempty"`
 	CostMicros     int64         `json:"cost_micros"`
+	RetryAt        *time.Time    `json:"retry_at,omitempty"`
 	CreatedAt      time.Time     `json:"created_at"`
 }
 

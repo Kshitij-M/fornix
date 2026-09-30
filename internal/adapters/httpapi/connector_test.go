@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -16,9 +17,11 @@ import (
 	"github.com/omaveda/fornix/internal/connector"
 	"github.com/omaveda/fornix/internal/contracts"
 	"github.com/omaveda/fornix/internal/credentials"
+	"github.com/omaveda/fornix/internal/testutil"
 )
 
 func TestHTTPReadUsesConfiguredTargetAndRedactsCredential(t *testing.T) {
+	testutil.RequireLocalHTTP(t)
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		calls.Add(1)
@@ -59,6 +62,7 @@ func TestHTTPReadUsesConfiguredTargetAndRedactsCredential(t *testing.T) {
 }
 
 func TestHTTPRejectsAbsolutePathsAndOversizedResponses(t *testing.T) {
+	testutil.RequireLocalHTTP(t)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		_, _ = writer.Write(make([]byte, 128))
 	}))
@@ -92,6 +96,7 @@ func TestHTTPRejectsAbsolutePathsAndOversizedResponses(t *testing.T) {
 }
 
 func TestHTTPReadRetriesRateLimitButSubmitDoesNotRetryAfterEffectStart(t *testing.T) {
+	testutil.RequireLocalHTTP(t)
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		call := calls.Add(1)
@@ -136,6 +141,7 @@ func TestHTTPReadRetriesRateLimitButSubmitDoesNotRetryAfterEffectStart(t *testin
 }
 
 func TestHTTPSubmitRequiresApprovalAndRecordsEffectMetadata(t *testing.T) {
+	testutil.RequireLocalHTTP(t)
 	var calls atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		calls.Add(1)
@@ -177,6 +183,40 @@ func TestHTTPSubmitRequiresApprovalAndRecordsEffectMetadata(t *testing.T) {
 	}
 }
 
+func TestHTTPSubmitPreservesDurableEffectAuthorityIdentity(t *testing.T) {
+	testutil.RequireLocalHTTP(t)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.WriteHeader(http.StatusAccepted)
+		_, _ = writer.Write([]byte(`{"accepted":true}`))
+	}))
+	defer server.Close()
+
+	resolver := connector.NewStaticPayloadResolver()
+	request, adapter := httpRequestWithBinding(t, server.URL, resolver, httpapi.Payload{Method: http.MethodPost, Path: "/v1/items", Body: json.RawMessage(`{"value":"authority"}`)}, httpapi.Binding{ProviderSupportsIdempotency: true})
+	var submit connector.Capability
+	for _, candidate := range adapter.Capabilities() {
+		if candidate.Definition().Ref.Name == httpapi.SubmitCapabilityName {
+			submit = candidate
+			break
+		}
+	}
+	if submit == nil {
+		t.Fatal("submit capability was not registered")
+	}
+	plan, err := submit.Plan(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority := contracts.EffectAuthority{WorkspaceID: request.WorkspaceID, OperationID: request.ID, OperationOwnerID: "worker-authority", OperationFence: 7, EffectID: "effect-durable-reservation"}
+	outcome, err := submit.(connector.AuthorityAwareCapability).ExecuteWithAuthority(context.Background(), request, plan, authority)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(outcome.ExternalEffects) != 1 || outcome.ExternalEffects[0].ID != authority.EffectID {
+		t.Fatalf("effect authority identity was not preserved: %+v", outcome.ExternalEffects)
+	}
+}
+
 func TestHTTPCredentialReferenceFailsClosedWithoutResolver(t *testing.T) {
 	resolver := connector.NewStaticPayloadResolver()
 	_, err := httpapi.NewConnector(httpapi.Binding{ID: "billing-api", WorkspaceID: "workspace-a", BaseURL: "https://api.example.com", CredentialRef: "provider/api"}, resolver.Resolve, nil, nil)
@@ -185,8 +225,33 @@ func TestHTTPCredentialReferenceFailsClosedWithoutResolver(t *testing.T) {
 	}
 }
 
+func TestHTTPAuthorityExecutionCannotFallBackToLegacyCredentialResolver(t *testing.T) {
+	var resolverCalls atomic.Int32
+	resolver := connector.NewStaticPayloadResolver()
+	payload := httpapi.Payload{Method: http.MethodGet, Path: "/records"}
+	request, adapter := httpRequestWithBindingAndCredential(t, resolver, payload, httpapi.Binding{
+		ID: "legacy-credential-api", WorkspaceID: "workspace-a", BaseURL: "http://127.0.0.1:1",
+		CredentialRef: "provider/api", AllowPrivateNetworks: true,
+	}, func(context.Context, string, string) (credentials.Secret, error) {
+		resolverCalls.Add(1)
+		return credentials.NewSecret([]byte("must-not-be-used"))
+	})
+	capability := adapter.Capabilities()[0]
+	plan, err := capability.Plan(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	authority := contracts.EffectAuthority{WorkspaceID: request.WorkspaceID, OperationID: request.ID, OperationOwnerID: "worker", OperationFence: 1}
+	_, err = capability.(connector.AuthorityAwareCapability).ExecuteWithAuthority(context.Background(), request, plan, authority)
+	var failure *connector.FailureError
+	if !errors.As(err, &failure) || failure.Code != "authority_unsupported" || resolverCalls.Load() != 0 {
+		t.Fatalf("authority-aware execution used the legacy resolver: calls=%d err=%v", resolverCalls.Load(), err)
+	}
+}
+
 func TestHTTPUsesExpiringCredentialLeaseAndReleasesIt(t *testing.T) {
-	var calls, acquired, released atomic.Int32
+	testutil.RequireLocalHTTP(t)
+	var calls, acquired, released, validated atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		calls.Add(1)
 		if request.Header.Get("Authorization") != "Bearer leased-secret" {
@@ -221,8 +286,9 @@ func TestHTTPUsesExpiringCredentialLeaseAndReleasesIt(t *testing.T) {
 			if secretErr != nil {
 				return credentials.Lease{}, secretErr
 			}
-			return credentials.Lease{Reference: ref, WorkspaceID: workspace, LeaseID: "lease-1", Purpose: purpose, ExpiresAt: time.Now().UTC().Add(time.Minute), Secret: secret}, nil
+			return credentials.Lease{Reference: ref, WorkspaceID: workspace, LeaseID: "lease-1", Purpose: purpose, Fence: 1, RevocationEpoch: 1, ExpiresAt: time.Now().UTC().Add(time.Minute), Secret: secret}, nil
 		},
+		ValidateLeaseFunc: func(context.Context, credentials.Lease) error { validated.Add(1); return nil },
 		ReleaseFunc: func(_ context.Context, lease credentials.Lease) error {
 			released.Add(1)
 			if lease.LeaseID != "lease-1" {
@@ -245,8 +311,8 @@ func TestHTTPUsesExpiringCredentialLeaseAndReleasesIt(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if outcome.Result.OutputHash == "" || calls.Load() != 1 || acquired.Load() != 1 || released.Load() != 1 {
-		t.Fatalf("unexpected lease execution calls=%d acquired=%d released=%d outcome=%+v", calls.Load(), acquired.Load(), released.Load(), outcome)
+	if outcome.Result.OutputHash == "" || calls.Load() != 1 || acquired.Load() != 1 || validated.Load() != 3 || released.Load() != 1 {
+		t.Fatalf("unexpected lease execution calls=%d acquired=%d validated=%d released=%d outcome=%+v", calls.Load(), acquired.Load(), validated.Load(), released.Load(), outcome)
 	}
 	raw, _ := json.Marshal(outcome.Result)
 	if strings.Contains(string(raw), "leased-secret") {
@@ -254,7 +320,57 @@ func TestHTTPUsesExpiringCredentialLeaseAndReleasesIt(t *testing.T) {
 	}
 }
 
+func TestHTTPRevalidatesCredentialLeaseBeforeNetworkRequest(t *testing.T) {
+	var validations, releases atomic.Int32
+
+	resolver := connector.NewStaticPayloadResolver()
+	payload := httpapi.Payload{Method: http.MethodGet, Path: "/records"}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inputHash := hash(payloadBytes)
+	if err := resolver.Put("workspace-a", inputHash, payloadBytes); err != nil {
+		t.Fatal(err)
+	}
+	ref, _ := credentials.ParseRef("provider/api")
+	secret, _ := credentials.NewSecret([]byte("revoked-before-http-send"))
+	leaseResolver := credentials.LeaseResolverFunc{
+		AcquireFunc: func(_ context.Context, workspace, _ string, purpose string, _ time.Duration) (credentials.Lease, error) {
+			return credentials.Lease{Reference: ref, WorkspaceID: workspace, LeaseID: "lease-revoked-before-send", Purpose: purpose, Fence: 2, RevocationEpoch: 3, ExpiresAt: time.Now().UTC().Add(time.Minute), Secret: secret}, nil
+		},
+		ValidateLeaseFunc: func(context.Context, credentials.Lease) error {
+			if validations.Add(1) == 3 {
+				return credentials.ErrLeaseRevoked
+			}
+			return nil
+		},
+		ReleaseFunc: func(context.Context, credentials.Lease) error { releases.Add(1); return nil },
+	}
+	binding := httpapi.Binding{ID: "billing-api", WorkspaceID: "workspace-a", BaseURL: "http://127.0.0.1:1", CredentialRef: "provider/api", AllowPrivateNetworks: true}
+	adapter, err := httpapi.NewConnectorWithLeaseResolver(binding, resolver.Resolve, leaseResolver, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	capability := adapter.Capabilities()[0]
+	definition := capability.Definition()
+	request := contracts.OperationRequest{ID: "lease-guard-operation", RequestID: "lease-guard-request", IdempotencyKey: "lease-guard-idempotency", WorkspaceID: binding.WorkspaceID, Actor: contracts.ActorRef{ID: "operator", Kind: "human", WorkspaceID: binding.WorkspaceID}, Capability: definition.Ref, Target: contracts.ResourceRef{WorkspaceID: binding.WorkspaceID, System: contracts.SystemRef{WorkspaceID: binding.WorkspaceID, Type: "http", ID: binding.ID, Version: "1"}, Kind: httpapi.ResourceKind, ID: binding.ID, Version: "1"}, InputType: httpapi.InputType, InputSchemaVersion: definition.InputSchemaVersion, InputSchemaHash: definition.InputSchemaHash, InputHash: inputHash, Profile: definition.Profile}
+	plan, err := capability.Plan(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = capability.Execute(context.Background(), request, plan)
+	var failure *connector.FailureError
+	if !errors.As(err, &failure) || failure.Code != "credential_unavailable" {
+		t.Fatalf("revoked credential was not rejected at the lease boundary: %v", err)
+	}
+	if validations.Load() != 3 || releases.Load() != 1 {
+		t.Fatalf("credential validation boundary failed: validations=%d releases=%d", validations.Load(), releases.Load())
+	}
+}
+
 func TestHTTPRejectsPrivateNetworkWhenNotExplicitlyAllowed(t *testing.T) {
+	testutil.RequireLocalHTTP(t)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) { _, _ = writer.Write([]byte(`ok`)) }))
 	defer server.Close()
 	resolver := connector.NewStaticPayloadResolver()
@@ -270,6 +386,7 @@ func TestHTTPRejectsPrivateNetworkWhenNotExplicitlyAllowed(t *testing.T) {
 }
 
 func TestHTTPRedirectCannotEscapeConfiguredHost(t *testing.T) {
+	testutil.RequireLocalHTTP(t)
 	target := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		_, _ = writer.Write([]byte(`escaped`))
 	}))

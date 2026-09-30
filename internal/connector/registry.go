@@ -6,11 +6,13 @@ package connector
 
 import (
 	"context"
+	"crypto/ed25519"
 	"errors"
 	"fmt"
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/omaveda/fornix/internal/contracts"
 )
@@ -28,6 +30,7 @@ var (
 	ErrApprovalRequired      = errors.New("capability approval is required")
 	ErrCredentialUnavailable = errors.New("required credential reference is unavailable")
 	ErrUnauthorized          = errors.New("connector operation is unauthorized")
+	ErrAuthorityExecution    = errors.New("capability does not implement the effect authority boundary")
 )
 
 const (
@@ -53,6 +56,38 @@ type Capability interface {
 	Execute(context.Context, contracts.OperationRequest, contracts.OperationPlan) (contracts.OperationResult, error)
 }
 
+// AuthorityAwareCapability is the optional strict execution seam for
+// effectful adapters. Read-only capabilities may continue using Execute;
+// production effectful dispatch must implement this method so the exact
+// durable authority envelope reaches the adapter.
+type AuthorityAwareCapability interface {
+	ExecuteWithAuthority(context.Context, contracts.OperationRequest, contracts.OperationPlan, contracts.EffectAuthority) (contracts.OperationResult, error)
+}
+
+// EffectDescriber lets an adapter publish the exact non-secret external
+// boundary before dispatch. The dispatcher reserves this descriptor; the
+// adapter must return the same stable effect identity after execution.
+// Keeping this optional preserves read-only capability compatibility while
+// preventing generic callers from guessing provider-specific verification or
+// idempotency behavior.
+type EffectDescriber interface {
+	DescribeEffect(contracts.OperationRequest) (contracts.ExternalEffect, error)
+}
+
+// EffectVerifier is the read-only adapter seam for proving an already
+// reserved external effect. It receives only normalized, hash-bound facts;
+// the generic dispatcher owns all durable state transitions and fencing.
+type EffectVerifier interface {
+	VerifyEffect(context.Context, contracts.EffectVerificationRequest) (contracts.EffectVerificationResult, error)
+}
+
+// BoundaryDescriber publishes the exact redacted egress envelope used by an
+// effectful network capability. The returned value contains hashes and bounded
+// mode names only; it never contains a credential or raw URL payload.
+type BoundaryDescriber interface {
+	DescribeBoundary(contracts.OperationRequest) (contracts.ExternalBoundaryAuthority, error)
+}
+
 // Connector advertises immutable capabilities for one workspace-scoped
 // adapter version. Registration is explicit and process-local in this slice.
 type Connector interface {
@@ -75,12 +110,17 @@ type capabilityEntry struct {
 // Registry stores explicit connector and capability registrations. Lookups
 // are exact and stable; a model or request cannot add an entry at runtime.
 type Registry struct {
-	mu                   sync.RWMutex
-	connectors           map[string]connectorEntry
-	capabilities         map[string]capabilityEntry
-	capabilityIdentities map[string]capabilityEntry
-	trustPolicies        map[string]TrustPolicy
-	trustRequired        bool
+	mu                      sync.RWMutex
+	connectors              map[string]connectorEntry
+	capabilities            map[string]capabilityEntry
+	capabilityIdentities    map[string]capabilityEntry
+	trustPolicies           map[string]TrustPolicy
+	schemaCatalogs          map[string]SchemaCatalog
+	trustSigners            map[string]ed25519.PublicKey
+	trustRequired           bool
+	signedTrustRequired     bool
+	signedSchemaRequired    bool
+	effectAuthorityRequired bool
 }
 
 // NewRegistry creates an empty connector registry.
@@ -90,6 +130,8 @@ func NewRegistry() *Registry {
 		capabilities:         make(map[string]capabilityEntry),
 		capabilityIdentities: make(map[string]capabilityEntry),
 		trustPolicies:        make(map[string]TrustPolicy),
+		schemaCatalogs:       make(map[string]SchemaCatalog),
+		trustSigners:         make(map[string]ed25519.PublicKey),
 	}
 }
 
@@ -104,19 +146,225 @@ func (r *Registry) SetTrustPolicy(policy TrustPolicy) error {
 	if strings.TrimSpace(policy.WorkspaceID) == "" || strings.TrimSpace(policy.Revision) == "" {
 		return fmt.Errorf("trust policy workspace_id and revision are required")
 	}
+	policy.Entries = append([]TrustEntry(nil), policy.Entries...)
 	if err := normalizeTrustEntries(policy.Entries); err != nil {
 		return err
+	}
+	if strings.TrimSpace(policy.Signature) != "" {
+		return fmt.Errorf("signed trust policies must use SetSignedTrustPolicy")
 	}
 	expectedHash := trustPolicyHash(policy)
 	if policy.PolicyHash != "" && policy.PolicyHash != expectedHash {
 		return fmt.Errorf("trust policy hash does not match normalized entries")
 	}
 	policy.PolicyHash = expectedHash
-	policy.Entries = append([]TrustEntry(nil), policy.Entries...)
 	r.mu.Lock()
+	previous, hasPrevious := r.trustPolicies[policy.WorkspaceID]
+	if r.signedTrustRequired || (hasPrevious && strings.TrimSpace(previous.Signature) != "") {
+		r.mu.Unlock()
+		return ErrTrustSignature
+	}
 	r.trustPolicies[policy.WorkspaceID] = policy
 	r.mu.Unlock()
 	return nil
+}
+
+// SetTrustSigner installs one trusted public key. The key is copied and the
+// signer ID is exact; callers cannot mutate verification state after install.
+func (r *Registry) SetTrustSigner(signerID string, publicKey ed25519.PublicKey) error {
+	if r == nil {
+		return ErrRegistryNil
+	}
+	signerID = strings.TrimSpace(signerID)
+	if signerID == "" || len(publicKey) != ed25519.PublicKeySize {
+		return ErrTrustSignature
+	}
+	r.mu.Lock()
+	if r.trustSigners == nil {
+		r.trustSigners = make(map[string]ed25519.PublicKey)
+	}
+	r.trustSigners[signerID] = append(ed25519.PublicKey(nil), publicKey...)
+	r.mu.Unlock()
+	return nil
+}
+
+// RevokeTrustSigner removes a signer from the process-local verification
+// cache. Existing signed policies and schema catalogs fail closed on the next
+// admission because signed mode re-verifies the detached signature. Durable
+// revocation remains authoritative in TrustCatalogStore.
+func (r *Registry) RevokeTrustSigner(signerID string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	delete(r.trustSigners, strings.TrimSpace(signerID))
+	r.mu.Unlock()
+}
+
+// RequireSignedTrustPolicy switches production composition to signed catalog
+// mode. An unsigned development snapshot is then rejected at admission.
+func (r *Registry) RequireSignedTrustPolicy(required bool) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.signedTrustRequired = required
+	r.mu.Unlock()
+}
+
+// SetSignedTrustPolicy verifies and installs a signed policy. Signed
+// revisions are decimal counters and cannot move backwards for a workspace.
+func (r *Registry) SetSignedTrustPolicy(policy TrustPolicy, now time.Time) error {
+	if r == nil {
+		return ErrRegistryNil
+	}
+	revision, err := trustRevisionNumber(policy.Revision)
+	if err != nil {
+		return err
+	}
+	r.mu.RLock()
+	keys := make(map[string]ed25519.PublicKey, len(r.trustSigners))
+	for id, key := range r.trustSigners {
+		keys[id] = append(ed25519.PublicKey(nil), key...)
+	}
+	previous, exists := r.trustPolicies[policy.WorkspaceID]
+	r.mu.RUnlock()
+	if err := policy.Verify(keys, now); err != nil {
+		return err
+	}
+	if exists && strings.TrimSpace(previous.Signature) != "" {
+		previousRevision, parseErr := trustRevisionNumber(previous.Revision)
+		if parseErr != nil || revision <= previousRevision {
+			return ErrTrustDowngrade
+		}
+	}
+	policy.Entries = append([]TrustEntry(nil), policy.Entries...)
+	if err := normalizeTrustEntries(policy.Entries); err != nil {
+		return err
+	}
+	if policy.PolicyHash != trustPolicyHash(policy) {
+		return fmt.Errorf("trust policy hash does not match normalized entries")
+	}
+	r.mu.Lock()
+	// Re-check under the write lock so two concurrent signed installations
+	// cannot both pass the same previous revision and install out of order.
+	if current, ok := r.trustPolicies[policy.WorkspaceID]; ok && strings.TrimSpace(current.Signature) != "" {
+		currentRevision, parseErr := trustRevisionNumber(current.Revision)
+		if parseErr != nil || revision <= currentRevision {
+			r.mu.Unlock()
+			return ErrTrustDowngrade
+		}
+	}
+	r.trustPolicies[policy.WorkspaceID] = policy
+	r.mu.Unlock()
+	return nil
+}
+
+// RequireSignedSchemaCatalog switches production composition to explicit
+// schema-fingerprint admission. It is separate from trust policy mode so
+// existing local development registries can migrate deliberately.
+func (r *Registry) RequireSignedSchemaCatalog(required bool) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.signedSchemaRequired = required
+	r.mu.Unlock()
+}
+
+func (r *Registry) isSignedSchemaRequired() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.RLock()
+	required := r.signedSchemaRequired
+	r.mu.RUnlock()
+	return required
+}
+
+// SetSchemaCatalog installs an unsigned development snapshot. Production
+// callers must use SetSignedSchemaCatalog after verifying the detached
+// signature and signer rotation state.
+func (r *Registry) SetSchemaCatalog(catalog SchemaCatalog) error {
+	if r == nil {
+		return ErrRegistryNil
+	}
+	catalog.Entries = append([]SchemaEntry(nil), catalog.Entries...)
+	if err := catalog.Normalize(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(catalog.Signature) != "" {
+		return ErrSchemaSignature
+	}
+	r.mu.Lock()
+	if r.signedSchemaRequired {
+		r.mu.Unlock()
+		return ErrSchemaSignature
+	}
+	if previous, exists := r.schemaCatalogs[catalog.WorkspaceID]; exists && strings.TrimSpace(previous.Signature) != "" {
+		r.mu.Unlock()
+		return ErrSchemaSignature
+	}
+	r.schemaCatalogs[catalog.WorkspaceID] = catalog
+	r.mu.Unlock()
+	return nil
+}
+
+// SetSignedSchemaCatalog verifies and installs one monotonic signed catalog.
+func (r *Registry) SetSignedSchemaCatalog(catalog SchemaCatalog, now time.Time) error {
+	if r == nil {
+		return ErrRegistryNil
+	}
+	catalog.Entries = append([]SchemaEntry(nil), catalog.Entries...)
+	revision, err := trustRevisionNumber(catalog.Revision)
+	if err != nil {
+		return err
+	}
+	r.mu.RLock()
+	keys := make(map[string]ed25519.PublicKey, len(r.trustSigners))
+	for id, key := range r.trustSigners {
+		keys[id] = append(ed25519.PublicKey(nil), key...)
+	}
+	previous, exists := r.schemaCatalogs[catalog.WorkspaceID]
+	r.mu.RUnlock()
+	if err := catalog.Verify(keys, now); err != nil {
+		return err
+	}
+	if exists && strings.TrimSpace(previous.Signature) != "" {
+		previousRevision, parseErr := trustRevisionNumber(previous.Revision)
+		if parseErr != nil || revision <= previousRevision {
+			if previous.CatalogHash == catalog.CatalogHash {
+				return nil
+			}
+			return ErrSchemaDowngrade
+		}
+	}
+	r.mu.Lock()
+	if current, ok := r.schemaCatalogs[catalog.WorkspaceID]; ok && strings.TrimSpace(current.Signature) != "" {
+		currentRevision, parseErr := trustRevisionNumber(current.Revision)
+		if parseErr != nil || revision <= currentRevision {
+			if current.CatalogHash == catalog.CatalogHash {
+				r.mu.Unlock()
+				return nil
+			}
+			r.mu.Unlock()
+			return ErrSchemaDowngrade
+		}
+	}
+	r.schemaCatalogs[catalog.WorkspaceID] = catalog
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *Registry) SchemaCatalog(workspaceID string) (SchemaCatalog, bool) {
+	if r == nil {
+		return SchemaCatalog{}, false
+	}
+	r.mu.RLock()
+	catalog, ok := r.schemaCatalogs[strings.TrimSpace(workspaceID)]
+	r.mu.RUnlock()
+	catalog.Entries = append([]SchemaEntry(nil), catalog.Entries...)
+	return catalog, ok
 }
 
 // TrustWorkspace creates a snapshot from the definitions currently registered
@@ -159,12 +407,46 @@ func (r *Registry) RequireTrustPolicy(required bool) {
 	r.mu.Unlock()
 }
 
+// RequireEffectAuthority makes the production composition reject every
+// effectful capability unless the caller supplies the durable authority
+// envelope and uses the authority-aware adapter seam. Unit-test registries can
+// leave this disabled when exercising the low-level capability contract in
+// isolation; server composition enables it unconditionally.
+func (r *Registry) RequireEffectAuthority(required bool) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.effectAuthorityRequired = required
+	r.mu.Unlock()
+}
+
+func (r *Registry) isEffectAuthorityRequired() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.RLock()
+	required := r.effectAuthorityRequired
+	r.mu.RUnlock()
+	return required
+}
+
 func (r *Registry) isTrustRequired() bool {
 	if r == nil {
 		return false
 	}
 	r.mu.RLock()
 	required := r.trustRequired
+	r.mu.RUnlock()
+	return required
+}
+
+func (r *Registry) isSignedTrustRequired() bool {
+	if r == nil {
+		return false
+	}
+	r.mu.RLock()
+	required := r.signedTrustRequired
 	r.mu.RUnlock()
 	return required
 }
@@ -260,7 +542,7 @@ func (r *Registry) Lookup(ref contracts.CapabilityRef) (Capability, bool) {
 	if !ok || entry.definition.Ref.DefinitionHash != ref.DefinitionHash {
 		return nil, false
 	}
-	return &boundCapability{entry: entry}, true
+	return &boundCapability{registry: r, entry: entry}, true
 }
 
 // LookupIdentity resolves a capability for discovery. Execution must use the
@@ -285,7 +567,7 @@ func (r *Registry) LookupIdentity(workspaceID, connectorName, connectorVersion, 
 	if !ok {
 		return nil, false
 	}
-	return &boundCapability{entry: entry}, true
+	return &boundCapability{registry: r, entry: entry}, true
 }
 
 // Capabilities returns normalized definitions in stable identity order. The
@@ -348,7 +630,8 @@ func (r *Registry) Health(ctx context.Context, ref contracts.ConnectorRef) Healt
 }
 
 type boundCapability struct {
-	entry capabilityEntry
+	registry *Registry
+	entry    capabilityEntry
 }
 
 func (c *boundCapability) Definition() contracts.CapabilityDefinition {
@@ -392,6 +675,9 @@ func (c *boundCapability) Execute(ctx context.Context, request contracts.Operati
 	if c == nil {
 		return contracts.OperationResult{}, ErrCapabilityNotFound
 	}
+	if c.registry != nil && c.registry.isEffectAuthorityRequired() && c.entry.definition.Effect != contracts.EffectClassReadOnly && c.entry.definition.Effect != contracts.EffectClassObservation {
+		return contracts.OperationResult{}, ErrAuthorityExecution
+	}
 	if err := c.Validate(request); err != nil {
 		return contracts.OperationResult{}, err
 	}
@@ -408,6 +694,53 @@ func (c *boundCapability) Execute(ctx context.Context, request contracts.Operati
 		}
 	}
 	return result, err
+}
+
+func (c *boundCapability) ExecuteWithAuthority(ctx context.Context, request contracts.OperationRequest, plan contracts.OperationPlan, authority contracts.EffectAuthority) (contracts.OperationResult, error) {
+	if c == nil {
+		return contracts.OperationResult{}, ErrCapabilityNotFound
+	}
+	if aware, ok := c.entry.capability.(AuthorityAwareCapability); ok {
+		if err := c.Validate(request); err != nil {
+			return contracts.OperationResult{}, err
+		}
+		if err := validatePlan(request, plan); err != nil {
+			return contracts.OperationResult{}, err
+		}
+		result, err := aware.ExecuteWithAuthority(ctx, request, plan, authority)
+		if definitionErr := c.validateRegisteredDefinition(); definitionErr != nil {
+			return contracts.OperationResult{}, definitionErr
+		}
+		if err == nil {
+			if schemaErr := validateResultSchema(result, c.entry.definition); schemaErr != nil {
+				return contracts.OperationResult{}, schemaErr
+			}
+		}
+		return result, err
+	}
+	return contracts.OperationResult{}, ErrAuthorityExecution
+}
+
+func (c *boundCapability) DescribeEffect(request contracts.OperationRequest) (contracts.ExternalEffect, error) {
+	if c == nil {
+		return contracts.ExternalEffect{}, ErrCapabilityNotFound
+	}
+	describer, ok := c.entry.capability.(EffectDescriber)
+	if !ok {
+		return contracts.ExternalEffect{}, fmt.Errorf("capability %s does not describe an external effect", capabilityIdentityKey(c.entry.definition.Ref))
+	}
+	return describer.DescribeEffect(request)
+}
+
+func (c *boundCapability) DescribeBoundary(request contracts.OperationRequest) (contracts.ExternalBoundaryAuthority, error) {
+	if c == nil {
+		return contracts.ExternalBoundaryAuthority{}, ErrCapabilityNotFound
+	}
+	describer, ok := c.entry.capability.(BoundaryDescriber)
+	if !ok {
+		return contracts.ExternalBoundaryAuthority{}, fmt.Errorf("capability %s does not describe an external boundary", capabilityIdentityKey(c.entry.definition.Ref))
+	}
+	return describer.DescribeBoundary(request)
 }
 
 func (c *boundCapability) validateRegisteredDefinition() error {

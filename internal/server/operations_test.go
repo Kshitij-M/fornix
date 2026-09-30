@@ -20,6 +20,15 @@ import (
 	"github.com/omaveda/fornix/internal/store"
 )
 
+func TestOperationAdmissionHTTPStatusMapsCapabilityRateLimit(t *testing.T) {
+	if got := operationAdmissionHTTPStatus(contracts.AdmissionDecision{ReasonCode: contracts.AdmissionReasonRateLimited}); got != http.StatusTooManyRequests {
+		t.Fatalf("rate-limited admission HTTP status=%d, want 429", got)
+	}
+	if got := operationAdmissionHTTPStatus(contracts.AdmissionDecision{ReasonCode: contracts.AdmissionReasonQuotaExceeded}); got != http.StatusConflict {
+		t.Fatalf("non-rate admission denial HTTP status=%d, want conflict", got)
+	}
+}
+
 func TestGenericOperationHTTPIsIdempotentFencedReplayableAndWorkspaceScoped(t *testing.T) {
 	srv, _, workspaceID, token := newServerAuthTest(t, []contracts.Permission{
 		contracts.PermissionOperationRead,
@@ -254,6 +263,22 @@ func TestGenericOperationHTTPExecutesTrustedReadAndDeduplicates(t *testing.T) {
 	if count != 1 {
 		t.Fatalf("durable result count=%d, want 1", count)
 	}
+	var authorityLinks int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM fornix.operation_authority_links WHERE workspace_id=$1 AND operation_id=$2`, workspaceID, operationID).Scan(&authorityLinks); err != nil {
+		t.Fatal(err)
+	}
+	if authorityLinks != 2 {
+		t.Fatalf("generic execution authority link count=%d, want admission and result", authorityLinks)
+	}
+	inspected := performOperationRequest(handler, token, workspaceID, http.MethodGet, "/v1/operations/"+operationID+"/authority-links?workspace_id="+workspaceID, nil, nil)
+	if inspected.Code != http.StatusOK {
+		t.Fatalf("authority inspection status=%d body=%s", inspected.Code, inspected.Body.String())
+	}
+	inspectedJSON := decodeOperationJSON(t, inspected)
+	links, ok := inspectedJSON["links"].([]any)
+	if !ok || len(links) != 2 {
+		t.Fatalf("authority inspection did not return admission and result links: %s", inspected.Body.String())
+	}
 }
 
 func TestGenericOperationHTTPRejectsEffectfulCapabilityWithoutReservation(t *testing.T) {
@@ -297,11 +322,30 @@ func TestGenericOperationHTTPRejectsEffectfulCapabilityWithoutReservation(t *tes
 func TestGenericOperationHTTPReservesAndReconcilesExternalEffect(t *testing.T) {
 	srv, pool, workspaceID, token := newServerAuthTest(t, []contracts.Permission{contracts.PermissionOperationRead, contracts.PermissionOperationCreate, contracts.PermissionOperationExecute})
 	srv.admission = store.NewAdmissionStore(pool, srv.events)
+	registry := connectorruntime.NewRegistry()
+	adapter, err := fakeincident.NewConnector(workspaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.Register(adapter); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.TrustWorkspace(workspaceID, "test-v1"); err != nil {
+		t.Fatal(err)
+	}
+	registry.RequireTrustPolicy(true)
+	srv.connectorRegistry = registry
+	srv.connectorExecutor = &connectorruntime.Executor{Registry: registry}
 	principal, err := srv.auth.Authenticate(context.Background(), token)
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := genericOperationRequest(workspaceID)
+	capability, ok := registry.LookupIdentity(workspaceID, fakeincident.ConnectorName, fakeincident.ConnectorVersion, "incident.remediate", "1")
+	if !ok {
+		t.Fatal("incident remediation capability was not registered")
+	}
+	definition := capability.Definition()
+	request := contracts.OperationRequest{WorkspaceID: workspaceID, Capability: definition.Ref, Target: contracts.ResourceRef{WorkspaceID: workspaceID, System: contracts.SystemRef{WorkspaceID: workspaceID, Type: "incident", ID: "monitor", Version: "1"}, Kind: fakeincident.ResourceKind, ID: "incident-1", Version: "1"}, InputType: fakeincident.InputType, InputSchemaVersion: definition.InputSchemaVersion, InputSchemaHash: definition.InputSchemaHash, InputHash: contracts.HashStrings("incident-input"), Profile: definition.Profile}
 	request.ID = "operation-effect-http"
 	request.RequestID = "request-effect-http"
 	request.IdempotencyKey = "operation-effect-http-create"
@@ -309,11 +353,24 @@ func TestGenericOperationHTTPReservesAndReconcilesExternalEffect(t *testing.T) {
 	hash := strings.Repeat("b", 64)
 	plan := contracts.OperationPlan{ID: "plan-effect-http", WorkspaceID: workspaceID, Actor: principal.Actor(), Steps: []contracts.OperationStep{{
 		ID: "step-effect", Ordinal: 0, Kind: "dispatch", Capability: request.Capability, Target: request.Target,
-		Effect: contracts.EffectClassReversibleWrite, Profile: contracts.DefaultExecutionProfile(), InputHash: hash,
+		Effect: definition.Effect, Profile: definition.Profile, InputHash: hash,
 	}}}
 	created, err := srv.operations.Create(context.Background(), store.OperationCreateInput{Request: request, Plan: &plan})
 	if err != nil {
 		t.Fatal(err)
+	}
+	policy := contracts.AdmissionPolicy{WorkspaceID: workspaceID, PolicyID: "http-effect-policy", Version: "1", AllowedConnectors: []contracts.ConnectorRef{definition.Ref.Connector}, AllowedResourceKinds: []string{fakeincident.ResourceKind}, AllowedActorIDs: []string{principal.ID}, MaxCostMicros: 100, MaxOperationsPerWindow: 10, MaxCostPerWindowMicros: 1000}
+	if err := policy.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	durableAdmission, err := srv.admission.Admit(context.Background(), contracts.AdmissionInput{WorkspaceID: workspaceID, OperationID: created.Operation.ID, OperationHash: created.Operation.OperationHash, RequestID: request.RequestID, IdempotencyKey: "operation-effect-http-admission", Actor: principal.Actor(), Capability: definition, Target: request.Target, Policy: policy, ConnectorAvailable: true, ResourceAllowed: true, EvidenceSatisfied: true, TaskFenceValid: true, RequestedCostMicros: 10})
+	if err != nil {
+		t.Fatalf("durable effect admission: %v", err)
+	}
+	if durableAdmission.Approval != nil {
+		if _, _, err := srv.admission.DecideApproval(context.Background(), contracts.OperationApprovalDecision{WorkspaceID: workspaceID, ApprovalID: durableAdmission.Approval.ID, RequestID: "approver-request", IdempotencyKey: "approver-decision", Decision: contracts.ApprovalRequestApproved, Actor: contracts.ActorRef{ID: "approver", Kind: "human", WorkspaceID: workspaceID}}); err != nil {
+			t.Fatalf("approve durable effect admission: %v", err)
+		}
 	}
 	lease, err := srv.operations.AcquireLease(context.Background(), workspaceID, created.Operation.ID, principal.ID, time.Minute)
 	if err != nil {
@@ -324,7 +381,7 @@ func TestGenericOperationHTTPReservesAndReconcilesExternalEffect(t *testing.T) {
 	}
 	handler := withRequestMiddleware(srv.securityMiddleware(srv.routes()), 2<<20)
 	fenceHeaders := map[string]string{"X-Operation-Fence": strconv.FormatUint(lease.Lease.Fence, 10)}
-	effectBody := []byte(`{"step_id":"step-effect","attempt_id":"attempt-effect-http","request_hash":"` + hash + `","effect":{"workspace_id":"` + workspaceID + `","boundary":"fixture","class":"reversible_write","delivery_guarantee":"at_least_once","idempotency_key":"provider-effect-http","verification_required":true,"verification_status":"pending","compensation_status":"available"}}`)
+	effectBody := []byte(`{"step_id":"step-effect","attempt_id":"attempt-effect-http","request_hash":"` + hash + `","effect":{"workspace_id":"` + workspaceID + `","boundary":"fakeincident.remediation","class":"approval_required_write","delivery_guarantee":"at_least_once","idempotency_key":"operation-effect-http-create","provider_idempotency_supported":true,"verification_required":true,"verification_status":"pending","compensation_status":"unavailable"}}`)
 	reservePath := "/v1/operations/" + created.Operation.ID + "/effects/reserve?workspace_id=" + workspaceID
 	reserved := performOperationRequest(handler, token, workspaceID, http.MethodPost, reservePath, effectBody, fenceHeaders)
 	if reserved.Code != http.StatusOK {

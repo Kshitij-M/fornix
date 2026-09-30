@@ -2,8 +2,11 @@ package connector_test
 
 import (
 	"context"
+	"crypto/ed25519"
+	"crypto/rand"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/omaveda/fornix/internal/adapters/fakeincident"
 	"github.com/omaveda/fornix/internal/connector"
@@ -48,6 +51,77 @@ func TestTrustPolicyIsOrderIndependentAndPinsDefinitionHashes(t *testing.T) {
 	foreign.Ref.Connector.WorkspaceID = foreign.WorkspaceID
 	if first.Authorize(foreign) == nil {
 		t.Fatal("cross-workspace capability was trusted")
+	}
+}
+
+func TestSignedTrustPolicyVerifiesAndRejectsTamperAndDowngrade(t *testing.T) {
+	adapter, err := fakeincident.NewConnector("workspace-signed-trust")
+	if err != nil {
+		t.Fatal(err)
+	}
+	definitions := make([]contracts.CapabilityDefinition, 0, len(adapter.Capabilities()))
+	for _, capability := range adapter.Capabilities() {
+		definitions = append(definitions, capability.Definition())
+	}
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	policy, err := connector.NewTrustPolicy("workspace-signed-trust", "1", definitions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := policy.Sign("release-key-1", privateKey, now.Add(-time.Second), now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := policy.Verify(map[string]ed25519.PublicKey{"release-key-1": publicKey}, now); err != nil {
+		t.Fatalf("verify signed policy: %v", err)
+	}
+	if err := policy.Verify(map[string]ed25519.PublicKey{"other-key": publicKey}, now); !errors.Is(err, connector.ErrTrustSignature) {
+		t.Fatalf("unknown signer error=%v, want signature error", err)
+	}
+	if err := policy.Verify(map[string]ed25519.PublicKey{"release-key-1": publicKey}, now.Add(2*time.Hour)); !errors.Is(err, connector.ErrTrustExpired) {
+		t.Fatalf("expired policy error=%v, want expired", err)
+	}
+	tampered := policy
+	tampered.Entries = append([]connector.TrustEntry(nil), policy.Entries...)
+	tampered.Entries[0].CapabilityHash = contracts.HashStrings("tampered")
+	if err := tampered.Verify(map[string]ed25519.PublicKey{"release-key-1": publicKey}, now); !errors.Is(err, connector.ErrTrustSignature) {
+		t.Fatalf("tampered policy error=%v, want signature error", err)
+	}
+
+	registry := connector.NewRegistry()
+	if err := registry.Register(adapter); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.SetTrustSigner("release-key-1", publicKey); err != nil {
+		t.Fatal(err)
+	}
+	registry.RequireTrustPolicy(true)
+	registry.RequireSignedTrustPolicy(true)
+	if err := registry.SetSignedTrustPolicy(policy, now); err != nil {
+		t.Fatalf("install signed policy: %v", err)
+	}
+	capability, ok := registry.LookupIdentity("workspace-signed-trust", fakeincident.ConnectorName, fakeincident.ConnectorVersion, "incident.read", "1")
+	if !ok {
+		t.Fatal("signed capability was not discoverable")
+	}
+	if _, err := registry.Admit(context.Background(), trustRequest(capability.Definition()), connector.AdmissionOptions{}); err != nil {
+		t.Fatalf("signed policy rejected trusted capability: %v", err)
+	}
+	newPolicy, err := connector.NewTrustPolicy("workspace-signed-trust", "2", definitions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := newPolicy.Sign("release-key-1", privateKey, now.Add(-time.Second), now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.SetSignedTrustPolicy(newPolicy, now); err != nil {
+		t.Fatalf("install newer signed policy: %v", err)
+	}
+	if err := registry.SetSignedTrustPolicy(policy, now); !errors.Is(err, connector.ErrTrustDowngrade) {
+		t.Fatalf("downgrade error=%v, want downgrade", err)
 	}
 }
 

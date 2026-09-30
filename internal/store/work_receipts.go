@@ -57,7 +57,7 @@ func (s *WorkReceiptStore) Finalize(ctx context.Context, request contracts.WorkR
 	if err != nil {
 		return contracts.WorkReceipt{}, false, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, receipt.WorkspaceID)
 	if err != nil {
 		return contracts.WorkReceipt{}, false, fmt.Errorf("begin work receipt finalization: %w", err)
 	}
@@ -186,6 +186,35 @@ func (s *WorkReceiptStore) finalizeTx(ctx context.Context, tx pgx.Tx, receipt co
 	}
 	if err := s.fail("links_inserted"); err != nil {
 		return contracts.WorkReceipt{}, false, err
+	}
+	if receipt.Operation != nil {
+		// The receipt is the terminal human/operator-facing proof. Link it to
+		// the exact operation hash and validated evidence/artifact references
+		// before the transaction can commit.
+		link := authorityReceiptLink(receipt)
+		if admissionLink, readErr := readAuthorityLinkStageTx(ctx, tx, receipt.WorkspaceID, receipt.Operation.ID, contracts.AuthorityStageAdmission); readErr == nil {
+			facts := factsFromLink(admissionLink)
+			link.SchemaCatalogHash, link.SchemaCatalogRevision = facts.SchemaCatalogHash, facts.SchemaCatalogRevision
+			link.CredentialLeaseID, link.CredentialLeaseFence, link.CredentialRevocationEpoch = facts.CredentialLeaseID, facts.CredentialLeaseFence, facts.CredentialRevocationEpoch
+			link.CredentialSourceVersion, link.CredentialSourceExpiresAt = facts.CredentialSourceVersion, facts.CredentialSourceExpiresAt
+		} else if !errors.Is(readErr, ErrAuthorityLinkNotFound) {
+			return contracts.WorkReceipt{}, false, fmt.Errorf("read receipt admission lineage: %w", readErr)
+		}
+		if resultLink, readErr := readAuthorityLinkStageTx(ctx, tx, receipt.WorkspaceID, receipt.Operation.ID, contracts.AuthorityStageResult); readErr == nil {
+			facts := factsFromLink(resultLink)
+			if link.SchemaCatalogHash == "" {
+				link.SchemaCatalogHash, link.SchemaCatalogRevision = facts.SchemaCatalogHash, facts.SchemaCatalogRevision
+			}
+			if link.CredentialLeaseID == "" {
+				link.CredentialLeaseID, link.CredentialLeaseFence, link.CredentialRevocationEpoch = facts.CredentialLeaseID, facts.CredentialLeaseFence, facts.CredentialRevocationEpoch
+				link.CredentialSourceVersion, link.CredentialSourceExpiresAt = facts.CredentialSourceVersion, facts.CredentialSourceExpiresAt
+			}
+		} else if !errors.Is(readErr, ErrAuthorityLinkNotFound) {
+			return contracts.WorkReceipt{}, false, fmt.Errorf("read receipt result lineage: %w", readErr)
+		}
+		if _, _, err := appendAuthorityLinkTx(ctx, tx, link); err != nil {
+			return contracts.WorkReceipt{}, false, fmt.Errorf("append receipt authority link: %w", err)
+		}
 	}
 	stored, err := readWorkReceiptByIDTx(ctx, tx, receipt.WorkspaceID, receipt.ID)
 	if err != nil {

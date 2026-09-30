@@ -13,12 +13,12 @@ shortest honest answer to “what can I use right now?”
 | Approval-gated local repository changes | Experimental alpha | Use only on disposable or operator-controlled workspaces; review the change packet |
 | HTTP/API read and list operations | Bounded reference adapter | Test-system experiments with explicit destination, response, retry, credential, and cost bounds |
 | HTTP/API writes | Reservation/reconciliation foundation | Fornix records the effect boundary but does not provide generic live dispatch, verification, or compensation |
-| Read-only SQL inspection | Bounded reference adapter | Prepared, read-only, allowlisted, row/byte/cost-bounded queries |
+| Read-only SQL inspection | Bounded reference adapter | Structured, read-only, allowlisted queries with bounded disclosed results; scan work and peak memory for one oversized cell are not hard-bounded |
 | Cloud operations | Not implemented or qualified | No production cloud executor is included |
 | Ticketing and business systems | Not live-qualified | Use only a purpose-built adapter after its own conformance and recovery review |
 | Multi-step workflows | Alpha foundation | Durable typed steps and waits exist; production worker/fairness qualification remains |
 | Multi-agent execution graphs | Not implemented | Fornix does not currently provide a general multi-agent graph runtime |
-| Hosted multi-tenant production service | Not qualified | No HA, PostgreSQL RLS, external secret manager, backup/restore SLO, or support contract |
+| Hosted multi-tenant production service | Not qualified | Role-separated PostgreSQL/RLS qualification exists as a deployment gate, but there is no HA, external secret manager, backup/restore SLO, or support contract |
 
 ## The safe default
 

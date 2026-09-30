@@ -24,12 +24,17 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 	pgvector "github.com/pgvector/pgvector-go"
+
+	"github.com/omaveda/fornix/internal/contracts"
+	"github.com/omaveda/fornix/internal/store"
 )
 
 // ---------- types ----------
@@ -76,6 +81,8 @@ type ragReq struct {
 	Weights        ragWeights `json:"weights"`
 	Filters        ragFilters `json:"filters"`
 	MaxChunkTokens int        `json:"max_chunk_tokens"`
+	EmbeddingMode  string     `json:"embedding_mode,omitempty"` // adaptive-v1 | legacy-v1 | required-v1 | disabled-v1
+	ReferenceTime  *time.Time `json:"reference_time,omitempty"`
 }
 
 type ragChunk struct {
@@ -90,6 +97,9 @@ type ragResp struct {
 	Chunks              []ragChunk `json:"chunks"`
 	TotalTokensEstimate int        `json:"total_tokens_estimate"`
 	RankingExplanation  string     `json:"ranking_explanation"`
+	EmbeddingMode       string     `json:"embedding_mode,omitempty"`
+	GateReason          string     `json:"gate_reason,omitempty"`
+	ReferenceTime       *time.Time `json:"reference_time,omitempty"`
 }
 
 // ---------- handler ----------
@@ -117,24 +127,63 @@ func (s *server) handleRAG(w http.ResponseWriter, r *http.Request) {
 	if req.MaxChunkTokens <= 0 {
 		req.MaxChunkTokens = 400
 	}
+	if req.Filters.MinScore < 0 || req.Filters.MinScore > 1 || math.IsNaN(req.Filters.MinScore) || math.IsInf(req.Filters.MinScore, 0) {
+		writeErr(w, http.StatusBadRequest, "filters.min_score must be between 0 and 1")
+		return
+	}
+	req.EmbeddingMode = normalizeQueryEmbeddingMode(strings.ToLower(strings.TrimSpace(req.EmbeddingMode)), queryEmbeddingModeLegacy)
+	if req.EmbeddingMode == "" {
+		writeErr(w, http.StatusBadRequest, "invalid embedding_mode")
+		return
+	}
 	workspaceID := requestWorkspace(r, req.WorkspaceID)
 	weights := req.Weights.normalised()
+	var referenceTime *time.Time
+	if req.ReferenceTime != nil || weights.Recency > 0 {
+		resolved, referenceErr := resolveReferenceTime(req.ReferenceTime)
+		if referenceErr != nil {
+			writeErr(w, http.StatusBadRequest, referenceErr.Error())
+			return
+		}
+		referenceTime = &resolved
+	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
-	// Embed the query (best-effort). If embedding fails AND cosine has
-	// weight we drop cosine to zero and continue, so the endpoint stays
-	// useful even when ollama is down.
+	// Adaptive mode performs deterministic lexical preflight before the
+	// provider. Legacy/required modes preserve the explicit cosine behavior.
 	var qEmb []float32
+	gateReason := "embedding_not_requested"
 	if weights.Cosine > 0 {
-		if e, err := s.embed(ctx, req.Q); err == nil {
-			qEmb = e
-		} else {
-			log.Printf("rag embed warn: %v", err)
+		shouldEmbed := req.EmbeddingMode != queryEmbeddingModeDisabled
+		if req.EmbeddingMode == queryEmbeddingModeAdaptive {
+			gate, gateErr := s.ragDeterministicGate(ctx, workspaceID, req.Q, req.Filters, req.TopK)
+			if gateErr != nil {
+				writeErr(w, http.StatusInternalServerError, "deterministic RAG preflight failed")
+				return
+			}
+			gateReason = gate.Reason
+			shouldEmbed = !gate.Satisfied
+			if gate.Satisfied {
+				weights.Cosine = 0
+			}
+		} else if req.EmbeddingMode == queryEmbeddingModeDisabled {
+			gateReason = "embedding_disabled"
 			weights.Cosine = 0
-			if weights.TSVector == 0 && weights.Recency == 0 {
-				weights.TSVector = 1.0
+		}
+		if shouldEmbed {
+			if e, err := s.embedQuery(ctx, s.embeddingRequest(workspaceID, requestActor(r), "rag_query", sha256hex(req.Q), req.Q), "rag", gateReason); err == nil {
+				qEmb = e
+			} else if req.EmbeddingMode == queryEmbeddingModeRequired {
+				writeErr(w, http.StatusServiceUnavailable, "semantic embedding is unavailable")
+				return
+			} else {
+				weights.Cosine = 0
+				gateReason = "provider_unavailable"
+				if weights.TSVector == 0 && weights.Recency == 0 {
+					weights.TSVector = 1.0
+				}
 			}
 		}
 	}
@@ -145,7 +194,8 @@ func (s *server) handleRAG(w http.ResponseWriter, r *http.Request) {
 	// ts_rank_cd, for recency a 30-day exponential-ish decay.
 	args := []any{}
 	scoreParts := []string{}
-	whereParts := []string{}
+	candidateParts := []string{}
+	filterParts := []string{}
 	// Embedding-related arg slot is index 1 (if used), then query text.
 	if weights.Cosine > 0 && qEmb != nil {
 		args = append(args, pgvector.NewVector(qEmb))
@@ -158,8 +208,9 @@ func (s *server) handleRAG(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("COALESCE(ts_rank_cd(tsv, plainto_tsquery('english', $%d)), 0) * %g", len(args), weights.TSVector))
 	}
 	if weights.Recency > 0 {
+		args = append(args, *referenceTime)
 		scoreParts = append(scoreParts,
-			fmt.Sprintf("(1.0 / (1 + EXTRACT(EPOCH FROM (now()-created_at))/86400.0/30)) * %g", weights.Recency))
+			fmt.Sprintf("(1.0 / (1 + EXTRACT(EPOCH FROM (CASE WHEN created_at > $%d THEN INTERVAL '0' ELSE $%d-created_at END))/86400.0/30)) * %g", len(args), len(args), weights.Recency))
 	}
 	if len(scoreParts) == 0 {
 		// Shouldn't happen after normalisation, but defend.
@@ -169,17 +220,25 @@ func (s *server) handleRAG(w http.ResponseWriter, r *http.Request) {
 
 	// Candidate filter: embedding present (if we have qEmb) OR tsv hit (if we have q text).
 	if weights.Cosine > 0 && qEmb != nil {
-		whereParts = append(whereParts, "embedding IS NOT NULL")
+		candidateParts = append(candidateParts, "embedding IS NOT NULL")
 	}
 	if weights.TSVector > 0 {
 		// Use placeholder for the same query text we already pushed; rebuild safely.
 		// To avoid duplicate placeholder issues, just plainto on the literal again.
 		args = append(args, req.Q)
-		whereParts = append(whereParts, fmt.Sprintf("tsv @@ plainto_tsquery('english', $%d)", len(args)))
+		candidateParts = append(candidateParts, fmt.Sprintf("tsv @@ plainto_tsquery('english', $%d)", len(args)))
+	}
+	if strings.TrimSpace(req.Filters.Type) != "" {
+		args = append(args, strings.TrimSpace(req.Filters.Type))
+		filterParts = append(filterParts, fmt.Sprintf("metadata->>'type' = $%d", len(args)))
 	}
 	candidateWhere := ""
-	if len(whereParts) > 0 {
-		candidateWhere = "AND (" + strings.Join(whereParts, " OR ") + ")"
+	if len(candidateParts) > 0 {
+		candidateWhere = "AND (" + strings.Join(candidateParts, " OR ") + ")"
+	}
+	filterWhere := ""
+	if len(filterParts) > 0 {
+		filterWhere = "AND " + strings.Join(filterParts, " AND ")
 	}
 
 	// Source-path filter: case-insensitive ILIKE on any provided pattern.
@@ -205,23 +264,29 @@ func (s *server) handleRAG(w http.ResponseWriter, r *http.Request) {
 SELECT id, source_path, source_range, content, metadata,
        (%s) AS score
 FROM fornix.chunks
-WHERE workspace_id = $%d
-  %s
-  %s
-ORDER BY score DESC
-LIMIT $%d`, scoreExpr, workspaceIdx, candidateWhere, pathFilter, topKIdx)
+	WHERE workspace_id = $%d
+	  %s
+	  %s
+	  %s
+	ORDER BY score DESC, id
+	LIMIT $%d`, scoreExpr, workspaceIdx, candidateWhere, filterWhere, pathFilter, topKIdx)
 
-	rows, err := s.pool.Query(ctx, query, args...)
+	tx, txErr := store.BeginWorkspaceTx(ctx, s.pool, workspaceID)
+	if txErr != nil {
+		writeErr(w, 500, "db: "+txErr.Error())
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	rows, err := tx.Query(ctx, query, args...)
 	if err != nil {
 		// If chunks table is missing for any reason, return empty cleanly.
 		if strings.Contains(err.Error(), "fornix.chunks") {
-			writeJSON(w, 200, ragResp{Chunks: []ragChunk{}, RankingExplanation: weights.explain()})
+			writeJSON(w, 200, ragResp{Chunks: []ragChunk{}, RankingExplanation: weights.explain(), EmbeddingMode: req.EmbeddingMode, GateReason: gateReason, ReferenceTime: referenceTime})
 			return
 		}
 		writeErr(w, 500, "db: "+err.Error())
 		return
 	}
-	defer rows.Close()
 
 	chunks := []ragChunk{}
 	totalChars := 0
@@ -252,11 +317,23 @@ LIMIT $%d`, scoreExpr, workspaceIdx, candidateWhere, pathFilter, topKIdx)
 		chunks = append(chunks, c)
 		totalChars += len(content)
 	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
+	if err := tx.Commit(ctx); err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
 
 	writeJSON(w, 200, ragResp{
 		Chunks:              chunks,
 		TotalTokensEstimate: totalChars / 4,
 		RankingExplanation:  weights.explain(),
+		EmbeddingMode:       req.EmbeddingMode,
+		GateReason:          gateReason,
+		ReferenceTime:       referenceTime,
 	})
 }
 
@@ -300,8 +377,9 @@ func (s *server) handleChunkUpsert(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	workspaceID := requestWorkspace(r, req.WorkspaceID)
 
+	embeddingRequest := s.embeddingRequest(workspaceID, requestActor(r), "rag_chunk", hash, req.Content)
 	var emb []float32
-	if e, err := s.embed(ctx, req.Content); err == nil {
+	if e, err := s.embed(ctx, embeddingRequest); err == nil {
 		emb = e
 	} else {
 		log.Printf("rag chunk embed warn: %v", err)
@@ -317,8 +395,14 @@ func (s *server) handleChunkUpsert(w http.ResponseWriter, r *http.Request) {
 	var id int64
 	var inserted bool
 	var err error
+	tx, txErr := store.BeginWorkspaceTx(ctx, s.pool, workspaceID)
+	if txErr != nil {
+		writeErr(w, 500, "db: "+txErr.Error())
+		return
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
 	if emb != nil {
-		err = s.pool.QueryRow(ctx, `
+		err = tx.QueryRow(ctx, `
 			INSERT INTO fornix.chunks (workspace_id, source_path, source_range, content, content_sha256, metadata, embedding)
 			VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
 			ON CONFLICT (workspace_id, content_sha256) DO UPDATE SET content_sha256 = EXCLUDED.content_sha256
@@ -326,7 +410,7 @@ func (s *server) handleChunkUpsert(w http.ResponseWriter, r *http.Request) {
 			workspaceID, req.SourcePath, req.SourceRange, req.Content, hash, string(mdJSON), pgvector.NewVector(emb),
 		).Scan(&id, &inserted)
 	} else {
-		err = s.pool.QueryRow(ctx, `
+		err = tx.QueryRow(ctx, `
 			INSERT INTO fornix.chunks (workspace_id, source_path, source_range, content, content_sha256, metadata)
 			VALUES ($1, $2, $3, $4, $5, $6::jsonb)
 			ON CONFLICT (workspace_id, content_sha256) DO UPDATE SET content_sha256 = EXCLUDED.content_sha256
@@ -335,6 +419,25 @@ func (s *server) handleChunkUpsert(w http.ResponseWriter, r *http.Request) {
 		).Scan(&id, &inserted)
 	}
 	if err != nil {
+		writeErr(w, 500, "db: "+err.Error())
+		return
+	}
+	if emb != nil && s.embeddingCalls != nil {
+		vectorHash, hashErr := contracts.EmbeddingVectorHash(emb)
+		if hashErr != nil {
+			writeErr(w, 500, "embedding integrity: "+hashErr.Error())
+			return
+		}
+		if err := s.embeddingCalls.AttachTx(ctx, tx, contracts.EmbeddingTargetAttachment{
+			WorkspaceID: workspaceID, RequestID: embeddingRequest.RequestID,
+			TargetKind: "chunk", TargetID: strconv.FormatInt(id, 10),
+			SourceHash: embeddingRequest.SourceHash, VectorHash: vectorHash,
+		}); err != nil {
+			writeErr(w, 500, "embedding attachment: "+err.Error())
+			return
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
 		writeErr(w, 500, "db: "+err.Error())
 		return
 	}

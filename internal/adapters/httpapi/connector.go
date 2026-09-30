@@ -11,7 +11,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	pathpkg "path"
@@ -310,6 +309,77 @@ func (c *capability) Plan(request contracts.OperationRequest) (contracts.Operati
 }
 
 func (c *capability) Execute(ctx context.Context, request contracts.OperationRequest, plan contracts.OperationPlan) (contracts.OperationResult, error) {
+	return c.execute(ctx, request, plan, nil)
+}
+
+// DescribeEffect returns the exact redacted effect identity that will be
+// emitted by submit_idempotent. It is used by the shared durable dispatcher
+// before any HTTP request is sent.
+func (c *capability) DescribeEffect(request contracts.OperationRequest) (contracts.ExternalEffect, error) {
+	if c == nil || c.parent == nil {
+		return contracts.ExternalEffect{}, fmt.Errorf("http capability is not configured")
+	}
+	if err := c.Validate(request); err != nil {
+		return contracts.ExternalEffect{}, err
+	}
+	if c.name != SubmitCapabilityName {
+		return contracts.ExternalEffect{}, fmt.Errorf("capability %q does not produce an external effect", c.name)
+	}
+	effect := contracts.ExternalEffect{
+		ID: effectID(request.ID), WorkspaceID: request.WorkspaceID,
+		Boundary: "http:" + c.parent.binding.ID, Class: c.definition.Effect,
+		DeliveryGuarantee:    contracts.ExternalDeliveryAtLeastOnce,
+		IdempotencyKey:       request.IdempotencyKey,
+		ProviderIdempotency:  c.parent.binding.ProviderSupportsIdempotency,
+		VerificationRequired: c.parent.binding.VerificationRequired,
+		VerificationStatus:   contracts.ExternalVerificationNotRequired,
+		CompensationStatus:   contracts.ExternalCompensationUnavailable,
+	}
+	if c.parent.binding.VerificationRequired {
+		effect.VerificationStatus = contracts.ExternalVerificationPending
+	}
+	if err := effect.Normalize(); err != nil {
+		return contracts.ExternalEffect{}, err
+	}
+	return effect, nil
+}
+
+// DescribeBoundary returns the same normalized policy identity used by the
+// controlled HTTP client. It is intentionally separate from DescribeEffect
+// so callers cannot mistake a provider effect identity for a network-boundary
+// proof.
+func (c *capability) DescribeBoundary(request contracts.OperationRequest) (contracts.ExternalBoundaryAuthority, error) {
+	if c == nil || c.parent == nil {
+		return contracts.ExternalBoundaryAuthority{}, fmt.Errorf("http capability is not configured")
+	}
+	if err := c.Validate(request); err != nil {
+		return contracts.ExternalBoundaryAuthority{}, err
+	}
+	if c.name != SubmitCapabilityName {
+		return contracts.ExternalBoundaryAuthority{}, fmt.Errorf("capability %q does not produce an external boundary", c.name)
+	}
+	return connector.BoundaryAuthority(connector.EgressPolicy{
+		Destination:      c.parent.destinationPolicy,
+		MaxRequestBytes:  c.parent.binding.MaxRequestBytes,
+		MaxResponseBytes: c.parent.binding.MaxResponseBytes,
+		Timeout:          time.Duration(c.parent.binding.TimeoutMS) * time.Millisecond,
+	})
+}
+
+// ExecuteWithAuthority is the strict effectful adapter boundary. It resolves
+// the exact durable credential lease selected during admission instead of
+// silently acquiring a replacement fence.
+func (c *capability) ExecuteWithAuthority(ctx context.Context, request contracts.OperationRequest, plan contracts.OperationPlan, authority contracts.EffectAuthority) (contracts.OperationResult, error) {
+	if err := authority.Normalize(); err != nil {
+		return contracts.OperationResult{}, &connector.FailureError{Code: "stale_authority", Retryable: false, Err: err}
+	}
+	if authority.WorkspaceID != request.WorkspaceID || authority.OperationID != request.ID {
+		return contracts.OperationResult{}, &connector.FailureError{Code: "stale_authority", Retryable: false}
+	}
+	return c.execute(ctx, request, plan, &authority)
+}
+
+func (c *capability) execute(ctx context.Context, request contracts.OperationRequest, plan contracts.OperationPlan, authority *contracts.EffectAuthority) (contracts.OperationResult, error) {
 	if err := c.Validate(request); err != nil {
 		return contracts.OperationResult{}, err
 	}
@@ -356,44 +426,77 @@ func (c *capability) Execute(ctx context.Context, request contracts.OperationReq
 	for key, value := range payload.Headers {
 		req.Header.Set(key, value)
 	}
+	var validateCredential func(context.Context) error
 	if len(body) > 0 && req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
 	}
 	if c.parent.binding.CredentialRef != "" {
+		if authority != nil && c.parent.credentialLease == nil {
+			return contracts.OperationResult{}, &connector.FailureError{Code: "authority_unsupported", Retryable: false}
+		}
 		var secret credentials.Secret
-		var release func()
+		leasedCredential := false
 		if c.parent.credentialLease != nil {
 			purpose := "http:" + c.parent.binding.ID
-			lease, resolveErr := c.parent.credentialLease.Acquire(runCtx, request.WorkspaceID, c.parent.binding.CredentialRef, purpose, credentials.DefaultLeaseTTL)
-			if resolveErr != nil {
-				return contracts.OperationResult{}, &connector.FailureError{Code: "credential_unavailable", Retryable: false, Err: resolveErr}
+			var lease credentials.Lease
+			var resolveErr error
+			if authority != nil {
+				if authority.CredentialLeaseID == "" {
+					return contracts.OperationResult{}, &connector.FailureError{Code: "stale_authority", Retryable: false}
+				}
+				resolver, ok := c.parent.credentialLease.(credentials.ExistingLeaseResolver)
+				if !ok {
+					return contracts.OperationResult{}, &connector.FailureError{Code: "authority_unsupported", Retryable: false}
+				}
+				lease, resolveErr = resolver.ResolveExisting(runCtx, credentials.ExistingLeaseRequest{WorkspaceID: request.WorkspaceID, LeaseID: authority.CredentialLeaseID, Reference: c.parent.binding.CredentialRef, Purpose: purpose, Fence: authority.CredentialLeaseFence, RevocationEpoch: authority.CredentialRevocationEpoch, SourceVersion: authority.CredentialSourceVersion, SourceExpiresAt: authority.CredentialSourceExpiresAt})
+			} else {
+				lease, resolveErr = c.parent.credentialLease.Acquire(runCtx, request.WorkspaceID, c.parent.binding.CredentialRef, purpose, credentials.DefaultLeaseTTL)
 			}
+			if resolveErr != nil {
+				lease.Secret.Clear()
+				return contracts.OperationResult{}, &connector.FailureError{Code: "credential_unavailable", Retryable: false}
+			}
+			release := func() {
+				_ = credentials.ReleaseLeaseBounded(c.parent.credentialLease, lease)
+			}
+			defer release()
 			if validateErr := lease.Validate(request.WorkspaceID, c.parent.binding.CredentialRef, purpose, time.Now().UTC()); validateErr != nil {
-				return contracts.OperationResult{}, &connector.FailureError{Code: "credential_unavailable", Retryable: false, Err: validateErr}
+				return contracts.OperationResult{}, &connector.FailureError{Code: "credential_unavailable", Retryable: false}
+			}
+			if validateErr := c.parent.credentialLease.ValidateLease(runCtx, lease); validateErr != nil {
+				return contracts.OperationResult{}, &connector.FailureError{Code: "credential_unavailable", Retryable: false}
 			}
 			secret = lease.Secret
-			release = func() { _ = c.parent.credentialLease.Release(context.Background(), lease) }
+			leasedCredential = true
+			validateCredential = func(validateCtx context.Context) error {
+				return c.parent.credentialLease.ValidateLease(validateCtx, lease)
+			}
 		} else {
 			resolved, resolveErr := c.parent.credentialResolver(runCtx, request.WorkspaceID, c.parent.binding.CredentialRef)
 			if resolveErr != nil {
-				return contracts.OperationResult{}, &connector.FailureError{Code: "credential_unavailable", Retryable: false, Err: resolveErr}
+				resolved.Clear()
+				return contracts.OperationResult{}, &connector.FailureError{Code: "credential_unavailable", Retryable: false}
 			}
 			secret = resolved
 		}
 		secretBytes := secret.Bytes()
 		req.Header.Set("Authorization", "Bearer "+string(secretBytes))
-		secret.Clear()
+		if !leasedCredential {
+			secret.Clear()
+		}
 		for index := range secretBytes {
 			secretBytes[index] = 0
-		}
-		if release != nil {
-			defer release()
 		}
 	}
 	if c.name == SubmitCapabilityName {
 		req.Header.Set("Idempotency-Key", request.IdempotencyKey)
 	}
-	response, err := c.parent.client.Do(req)
+	if validateCredential != nil {
+		if validateErr := validateCredential(runCtx); validateErr != nil {
+			return contracts.OperationResult{}, &connector.FailureError{Code: "credential_unavailable", Retryable: false}
+		}
+	}
+	response, err := credentials.DoCredentialRequest(c.parent.client, req)
 	if err != nil {
 		code := "transport"
 		if errors.Is(runCtx.Err(), context.DeadlineExceeded) {
@@ -433,11 +536,19 @@ func (c *capability) Execute(ctx context.Context, request contracts.OperationReq
 	evidence := contracts.OperationEvidenceRef{WorkspaceID: request.WorkspaceID, SourceReference: "http:" + c.parent.binding.ID + ":" + request.InputHash[:16], EvidenceHash: evidenceHash, Role: "http_response"}
 	result := contracts.OperationResult{ID: request.ID + "-result", OperationID: request.ID, OperationHash: request.StableHash(), RequestID: request.RequestID, WorkspaceID: request.WorkspaceID, Actor: request.Actor, Status: contracts.OperationStatusSucceeded, OutputSchemaVersion: c.definition.OutputSchemaVersion, OutputSchemaHash: c.definition.OutputSchemaHash, OutputHash: outputHash, Evidence: []contracts.OperationEvidenceRef{evidence}, Steps: []contracts.OperationStepResult{{StepID: plan.Steps[0].ID, Status: contracts.OperationStatusSucceeded, OutputSchemaVersion: c.definition.OutputSchemaVersion, OutputSchemaHash: c.definition.OutputSchemaHash, OutputHash: outputHash, Evidence: []contracts.OperationEvidenceRef{evidence}}}}
 	if c.name == SubmitCapabilityName {
+		effectIdentifier := effectID(request.ID)
+		if authority != nil && authority.EffectID != "" {
+			// The durable dispatcher reserves the authoritative effect identity
+			// before the provider call. Preserve that identity in the adapter
+			// result so result, evidence, and recovery records join the same
+			// effect without relying only on a hash-equivalence shortcut.
+			effectIdentifier = authority.EffectID
+		}
 		providerRequestID := boundedHeader(response.Header.Get("X-Request-ID"))
 		if providerRequestID == "" {
 			providerRequestID = boundedHeader(response.Header.Get("Request-ID"))
 		}
-		effect := contracts.ExternalEffect{ID: effectID(request.ID), WorkspaceID: request.WorkspaceID, Boundary: "http:" + c.parent.binding.ID, Class: c.definition.Effect, DeliveryGuarantee: contracts.ExternalDeliveryAtLeastOnce, IdempotencyKey: request.IdempotencyKey, ProviderRequestID: providerRequestID, ProviderIdempotency: c.parent.binding.ProviderSupportsIdempotency, VerificationRequired: c.parent.binding.VerificationRequired, VerificationStatus: contracts.ExternalVerificationNotRequired, CompensationStatus: contracts.ExternalCompensationUnavailable}
+		effect := contracts.ExternalEffect{ID: effectIdentifier, WorkspaceID: request.WorkspaceID, Boundary: "http:" + c.parent.binding.ID, Class: c.definition.Effect, DeliveryGuarantee: contracts.ExternalDeliveryAtLeastOnce, IdempotencyKey: request.IdempotencyKey, ProviderRequestID: providerRequestID, ProviderIdempotency: c.parent.binding.ProviderSupportsIdempotency, VerificationRequired: c.parent.binding.VerificationRequired, VerificationStatus: contracts.ExternalVerificationNotRequired, CompensationStatus: contracts.ExternalCompensationUnavailable}
 		if c.parent.binding.VerificationRequired {
 			effect.VerificationStatus = contracts.ExternalVerificationPending
 		}
@@ -548,37 +659,15 @@ func (c *Connector) urlFor(payload Payload, paginate bool) (string, error) {
 }
 
 func configuredClient(binding Binding, destinationPolicy connector.DestinationPolicy, supplied *http.Client) (*http.Client, error) {
-	client := &http.Client{}
-	if supplied != nil {
-		*client = *supplied
+	policy := connector.EgressPolicy{
+		Destination:      destinationPolicy,
+		MaxRequestBytes:  binding.MaxRequestBytes,
+		MaxResponseBytes: binding.MaxResponseBytes,
+		Timeout:          time.Duration(binding.TimeoutMS) * time.Millisecond,
 	}
-	if client.Timeout == 0 || client.Timeout > time.Duration(binding.TimeoutMS)*time.Millisecond {
-		client.Timeout = time.Duration(binding.TimeoutMS) * time.Millisecond
-	}
-	client.CheckRedirect = func(request *http.Request, via []*http.Request) error {
-		if !binding.AllowRedirects {
-			return http.ErrUseLastResponse
-		}
-		if len(via) >= destinationPolicy.MaxRedirects || request.URL == nil || request.URL.User != nil || destinationPolicy.AuthorizeURL(request.URL) != nil || !hostAllowed(request.URL, binding.AllowedHosts) || !pathAllowed(request.URL.Path, binding.AllowedPathPrefixes) {
-			return ErrUnsafeURL
-		}
-		return nil
-	}
-	transport, ok := client.Transport.(*http.Transport)
-	if client.Transport == nil {
-		transport = http.DefaultTransport.(*http.Transport).Clone()
-		ok = true
-	}
-	if !ok && !binding.AllowPrivateNetworks {
-		return nil, fmt.Errorf("custom HTTP transports require explicit private-network policy")
-	}
-	if ok {
-		transport = transport.Clone()
-		transport.Proxy = nil
-		if !binding.AllowPrivateNetworks {
-			transport.DialContext = safeDialContext(false)
-		}
-		client.Transport = transport
+	client, err := connector.NewEgressClient(policy, supplied, connector.EgressOptions{})
+	if err != nil {
+		return nil, err
 	}
 	return client, nil
 }
@@ -610,36 +699,6 @@ func destinationPolicyForBinding(binding Binding) (connector.DestinationPolicy, 
 		return connector.DestinationPolicy{}, fmt.Errorf("http binding destination policy: %w", err)
 	}
 	return policy, nil
-}
-
-func safeDialContext(allowPrivate bool) func(context.Context, string, string) (net.Conn, error) {
-	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
-	return func(ctx context.Context, network, address string) (net.Conn, error) {
-		host, port, err := net.SplitHostPort(address)
-		if err != nil {
-			return nil, err
-		}
-		ips, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
-		if err != nil {
-			return nil, err
-		}
-		for _, ip := range ips {
-			if !allowPrivate && privateIP(ip) {
-				return nil, ErrUnsafeURL
-			}
-		}
-		for _, ip := range ips {
-			conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(ip.String(), port))
-			if dialErr == nil {
-				return conn, nil
-			}
-		}
-		return nil, fmt.Errorf("http connection failed")
-	}
-}
-
-func privateIP(ip net.IP) bool {
-	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() || ip.IsUnspecified() || ip.IsMulticast()
 }
 
 func validateRelativePath(value string) error {

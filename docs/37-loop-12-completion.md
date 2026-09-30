@@ -99,8 +99,9 @@ was not copied. Fornix remains MIT-licensed.
 ## Remaining limitations
 
 There is no public identity-administration API/CLI, OAuth/SSO, external KMS or
-secret-manager resolver, Postgres RLS policy, automated rotation controller,
-tenant provisioning workflow, or audit retention/partition policy. The
-OpenAI/Ollama credential path still resolves process-level references until a
-workspace-aware secret provider is added. These are explicit next-stage gaps,
-not implicit security fallbacks.
+secret-manager resolver, automated rotation controller, tenant provisioning
+workflow, or audit retention/partition policy. Later migrations add
+Postgres RLS and durable credential lease/revocation authority; the local
+profile/environment resolver remains development-only until a workspace-aware
+managed secret provider is deployed. These are explicit next-stage gaps, not
+implicit security fallbacks.

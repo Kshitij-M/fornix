@@ -2,6 +2,12 @@
 
 Status: alpha implementation note for Issue [#43](https://github.com/Kshitij-M/fornix/issues/43). The bounded HTTP/API and read-only SQL reference adapters, migration 037, binding store, shared conformance tests, and CI/smoke coverage are implemented on the universal transformation branch. Production qualification and broader adapter integration remain open.
 
+The current SQL connector contract is `sqlreadonly@2`. The original v1
+statement-shape checks were replaced by the structured-query boundary recorded
+in [the SQL query-contract feature note](267-sql-read-only-query-contract-foundation.md)
+and [Loop 120 completion](268-loop-120-completion.md). The historical Loop 26
+record describes the original v1 implementation, not the current wire format.
+
 ## Purpose
 
 Repositories are the first Fornix adapter, not the product boundary. This
@@ -30,11 +36,15 @@ general SQL consoles, credential stores, or a new orchestration service.
    observation capabilities. `http.submit_idempotent` is an explicit external
    effect, requires an idempotency key, admission/approval as selected by the
    policy, and verification when the binding requires it.
-4. **SQL fails closed.** Statements are one bounded statement, parameterized
-   through the typed input envelope, executed in a read-only transaction with a
-   statement timeout. Comments, multiple statements, transaction control,
-   mutation keywords, COPY, and unapproved schema/table references are
-   rejected before the database is contacted.
+4. **SQL has no caller-authored syntax.** The v2 input is a structured
+   schema/table/column/filter/order/limit specification. The connector compiles
+   it into one parameterized query; callers cannot supply functions, casts,
+   joins, CTEs, expressions, comments, or statement fragments. PostgreSQL
+  independently enforces the exact table binding, persistent ordinary-table
+  kind, built-in scalar column types, repeatable-read/read-only transaction,
+  pinned `search_path`, request deadline, statement timeout, and result budgets. Generated reads use
+  PostgreSQL `ONLY`, preventing an allowlisted inheritance parent from
+  implicitly returning child-table rows.
 5. **Credentials are references.** A capability declares credential reference
    identities. The resolver is the only code allowed to obtain a short-lived
    secret; the value is injected into the outbound request or database
@@ -102,9 +112,9 @@ The SQL connector exposes:
 
 | Capability | Effect | Input | Safety boundary |
 | --- | --- | --- | --- |
-| `sql.describe` | observation | allowlisted schema/table identity | catalog-only, bounded columns/indexes |
-| `sql.query_readonly` | read-only | one typed statement plus bounded named parameters | read-only transaction, prepared statement, row/byte/time budgets |
-| `sql.explain_readonly` | observation | one read-only statement | `EXPLAIN` only, no `ANALYZE` by default, bounded plan output |
+| `sql.describe` | observation | v2 allowlisted schema/table identity | catalog-only, bounded columns |
+| `sql.query_readonly` | read-only | v2 explicit columns, fixed filter operators, ordering, and limit | internally compiled query, parameterized values, exact table/column checks, read-only transaction, row/byte/time budgets |
+| `sql.explain_readonly` | observation | the same v2 structured query | `EXPLAIN` over connector-generated SQL only; never `ANALYZE`; bounded plan output |
 
 The binding supplies a workspace-specific database target, credential
 reference, allowed schemas/tables, maximum rows/bytes, deterministic result
@@ -112,7 +122,14 @@ cost units, and statement timeout.
 The connector uses `pgx` with a separate pool or transaction configuration;
 Fornix Postgres remains the control-plane authority and is never queried
 through this adapter. The model cannot choose a DSN, database, schema, table,
-or transaction mode.
+or transaction mode. Generated reads use `ONLY` to avoid implicitly querying
+unlisted inheritance children. The request cannot choose SQL syntax: identifiers
+are validated and quoted, values are parameters, and only fixed operators and
+ordering directions are accepted. PostgreSQL rejects views, foreign tables,
+temporary tables, and non-built-in/non-scalar query columns. Each request uses
+a repeatable-read, read-only snapshot plus a client deadline and server
+statement timeout. External database roles still require least-privilege
+grants and appropriate RLS policies.
 
 ## Binding and persistence plan
 
@@ -170,10 +187,15 @@ code by itself.
   duplicate idempotency key creates one recorded effect;
 - HTTP credentials are resolved by reference and absent from logs, errors,
   evidence, hashes, and results;
-- SQL rejects injection, comments/multi-statement input, writes, transaction
-  control, unapproved schema/table references, and oversized limits;
-- SQL runs in a read-only transaction with prepared statements, timeout, row,
-  byte, and cost bounds; a mutation attempt leaves the fixture unchanged;
+- SQL rejects v1 and arbitrary SQL-text fields, malformed identifiers,
+  unsupported operators, unallowlisted relations, and oversized query terms
+  before database access;
+- SQL values remain bound parameters even when they contain SQL-looking text;
+  generated query text is deterministic and identical structured inputs have
+  stable query/evidence hashes;
+- PostgreSQL rejects views and other non-persistent/non-ordinary relations,
+  validates all referenced columns, and executes generated reads in a
+  read-only transaction with timeout, row, byte, and cost bounds;
 - both connectors reject cross-workspace targets/bindings/evidence;
 - cancellation and timeout stop work without corrupting Postgres authority;
 - crash before acknowledgement leaves no committed connector effect; crash

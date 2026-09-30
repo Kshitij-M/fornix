@@ -62,6 +62,37 @@ func TestConnectorIsDeterministicAndApprovalGated(t *testing.T) {
 	}
 }
 
+func TestEffectfulExecutionUsesReservedAuthorityEffectID(t *testing.T) {
+	adapter, err := NewConnector("workspace-authority-effect")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var capability connector.Capability
+	for _, candidate := range adapter.Capabilities() {
+		if candidate.Definition().Ref.Name == "incident.remediate" {
+			capability = candidate
+			break
+		}
+	}
+	if capability == nil {
+		t.Fatal("remediation capability not found")
+	}
+	request := testRequest(capability.Definition(), ResourceKind)
+	plan, err := capability.Plan(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := capability.(connector.AuthorityAwareCapability).ExecuteWithAuthority(context.Background(), request, plan, contracts.EffectAuthority{
+		WorkspaceID: request.WorkspaceID, OperationID: request.ID, OperationOwnerID: "worker-1", OperationFence: 1, EffectID: "reserved-effect-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(result.ExternalEffects) != 1 || result.ExternalEffects[0].ID != "reserved-effect-1" || result.Steps[0].ExternalEffect.ID != "reserved-effect-1" {
+		t.Fatalf("effect identity was not reserved by authority: %+v", result.ExternalEffects)
+	}
+}
+
 func testRequest(definition contracts.CapabilityDefinition, kind string) contracts.OperationRequest {
 	return contracts.OperationRequest{
 		ID: "incident-operation", RequestID: "incident-request", IdempotencyKey: "incident-idempotency",

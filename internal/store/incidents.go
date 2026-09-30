@@ -79,7 +79,7 @@ func (s *IncidentStore) Ingest(ctx context.Context, event contracts.IncidentEven
 	if eventHash == "" {
 		return IncidentIngestResult{}, fmt.Errorf("incident event hash is invalid")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, event.WorkspaceID)
 	if err != nil {
 		return IncidentIngestResult{}, fmt.Errorf("begin incident ingest: %w", err)
 	}
@@ -196,11 +196,23 @@ func (s *IncidentStore) Get(ctx context.Context, workspaceID, incidentID string)
 	if s == nil || s.pool == nil {
 		return contracts.Incident{}, fmt.Errorf("incident store is not configured")
 	}
-	value, err := readIncidentTx(ctx, s.pool, strings.TrimSpace(workspaceID), strings.TrimSpace(incidentID))
+	workspaceID, incidentID = strings.TrimSpace(workspaceID), strings.TrimSpace(incidentID)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
+	if err != nil {
+		return contracts.Incident{}, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	value, err := readIncidentTx(ctx, tx, workspaceID, incidentID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return contracts.Incident{}, ErrIncidentNotFound
 	}
-	return value, err
+	if err != nil {
+		return contracts.Incident{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return contracts.Incident{}, err
+	}
+	return value, nil
 }
 
 // LinkWorkflow updates only the current adapter projection. Workflow and
@@ -212,7 +224,7 @@ func (s *IncidentStore) LinkWorkflow(ctx context.Context, workspaceID, incidentI
 	if strings.TrimSpace(workflowID) == "" || strings.TrimSpace(incidentID) == "" {
 		return fmt.Errorf("incident and workflow ids are required")
 	}
-	result, err := s.pool.Exec(ctx, `UPDATE fornix.incident_records SET workflow_id=$3,status=$4,updated_at=clock_timestamp() WHERE workspace_id=$1 AND id=$2`, workspaceID, incidentID, workflowID, status)
+	result, err := workspaceExec(ctx, s.pool, workspaceID, `UPDATE fornix.incident_records SET workflow_id=$3,status=$4,updated_at=clock_timestamp() WHERE workspace_id=$1 AND id=$2`, workspaceID, incidentID, workflowID, status)
 	if err != nil {
 		return fmt.Errorf("link incident workflow: %w", err)
 	}
@@ -225,7 +237,7 @@ func (s *IncidentStore) LinkWorkflow(ctx context.Context, workspaceID, incidentI
 // LinkReceipt adds the derived receipt identity without changing the event
 // or workflow histories.
 func (s *IncidentStore) LinkReceipt(ctx context.Context, workspaceID, incidentID, receiptID, status string) error {
-	result, err := s.pool.Exec(ctx, `UPDATE fornix.incident_records SET receipt_id=$3,status=$4,updated_at=clock_timestamp() WHERE workspace_id=$1 AND id=$2`, workspaceID, incidentID, receiptID, status)
+	result, err := workspaceExec(ctx, s.pool, workspaceID, `UPDATE fornix.incident_records SET receipt_id=$3,status=$4,updated_at=clock_timestamp() WHERE workspace_id=$1 AND id=$2`, workspaceID, incidentID, receiptID, status)
 	if err != nil {
 		return err
 	}
@@ -250,7 +262,7 @@ func (s *IncidentStore) RecordApproval(ctx context.Context, approval contracts.I
 	if evidenceID <= 0 || !isEvidenceHash(evidenceHash) {
 		return IncidentApprovalRecord{}, fmt.Errorf("approval evidence reference is invalid")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, approval.WorkspaceID)
 	if err != nil {
 		return IncidentApprovalRecord{}, fmt.Errorf("begin incident approval: %w", err)
 	}
@@ -314,7 +326,13 @@ func (s *IncidentStore) FindApproval(ctx context.Context, workspaceID, runID, id
 	}
 	var approval contracts.IncidentApproval
 	var actorRaw []byte
-	err := s.pool.QueryRow(ctx, `
+	workspaceID, runID, idempotencyKey = strings.TrimSpace(workspaceID), strings.TrimSpace(runID), strings.TrimSpace(idempotencyKey)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
+	if err != nil {
+		return contracts.IncidentApproval{}, false, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	err = tx.QueryRow(ctx, `
 		SELECT step_id,operation_hash,plan_hash,decision,decision_hash,actor,decided_at
 		FROM fornix.incident_approvals
 		WHERE workspace_id=$1 AND run_id=$2 AND idempotency_key=$3`,
@@ -331,6 +349,9 @@ func (s *IncidentStore) FindApproval(ctx context.Context, workspaceID, runID, id
 	}
 	approval.SchemaVersion = contracts.IncidentSchemaVersion
 	approval.WorkspaceID, approval.RunID, approval.IdempotencyKey = workspaceID, runID, idempotencyKey
+	if err := tx.Commit(ctx); err != nil {
+		return contracts.IncidentApproval{}, false, err
+	}
 	return approval, true, nil
 }
 

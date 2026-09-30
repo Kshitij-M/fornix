@@ -57,6 +57,48 @@ func createAdmittedOperation(t *testing.T, operationStore *OperationStore, works
 	return result
 }
 
+func createAdmittedOperationAsActor(t *testing.T, operationStore *OperationStore, workspace, key, actorID string, definition contracts.CapabilityDefinition) OperationCreateResult {
+	t.Helper()
+	request := operationTestRequest(t, workspace, key)
+	request.Actor.ID = actorID
+	request.Capability = definition.Ref
+	if err := request.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	plan := operationTestPlan(t, request)
+	result, err := operationStore.Create(context.Background(), OperationCreateInput{Request: request, Plan: &plan})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func rateAdmissionPolicy(t *testing.T, workspace string, definition contracts.CapabilityDefinition, actors ...string) contracts.AdmissionPolicy {
+	t.Helper()
+	policy := admissionPolicy(t, workspace, definition)
+	policy.AllowedActorIDs = actors
+	policy.MaxOperationsPerWindow = 0
+	policy.MaxCostPerWindowMicros = 0
+	policy.PolicyHash = ""
+	if err := policy.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	return policy
+}
+
+func rateLimitedDefinition(t *testing.T, workspace, capabilityName, version string, limit int) contracts.CapabilityDefinition {
+	t.Helper()
+	definition := admissionDefinition(t, workspace, contracts.EffectClassReadOnly, false)
+	definition.Ref.Name = capabilityName
+	definition.Ref.Version = version
+	definition.Ref.DefinitionHash = ""
+	definition.RateLimitPerMinute = limit
+	if err := definition.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	return definition
+}
+
 func admissionInputForOperation(t *testing.T, operation Operation, definition contracts.CapabilityDefinition, policy contracts.AdmissionPolicy, key string) contracts.AdmissionInput {
 	t.Helper()
 	return contracts.AdmissionInput{
@@ -180,10 +222,16 @@ func TestAdmissionStoreSerializesConcurrentQuotaReservations(t *testing.T) {
 		t.Fatal(err)
 	}
 	firstOperation := createAdmittedOperation(t, operationStore, workspace, "concurrent-operation-a", definition)
-	secondOperation := createAdmittedOperation(t, operationStore, workspace, "concurrent-operation-b", definition)
+	otherCapability := definition
+	otherCapability.Ref.Name = "write"
+	otherCapability.Ref.DefinitionHash = ""
+	if err := otherCapability.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	secondOperation := createAdmittedOperation(t, operationStore, workspace, "concurrent-operation-b", otherCapability)
 	inputs := []contracts.AdmissionInput{
 		admissionInputForOperation(t, firstOperation.Operation, definition, policy, "concurrent-admission-a"),
-		admissionInputForOperation(t, secondOperation.Operation, definition, policy, "concurrent-admission-b"),
+		admissionInputForOperation(t, secondOperation.Operation, otherCapability, policy, "concurrent-admission-b"),
 	}
 	results := make([]AdmissionResult, len(inputs))
 	errorsByIndex := make([]error, len(inputs))
@@ -218,6 +266,185 @@ func TestAdmissionStoreSerializesConcurrentQuotaReservations(t *testing.T) {
 	}
 }
 
+func TestAdmissionStoreCapabilityRateLimitIsDurableScopedAndDuplicateSafe(t *testing.T) {
+	operationStore, pool, workspace := newOperationTestStore(t)
+	admissionStore := NewAdmissionStore(pool, NewEventStore(pool))
+	definition := rateLimitedDefinition(t, workspace, "read", "1", 1)
+	policy := rateAdmissionPolicy(t, workspace, definition, "actor-a", "actor-b", "actor-c", "actor-d")
+
+	firstOperation := createAdmittedOperationAsActor(t, operationStore, workspace, "rate-first-operation", "actor-a", definition)
+	firstInput := admissionInputForOperation(t, firstOperation.Operation, definition, policy, "rate-first-admission")
+	first, err := admissionStore.Admit(context.Background(), firstInput)
+	if err != nil || first.Decision.ReasonCode != contracts.AdmissionReasonApproved {
+		t.Fatalf("first capability admission=%+v err=%v", first.Decision, err)
+	}
+	duplicateInput := firstInput
+	duplicateInput.RequestID = "rate-duplicate-request"
+	duplicateInput.CapabilityOperationsInWindow = 1000
+	duplicate, err := admissionStore.Admit(context.Background(), duplicateInput)
+	if err != nil || !duplicate.Duplicate || duplicate.Decision.ID != first.Decision.ID {
+		t.Fatalf("same-key retry consumed another slot: result=%+v err=%v", duplicate, err)
+	}
+
+	secondOperation := createAdmittedOperationAsActor(t, operationStore, workspace, "rate-second-operation", "actor-b", definition)
+	secondInput := admissionInputForOperation(t, secondOperation.Operation, definition, policy, "rate-second-admission")
+	second, err := admissionStore.Admit(context.Background(), secondInput)
+	if err != nil || second.Decision.ReasonCode != contracts.AdmissionReasonRateLimited {
+		t.Fatalf("aggregate capability rate decision=%+v err=%v", second.Decision, err)
+	}
+	wantRetryAt := first.Decision.CreatedAt.Add(60*time.Second + time.Microsecond)
+	if second.Decision.RetryAt == nil || !second.Decision.RetryAt.Equal(wantRetryAt) {
+		t.Fatalf("rate denial retry_at=%v, want oldest active decision expiry %s", second.Decision.RetryAt, wantRetryAt)
+	}
+	secondInput.RequestID = "rate-duplicate-denied-request"
+	duplicateDenial, err := admissionStore.Admit(context.Background(), secondInput)
+	if err != nil || !duplicateDenial.Duplicate || duplicateDenial.Decision.ID != second.Decision.ID || duplicateDenial.Decision.RetryAt == nil || !duplicateDenial.Decision.RetryAt.Equal(*second.Decision.RetryAt) {
+		t.Fatalf("duplicate denial did not preserve original retry deadline: result=%+v err=%v", duplicateDenial, err)
+	}
+	replayed, err := admissionStore.GetDecisionByIdempotencyKey(context.Background(), workspace, secondInput.IdempotencyKey)
+	if err != nil || replayed.ID != second.Decision.ID || replayed.RetryAt == nil || !replayed.RetryAt.Equal(*second.Decision.RetryAt) {
+		t.Fatalf("decision lookup lost durable retry time: decision=%+v err=%v", replayed, err)
+	}
+
+	// A higher limit in a later capability version sees the one accepted
+	// decision, but not the denied attempt. Version changes do not reset usage.
+	versionTwo := rateLimitedDefinition(t, workspace, "read", "2", 2)
+	versionTwoPolicy := rateAdmissionPolicy(t, workspace, versionTwo, "actor-a", "actor-b", "actor-c", "actor-d")
+	thirdOperation := createAdmittedOperationAsActor(t, operationStore, workspace, "rate-third-operation", "actor-c", versionTwo)
+	thirdInput := admissionInputForOperation(t, thirdOperation.Operation, versionTwo, versionTwoPolicy, "rate-third-admission")
+	third, err := admissionStore.Admit(context.Background(), thirdInput)
+	if err != nil || third.Decision.ReasonCode != contracts.AdmissionReasonApproved {
+		t.Fatalf("denied request incorrectly consumed rate capacity: decision=%+v err=%v", third.Decision, err)
+	}
+
+	otherCapability := rateLimitedDefinition(t, workspace, "write", "1", 1)
+	otherPolicy := rateAdmissionPolicy(t, workspace, otherCapability, "actor-a", "actor-b", "actor-c", "actor-d")
+	fourthOperation := createAdmittedOperationAsActor(t, operationStore, workspace, "rate-fourth-operation", "actor-d", otherCapability)
+	fourthInput := admissionInputForOperation(t, fourthOperation.Operation, otherCapability, otherPolicy, "rate-fourth-admission")
+	fourth, err := admissionStore.Admit(context.Background(), fourthInput)
+	if err != nil || fourth.Decision.ReasonCode != contracts.AdmissionReasonApproved {
+		t.Fatalf("different capability shared rate capacity: decision=%+v err=%v", fourth.Decision, err)
+	}
+}
+
+func TestAdmissionStoreCapabilityRateLimitIsWorkspaceScoped(t *testing.T) {
+	storeA, poolA, workspaceA := newOperationTestStore(t)
+	storeB, poolB, workspaceB := newOperationTestStore(t)
+	if workspaceA == workspaceB {
+		t.Fatal("test workspaces unexpectedly share an identity")
+	}
+	definitionA := rateLimitedDefinition(t, workspaceA, "read", "1", 1)
+	operationA := createAdmittedOperationAsActor(t, storeA, workspaceA, "workspace-rate-a", "actor-a", definitionA)
+	resultA, err := NewAdmissionStore(poolA, NewEventStore(poolA)).Admit(context.Background(), admissionInputForOperation(t, operationA.Operation, definitionA, rateAdmissionPolicy(t, workspaceA, definitionA, "actor-a"), "workspace-rate-admission-a"))
+	if err != nil || resultA.Decision.ReasonCode != contracts.AdmissionReasonApproved {
+		t.Fatalf("workspace A rate result=%+v err=%v", resultA.Decision, err)
+	}
+
+	definitionB := rateLimitedDefinition(t, workspaceB, "read", "1", 1)
+	operationB := createAdmittedOperationAsActor(t, storeB, workspaceB, "workspace-rate-b", "actor-a", definitionB)
+	resultB, err := NewAdmissionStore(poolB, NewEventStore(poolB)).Admit(context.Background(), admissionInputForOperation(t, operationB.Operation, definitionB, rateAdmissionPolicy(t, workspaceB, definitionB, "actor-a"), "workspace-rate-admission-b"))
+	if err != nil || resultB.Decision.ReasonCode != contracts.AdmissionReasonApproved {
+		t.Fatalf("workspace B inherited workspace A's rate usage: result=%+v err=%v", resultB.Decision, err)
+	}
+}
+
+func TestAdmissionStoreCapabilityRateLimitCountsApprovalPending(t *testing.T) {
+	operationStore, pool, workspace := newOperationTestStore(t)
+	admissionStore := NewAdmissionStore(pool, NewEventStore(pool))
+	definition := rateLimitedDefinition(t, workspace, "publish", "1", 1)
+	definition.Effect = contracts.EffectClassApprovalRequiredWrite
+	definition.RequiresApproval = true
+	definition.Ref.DefinitionHash = ""
+	if err := definition.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	policy := rateAdmissionPolicy(t, workspace, definition, "actor-a", "actor-b")
+	firstOperation := createAdmittedOperationAsActor(t, operationStore, workspace, "approval-rate-a", "actor-a", definition)
+	first, err := admissionStore.Admit(context.Background(), admissionInputForOperation(t, firstOperation.Operation, definition, policy, "approval-rate-admission-a"))
+	if err != nil || first.Decision.Status != contracts.AdmissionAwaitingApproval {
+		t.Fatalf("first admission status=%s reason=%s err=%v, want pending approval", first.Decision.Status, first.Decision.ReasonCode, err)
+	}
+	secondOperation := createAdmittedOperationAsActor(t, operationStore, workspace, "approval-rate-b", "actor-b", definition)
+	second, err := admissionStore.Admit(context.Background(), admissionInputForOperation(t, secondOperation.Operation, definition, policy, "approval-rate-admission-b"))
+	if err != nil || second.Decision.ReasonCode != contracts.AdmissionReasonRateLimited {
+		t.Fatalf("pending approval did not consume rate capacity: decision=%+v err=%v", second.Decision, err)
+	}
+	if second.Decision.RetryAt == nil || !second.Decision.RetryAt.After(first.Decision.CreatedAt) {
+		t.Fatalf("pending approval rate denial has no later retry deadline: %+v", second.Decision)
+	}
+}
+
+func TestAdmissionStoreCapabilityRateLimitRollbackDoesNotConsumeSlot(t *testing.T) {
+	operationStore, pool, workspace := newOperationTestStore(t)
+	admissionStore := NewAdmissionStore(pool, NewEventStore(pool))
+	definition := rateLimitedDefinition(t, workspace, "read", "1", 1)
+	policy := rateAdmissionPolicy(t, workspace, definition, "actor-a", "actor-b")
+	firstOperation := createAdmittedOperationAsActor(t, operationStore, workspace, "rollback-rate-a", "actor-a", definition)
+	firstInput := admissionInputForOperation(t, firstOperation.Operation, definition, policy, "rollback-rate-admission-a")
+	admissionStore.SetFailureHook(func(stage string) error {
+		if stage == "operation_admission_committed" {
+			return errors.New("injected failure before admission commit")
+		}
+		return nil
+	})
+	if _, err := admissionStore.Admit(context.Background(), firstInput); err == nil {
+		t.Fatal("injected pre-commit failure unexpectedly succeeded")
+	}
+	admissionStore.SetFailureHook(nil)
+
+	secondOperation := createAdmittedOperationAsActor(t, operationStore, workspace, "rollback-rate-b", "actor-b", definition)
+	second, err := admissionStore.Admit(context.Background(), admissionInputForOperation(t, secondOperation.Operation, definition, policy, "rollback-rate-admission-b"))
+	if err != nil || second.Decision.ReasonCode != contracts.AdmissionReasonApproved {
+		t.Fatalf("rolled-back admission consumed capability capacity: decision=%+v err=%v", second.Decision, err)
+	}
+}
+
+func TestAdmissionStoreSerializesConcurrentCapabilityRateReservations(t *testing.T) {
+	operationStore, pool, workspace := newOperationTestStore(t)
+	admissionStore := NewAdmissionStore(pool, NewEventStore(pool))
+	definition := rateLimitedDefinition(t, workspace, "read", "1", 1)
+	policy := rateAdmissionPolicy(t, workspace, definition, "actor-a", "actor-b")
+	operations := []OperationCreateResult{
+		createAdmittedOperationAsActor(t, operationStore, workspace, "cap-rate-concurrent-a", "actor-a", definition),
+		createAdmittedOperationAsActor(t, operationStore, workspace, "cap-rate-concurrent-b", "actor-b", definition),
+	}
+	inputs := []contracts.AdmissionInput{
+		admissionInputForOperation(t, operations[0].Operation, definition, policy, "cap-rate-admission-a"),
+		admissionInputForOperation(t, operations[1].Operation, definition, policy, "cap-rate-admission-b"),
+	}
+	results := make([]AdmissionResult, len(inputs))
+	errorsByIndex := make([]error, len(inputs))
+	start := make(chan struct{})
+	var group sync.WaitGroup
+	for index := range inputs {
+		group.Add(1)
+		go func(index int) {
+			defer group.Done()
+			<-start
+			results[index], errorsByIndex[index] = admissionStore.Admit(context.Background(), inputs[index])
+		}(index)
+	}
+	close(start)
+	group.Wait()
+	allowed, rateLimited := 0, 0
+	for index, result := range results {
+		if errorsByIndex[index] != nil {
+			t.Fatalf("concurrent capability admission %d error=%v", index, errorsByIndex[index])
+		}
+		switch result.Decision.ReasonCode {
+		case contracts.AdmissionReasonApproved:
+			allowed++
+		case contracts.AdmissionReasonRateLimited:
+			rateLimited++
+		default:
+			t.Fatalf("concurrent capability admission %d decision=%+v", index, result.Decision)
+		}
+	}
+	if allowed != 1 || rateLimited != 1 {
+		t.Fatalf("concurrent capability limit admitted=%d rate_limited=%d, want 1 each", allowed, rateLimited)
+	}
+}
+
 func TestAdmissionStoreEffectRecoveryIsFencedAndReplayable(t *testing.T) {
 	operationStore, pool, workspace := newOperationTestStore(t)
 	admissionStore := NewAdmissionStore(pool, NewEventStore(pool))
@@ -232,7 +459,13 @@ func TestAdmissionStoreEffectRecoveryIsFencedAndReplayable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	lease, err := operationStore.AcquireLease(context.Background(), workspace, created.Operation.ID, "worker-a", 30*time.Millisecond)
+	if _, err := admissionStore.Admit(context.Background(), admissionInputForOperation(t, created.Operation, definition, admissionPolicy(t, workspace, definition), "effect-admission")); err != nil {
+		t.Fatalf("durable effect admission: %v", err)
+	}
+	// Keep the lease comfortably above a cold CI/Postgres round trip. The
+	// test still verifies takeover, but a 30ms TTL can expire before the next
+	// transactional effect update even when the implementation is correct.
+	lease, err := operationStore.AcquireLease(context.Background(), workspace, created.Operation.ID, "worker-a", 250*time.Millisecond)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -256,7 +489,7 @@ func TestAdmissionStoreEffectRecoveryIsFencedAndReplayable(t *testing.T) {
 	if err != nil || !dispatchedDuplicate.Duplicate {
 		t.Fatalf("duplicate dispatch = %+v err=%v", dispatchedDuplicate, err)
 	}
-	time.Sleep(50 * time.Millisecond)
+	time.Sleep(300 * time.Millisecond)
 	takeover, err := operationStore.AcquireLease(context.Background(), workspace, created.Operation.ID, "worker-b", time.Minute)
 	if err != nil || !takeover.Takeover {
 		t.Fatalf("takeover = %+v err=%v", takeover, err)
@@ -290,6 +523,9 @@ func TestAdmissionStoreIndependentEffectLeaseRecoversAfterTerminalOperation(t *t
 	created, err := operationStore.Create(context.Background(), OperationCreateInput{Request: request, Plan: &plan})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := admissionStore.Admit(context.Background(), admissionInputForOperation(t, created.Operation, definition, admissionPolicy(t, workspace, definition), "independent-effect-admission")); err != nil {
+		t.Fatalf("durable effect admission: %v", err)
 	}
 	operationLease, err := operationStore.AcquireLease(context.Background(), workspace, created.Operation.ID, "operation-worker", time.Minute)
 	if err != nil {
@@ -409,15 +645,18 @@ func TestAdmissionStoreCrashRollsBackDecision(t *testing.T) {
 		t.Fatal("injected admission crash unexpectedly committed")
 	}
 	admissionStore.SetFailureHook(nil)
-	var decisions, events int
+	var decisions, events, authorityLinks int
 	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM fornix.operation_admission_decisions WHERE workspace_id=$1`, workspace).Scan(&decisions); err != nil {
 		t.Fatal(err)
 	}
 	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM fornix.control_events WHERE workspace_id=$1 AND event_type='operation.admission_decided'`, workspace).Scan(&events); err != nil {
 		t.Fatal(err)
 	}
-	if decisions != 0 || events != 0 {
-		t.Fatalf("crash left durable admission state: decisions=%d events=%d", decisions, events)
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM fornix.operation_authority_links WHERE workspace_id=$1`, workspace).Scan(&authorityLinks); err != nil {
+		t.Fatal(err)
+	}
+	if decisions != 0 || events != 0 || authorityLinks != 0 {
+		t.Fatalf("crash left durable admission state: decisions=%d events=%d authority_links=%d", decisions, events, authorityLinks)
 	}
 	if _, err := admissionStore.Admit(context.Background(), input); err != nil {
 		t.Fatal(err)

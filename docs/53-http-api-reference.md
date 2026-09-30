@@ -104,6 +104,14 @@ fail, and cancel requests must carry the current ownership identity and fence;
 stale workers fail closed. Postgres is the authority for task state and
 append-only lifecycle events.
 
+Coordination messages are also workspace-scoped. `/v1/coord` accepts an
+`Idempotency-Key` and returns the durable workspace sequence; repeating the
+same request returns the original message without a second event, while a
+different request under the same key fails with `409`. `/v1/coord/recent`
+supports bounded `after_sequence`, `recipient`, and `limit` query parameters.
+Malformed or negative sequence cursors fail with `400`. The historical global
+coordination table is not read by these ordinary workspace routes.
+
 ## Generic operations
 
 Generic operations are the domain-neutral control-plane surface. They identify
@@ -123,6 +131,7 @@ input and producing the input/schema hashes before admission.
 | `POST` | `/v1/operations/{id}/transition` | Advance one legal state transition | `operation:execute` |
 | `POST` | `/v1/operations/{id}/execute` | Execute one trusted read-only or observation capability and persist its result | `operation:execute` |
 | `POST` | `/v1/operations/{id}/replay` | Verify the durable transition/event hash chain | `operation:read` |
+| `GET` | `/v1/operations/{id}/authority-links` | Read bounded trust, policy, lease, fence, effect, evidence, artifact, result, and receipt linkage | `operation:read` |
 | `POST` | `/v1/operations/{id}/effects/reserve` | Reserve an external effect before connector dispatch | `operation:execute` |
 | `POST` | `/v1/operations/{id}/effects/{effect_id}` | Reserve an external effect with a caller-selected identity | `operation:execute` |
 | `GET` | `/v1/operations/{id}/effects/{effect_id}` | Read the current effect recovery state | `operation:read` |
@@ -137,6 +146,46 @@ The create body contains a `request` object and may contain a normalized
 principal supplies the actor; caller-supplied actor fields are overwritten.
 Task-bound requests must include the current task fence and are subsequently
 checked against the live task lease inside the same Postgres transaction.
+
+For deployments that require release admission for generic effects, the
+request may include a hash-only `deployment_admission` object:
+
+```json
+{
+  "request": {
+    "workspace_id": "workspace-a",
+    "idempotency_key": "operation-1",
+    "deployment_admission": {
+      "workspace_id": "workspace-a",
+      "deployment_id": "deployment-a",
+      "release_id": "release-a",
+      "release_hash": "<sha256>",
+      "artifact_kind": "image",
+      "artifact_hash": "<sha256>",
+      "trust_snapshot_revision": 3,
+      "trust_snapshot_hash": "<sha256>",
+      "gate_hash": "<sha256>",
+      "decision_hash": "<sha256>"
+    }
+  }
+}
+```
+
+The reference is re-evaluated against the deployment release/evidence
+authority in the same transaction that reserves an external effect. Missing,
+expired, revoked, stale, mismatched, or cross-workspace references fail
+closed. Set `FORNIX_REQUIRE_RELEASE_ADMISSION_FOR_EFFECTS=true` to require
+the reference for new generic effect reservations; production enables this
+policy by default. This does not execute a deployment or claim exactly-once
+provider behavior.
+
+`authority-links` is a bounded, reference-only inspection view. It connects
+the operation to the admission decision, capability/policy/trust hashes,
+credential lease fence, operation/task fences, effect reservations, evidence,
+artifacts, result, and Work Receipt when those authorities were supplied. It
+does not disclose payloads or secrets. Admission, result, and receipt links
+are appended in the same transaction as their source records; replay can
+verify the chain without reusing any authority for new work.
 
 Lease acquisition returns a positive monotonic `fence`. Transition requests
 must send it as `X-Operation-Fence`; missing, expired, released, or stale
@@ -253,6 +302,7 @@ raw bytes are not overwritten.
 | --- | --- | --- |
 | `POST` | `/v1/model/complete` | Execute a registered model provider under hard budgets |
 | `POST` | `/v1/tools/execute` | Execute a registered structured-argv tool under policy |
+| `POST` | `/v1/tools/recovery` | Reconcile one durable sandbox attempt without re-executing it |
 | `POST` | `/v1/tools/approvals/{id}/decide` | Record an approval decision |
 | `POST` | `/v1/agent/run` | Create or resume a bounded agent run |
 | `GET` | `/v1/agent/runs` | List bounded workspace-scoped run summaries |
@@ -271,6 +321,28 @@ timeout budgets are hard, and task-bound execution requires the current task
 fence. A crash after a model/process side effect but before checkpoint commit
 is recoverable but remains an at-least-once boundary.
 
+`POST /v1/tools/recovery` requires workspace-scoped `operation:execute`
+authorization and accepts `workspace_id`, `tool_run_id`, the expected effect
+and domain-link versions, an optional idempotency key, and a bounded lease TTL.
+It asks only the exact registered attempt-aware sandbox backend to inspect the
+recorded attempt. A completed observation is finalized transactionally with
+the tool result, output artifacts, effect/link transitions, and terminal event.
+Absent, running, stopped, and unknown observations return a nonterminal
+recovery response; none permits a retry or backend fallback. The default
+installation has no such non-local runtime, so this route cannot recover an
+OCI/gVisor/microVM attempt until a qualified provider is installed.
+
+Tool backend selection is bound to the registered definition and matching
+workspace policy; a caller cannot lower that backend. The request may tighten
+budgets and require additional capabilities. For new tool runs, Fornix records
+the normalized tool-definition and effective-profile hashes in redacted run
+evidence. These hashes preserve the pre-existing logical request hash format
+for replay compatibility, while duplicate requests with a changed definition
+or effective profile fail closed. Historical terminal tool runs without those
+hashes may be replayed without execution; historical nonterminal runs without
+them cannot be resumed into a new process effect. Only the local-process
+backend is currently available, and it is not a hostile-code sandbox.
+
 ## Evaluation, observability, and compatibility surfaces
 
 | Method | Route | Purpose |
@@ -280,14 +352,37 @@ is recoverable but remains an at-least-once boundary.
 | `GET` / `POST` | `/v1/evaluations/retrieval/surfaces` | List or capture redacted retrieval surfaces |
 | `POST` | `/v1/evaluations/retrieval/runs` | Run a bounded durable or dry-run evaluation |
 | `GET` | `/v1/evaluations/runs/{id}` | Read evaluation status, metrics, gates, and report references |
-| `POST` | `/v1/router/observation` | Record router telemetry |
-| `POST` | `/v1/router/recommend` | Read a cost-aware provider recommendation |
+| `POST` | `/v1/router/observation` | Record workspace-scoped router telemetry |
+| `GET` | `/v1/router/recommend` | Read a workspace-scoped cost-aware provider recommendation |
+| `POST` | `/v1/federation/peer` | Register or revise a workspace-scoped peer using a logical credential reference |
+| `GET` | `/v1/federation/peers` | List authorized workspace-scoped peers |
+| `POST` | `/v1/federation/peer/poll` | Run one bounded fenced peer poll when a credential authority is injected |
+| `POST` | `/v1/federation/poll/reconcile` | Reconcile a bounded recorded response without network or credential-manager access |
+| `POST` / `GET` | `/v1/federation/legacy-quarantine` | Record or page redacted dispositions for historical global federation rows |
 | `POST` | `/v1/federation/coord/import` | Import a bounded coordination compatibility record |
 | `GET` | `/v1/federation/coord/since/{sequence}` | Read bounded coordination history |
 
 Observability and evaluation never store credentials or raw prompts in metric
 dimensions or reports. Replay consumes recorded model/tool/retrieval history;
 it does not call remote providers or execute external tools.
+
+Router observations are append-only, workspace-scoped, idempotent, and
+canonicalized before persistence. Recommendations are bounded aggregates over
+the requesting workspace's recent observations, sorted by deterministic
+success-per-cost, success-rate, and model-ID tie-breakers. Peer registration
+and listing use ordinary workspace permissions and never accept inline bearer
+tokens. Polling requires an injected managed credential lease authority; if it
+is not configured, the route fails closed. Peer leases are fenced, remote
+responses are bounded and hash-recorded, and uncertain outcomes remain
+`recovery_required`. The historical `/v1/federation/coord/*` routes remain an
+explicitly quarantined compatibility surface and require the non-production
+legacy flag plus `legacy:global_admin`.
+
+Reconciliation accepts only a bounded response envelope whose in-memory hash
+and provider request identity match the recorded attempt. It performs no
+remote or credential-manager call. Quarantine records are scoped to an
+explicit audit workspace, contain hashes and disposition metadata only, and
+do not infer ownership or copy legacy bearer tokens.
 
 ## Work Receipts
 
@@ -391,6 +486,194 @@ the corresponding validation and handoff tools. See
 and [`59-loop-22-completion.md`](59-loop-22-completion.md) for qualification
 evidence and remaining limitations.
 
+## Deployment qualification trust and authorized imports
+
+Signed qualification bundles are not authorized by their embedded public key.
+An operator must first register a deployment/workspace-scoped public signer,
+then use the authorized import route. Private keys and secret-manager values
+never enter these requests.
+
+| Method | Route | Purpose | Required capability |
+| --- | --- | --- | --- |
+| `GET` | `/v1/qualification/signers` | List bounded signer metadata | `qualification:read` |
+| `POST` | `/v1/qualification/signers` | Register a public signer | `qualification:admin` |
+| `POST` | `/v1/qualification/signers/{key_id}/revoke` | Revoke a signer | `qualification:admin` |
+| `POST` | `/v1/qualification/import` | Verify and durably import a signed bundle, or dry-run | `qualification:import` |
+| `GET` | `/v1/qualification/imports` | List bounded accepted import metadata | `qualification:read` |
+| `GET` | `/v1/qualification/imports/{id}` | Disclose one bounded signed envelope | `qualification:read` |
+| `GET` | `/v1/qualification/snapshots` | List bounded deployment trust snapshots | `qualification:read` |
+| `POST` | `/v1/qualification/snapshots` | Publish or dry-run a signed trust snapshot | `qualification:admin` |
+| `GET` | `/v1/qualification/snapshots/{id}` | Disclose one signed snapshot | `qualification:read` |
+| `POST` | `/v1/qualification/snapshots/{id}/revoke` | Revoke a snapshot without deleting history | `qualification:admin` |
+
+Signer rotation is registration with `supersedes_key_id`; the predecessor
+remains auditable but cannot authorize new imports. Import identity is scoped
+to `(workspace_id, deployment_id, signed_hash)`. Replaying the same signed
+bytes with the same idempotency key returns the original record; different
+bytes or a different idempotency identity fails closed. `dry_run: true`
+performs trust, signature, scope, size, and conflict checks without creating
+signer, import, or audit rows. `raw=true` on explicit disclosure returns the
+bounded exact submitted bytes as base64 in JSON; ordinary list responses
+contain hashes and redacted metadata only.
+
+The equivalent CLI commands are `fornix qualification signer-list`,
+`signer-register`, `signer-rotate`, `signer-revoke`,
+`import-authorized`, `imports-list`, and `import-get`. The existing
+`fornix qualification import` command remains offline validation and does not
+write PostgreSQL state.
+
+Task 81 adds a hash-only release/evidence index. It references accepted
+authorized imports; it does not copy their signed bytes and it never executes
+the deployment operation represented by an evidence kind.
+
+| Method | Route | Purpose | Required capability |
+| --- | --- | --- | --- |
+| `GET` | `/v1/qualification/releases` | List bounded workspace/deployment release identities | `qualification:read` |
+| `POST` | `/v1/qualification/releases` | Register one immutable release against the current trust snapshot | `qualification:admin` |
+| `GET` | `/v1/qualification/releases/{id}` | Read one release identity | `qualification:read` |
+| `GET` | `/v1/qualification/releases/{id}/evidence` | List hash-only evidence links | `qualification:read` |
+| `POST` | `/v1/qualification/releases/{id}/evidence` | Link one accepted import to a release | `qualification:admin` |
+| `GET` | `/v1/qualification/releases/{id}/gate` | Evaluate a deterministic read-only qualification gate | `qualification:read` |
+
+Readiness observations are advisory snapshots of the gate, not admission
+tokens. They contain only release/trust/evidence identities, hashes, bounded
+diagnostics, and evaluation metadata. Incident annotations use structured
+codes and dispositions; raw deployment logs and signed bundles are not
+accepted by these routes.
+
+| Method | Route | Purpose | Required capability |
+| --- | --- | --- | --- |
+| `GET` | `/v1/qualification/readiness/snapshots` | List bounded readiness snapshots for a release | `qualification:read` |
+| `POST` | `/v1/qualification/readiness/snapshots` | Capture or dry-run one current readiness snapshot | `qualification:admin` |
+| `GET` | `/v1/qualification/readiness/snapshots/{id}` | Disclose one hash-only readiness snapshot | `qualification:read` |
+| `GET` | `/v1/qualification/readiness/snapshots/{id}/annotations` | List bounded incident annotations | `qualification:read` |
+| `POST` | `/v1/qualification/readiness/snapshots/{id}/annotations` | Add or dry-run one structured incident annotation | `qualification:admin` |
+
+Freshness policies and reviews remain advisory. A policy applies only to
+operator review age; it cannot extend signed evidence expiry or grant effect
+admission. Reviews are read-only and compare two immutable snapshots at an
+explicit `as_of` time.
+
+| Method | Route | Purpose | Required capability |
+| --- | --- | --- | --- |
+| `GET` | `/v1/qualification/readiness/policies` | List immutable freshness-policy revisions | `qualification:read` |
+| `POST` | `/v1/qualification/readiness/policies` | Publish or dry-run a freshness policy | `qualification:admin` |
+| `GET` | `/v1/qualification/readiness/policies/current` | Read the current freshness policy | `qualification:read` |
+| `POST` | `/v1/qualification/readiness/review` | Compare two snapshots without mutation | `qualification:read` |
+
+Qualification retention is an operational overlay for external archival
+planning. It never deletes or rewrites snapshots, incident annotations, or
+freshness policies, and it cannot change release admission. Policy revisions
+are immutable. Metadata synchronization inserts only missing hash-only rows;
+planning and recovery are read-only and accept an explicit `as_of` for
+replayable results.
+
+| Method | Route | Purpose | Required capability |
+| --- | --- | --- | --- |
+| `GET` | `/v1/qualification/readiness/retention/policies` | List immutable retention-policy revisions | `qualification:read` |
+| `POST` | `/v1/qualification/readiness/retention/policies` | Publish or dry-run a retention policy | `qualification:admin` |
+| `GET` | `/v1/qualification/readiness/retention/policies/current` | Read the current retention policy | `qualification:read` |
+| `POST` | `/v1/qualification/readiness/retention/metadata/sync` | Register missing retention metadata in bounded pages | `qualification:admin` |
+| `POST` | `/v1/qualification/readiness/retention/plan` | Produce a deterministic, hash-only archival plan | `qualification:read` |
+| `POST` | `/v1/qualification/readiness/retention/recovery` | Produce a read-only integrity/recovery report | `qualification:read` |
+
+Use `Idempotency-Key` for capture and annotation writes. The equivalent CLI
+commands are `fornix qualification readiness-capture`, `readiness-list`,
+`readiness-get`, `incident-annotate`, `incident-list`,
+`freshness-policy-set`, `freshness-policy-get`, `freshness-policy-list`, and
+`readiness-review`. Retention operators use `retention-policy-set`,
+`retention-policy-get`, `retention-policy-list`, `retention-sync`,
+`retention-plan`, and `retention-recovery`.
+
+Release registration captures the exact current trust-snapshot revision and
+hash. New evidence links must reference an accepted import with the same
+deployment, target, signed report, manifest, source, and trust-snapshot facts;
+links from a later snapshot fail closed as stale. Replaying the same
+idempotency key returns the original release or link. `required_kinds` on the
+gate route is an optional comma-separated bounded list; when omitted, the
+default gate requires migration, backup/restore, topology, provider, and
+external-effect evidence. The gate is ready only when every required link is
+passed, resolved or not applicable, and bound to the current snapshot. It
+returns a stable `gate_hash` and never performs a live check.
+
+The equivalent CLI commands are `fornix qualification release-register`,
+`release-list`, `release-get`, `evidence-link`, `evidence-list`, and
+`release-gate`. This is a release/evidence index, not a substitute for
+deployment-owned backup, HA, provider, or external-effect authorities.
+
+Task 92 adds a bounded deployment-owned evidence refresh. A refresh accepts
+only references to already accepted signed imports and atomically supersedes
+the selected active links. The deployment remains responsible for producing
+the observation; Fornix does not contact it or extend an evidence expiry.
+
+| Method | Route | Purpose | Required capability |
+| --- | --- | --- | --- |
+| `POST` | `/v1/qualification/releases/{id}/refresh` | Validate and atomically refresh selected evidence links | `qualification:admin` |
+| `POST` | `/v1/qualification/releases/{id}/refresh/plan` | Perform the same validation as a forced dry-run | `qualification:read` |
+| `GET` | `/v1/qualification/releases/{id}/refreshes` | List bounded refresh reports | `qualification:read` |
+| `GET` | `/v1/qualification/releases/{id}/refreshes/{refresh_id}` | Read one refresh report | `qualification:read` |
+
+The request requires `workspace_id`, `deployment_id`, an explicit RFC3339
+`as_of`, an idempotency key, and one to six unique `{kind, import_id}` items.
+`kind` is limited to `release`, `migration`, `backup_restore`, `topology`,
+`provider`, and `external_effect`. When an active link exists, its exact
+`supersedes_link_id` is required. The fixed `as_of` is used for expiry checks,
+so the same request is replay-comparable. A refresh report contains only
+release/link IDs, outcomes, stable hashes, predecessor IDs, boundary expiry,
+and bounded reasons. It never contains signed bytes, credentials, prompts,
+URLs, or deployment payloads.
+
+`dry_run: true` and `/refresh/plan` roll back after validation and create no
+refresh, link, or lifecycle rows. A committed refresh stores one append-only
+run, bounded item rows, and one event in migration 076. Replaying the same
+idempotency key returns the original report; conflicting reuse fails closed.
+The equivalent CLI commands are `fornix qualification refresh`,
+`refresh-plan`, `refresh-list`, and `refresh-get`. The refresh item file is a
+bounded JSON object containing only an `items` array of typed references.
+
+Task 82 adds the hash-only release verification and admission surface. A
+deployment-owned verifier supplies the artifact hash, attestation hash, and
+the exact Task 81 gate hash; Fornix binds those facts to the release and
+current trust snapshot transactionally. It does not accept raw manifests,
+signatures, image layers, tokens, or credentials.
+
+| Method | Route | Purpose | Required capability |
+| --- | --- | --- | --- |
+| `POST` | `/v1/qualification/releases/{id}/verification` | Register or dry-run one release/artifact verification binding | `qualification:admin` |
+| `GET` | `/v1/qualification/releases/{id}/verification` | Read one bounded verification by `artifact_kind` | `qualification:read` |
+| `POST` | `/v1/qualification/releases/{id}/verification/revoke` | Revoke a verification without deleting history | `qualification:admin` |
+| `GET` | `/v1/qualification/releases/{id}/admission` | Evaluate the read-only startup/admission decision | `qualification:read` |
+
+`artifact_kind` is one of `release`, `image`, `binary`, or `manifest`.
+`release-admission` returns a stable `decision_hash`; it is ready only when
+the qualification gate is ready, the verification is current and unrevoked,
+the optional requested artifact hash matches, and all trust/gate bindings
+match. Expiry is evaluated without mutating the verification row. Production
+can require this decision before readiness with
+`FORNIX_REQUIRE_QUALIFICATION_RELEASE=true` (enabled automatically for
+`FORNIX_ENV=production`) and an explicit
+`FORNIX_QUALIFICATION_RELEASE_ID`. The API is an admission projection, not a
+deployment executor.
+
+The equivalent CLI commands are `fornix qualification release-verify`,
+`verification-get`, `verification-revoke`, and `release-admission`.
+
+Task 80 adds a bounded deployment trust snapshot between the signer catalog
+and new authorized imports. A snapshot is scoped to one workspace and
+deployment, has a monotonically increasing revision, carries only public
+signer material, and is signed by a currently trusted Task 79 catalog signer.
+The exact signed bytes and source hash are retained. New imports resolve the
+current snapshot in the same transaction and retain its revision and hash;
+historical Task 79 imports remain readable with empty snapshot fields and are
+never rewritten. Revoking a snapshot or its publisher blocks future imports
+but preserves disclosure and audit history. Snapshot publication is bounded
+and idempotent by `(workspace_id, deployment_id, snapshot_hash)` and the
+idempotency key. The equivalent CLI commands are `snapshot-sign`,
+`snapshot-publish`, `snapshot-list`, `snapshot-get`, and `snapshot-revoke`.
+When `FORNIX_REQUIRE_QUALIFICATION_TRUST=true` (automatic in production),
+the configured `FORNIX_QUALIFICATION_DEPLOYMENT_ID` must have a current
+snapshot for each workspace loaded at startup before readiness is reported.
+
 ## Validation policy packs
 
 Validation policies are workspace-scoped, declarative, content-addressed
@@ -433,6 +716,85 @@ The CLI exposes `fornix policy list`, `create`, `get`, `activate`, `default`,
 exposes matching `fornix__policy_*` tools. All three surfaces use the same
 workspace authorization and redaction rules.
 
+## Deployment-owned qualification refresh schedules
+
+Task 93 adds a durable handoff for recurring freshness without making Fornix
+the deployment executor. The schedule API stores only bounded identities,
+hashes, lease metadata, and references to Task 92 refresh reports.
+
+| Method | Route | Permission | Purpose |
+| --- | --- | --- | --- |
+| `POST` / `GET` | `/v1/qualification/refresh-schedules` | `qualification:admin` / `qualification:read` | Register or list schedules |
+| `GET` | `/v1/qualification/refresh-schedules/plan` | `qualification:read` | Inspect bounded due candidates |
+| `POST` | `/v1/qualification/refresh-schedules/claim` | `qualification:admin` | Claim one due schedule with a fence |
+| `GET` | `/v1/qualification/refresh-schedules/{id}` | `qualification:read` | Read current projection |
+| `POST` | `/v1/qualification/refresh-schedules/{id}/renew` | `qualification:admin` | Renew exact owner/fence |
+| `POST` | `/v1/qualification/refresh-schedules/{id}/release` | `qualification:admin` | Release exact owner/fence |
+| `POST` | `/v1/qualification/refresh-schedules/{id}/complete` | `qualification:admin` | Commit a fenced attempt |
+| `POST` | `/v1/qualification/refresh-schedules/{id}/pause`, `/resume`, `/cancel` | `qualification:admin` | Change durable schedule state |
+| `GET` | `/v1/qualification/refresh-schedules/{id}/attempts` | `qualification:read` | Read append-only attempts |
+
+Completion accepts only an attempt/fence/plan identity, bounded outcome, and
+the ID/hash of an existing refresh report. A successful completion is accepted
+only when the report is same-scope, fresh at the fixed `as_of`, passed, covers
+the configured evidence kinds, and contains the required passed recovery drills
+in its accepted signed imports. The schedule does not call a provider,
+deployment, backup, failover, DNS, or secret system. Claim, renewal, evidence
+mutation (when using `schedule_authorization`), and completion fail closed on
+stale fences. The scheduler is at-least-once; replay the same idempotency key
+after a crash rather than assuming remote exactly-once behavior.
+
+## Generic workflow and external-effect verification
+
+Generic workflows are workspace-scoped, durable orchestration over the common
+operation, connector, policy, effect, evidence, artifact, and receipt
+authorities. They are not repository-specific. Lifecycle mutations require an
+explicit workflow lease fence; external-effect verification additionally
+requires the current effect recovery fence and exact observed versions.
+
+| Method | Route | Purpose | Required capability |
+| --- | --- | --- | --- |
+| `POST` | `/v1/workflows` | Create an idempotent typed workflow from an operation and plan | `operation:create` |
+| `GET` | `/v1/workflows/{id}` | Read the bounded workflow projection | `operation:read` |
+| `POST` | `/v1/workflows/{id}/lease` | Acquire or take over the workspace-scoped workflow lease | `operation:execute` |
+| `POST` | `/v1/workflows/{id}/renew` | Renew the exact workflow lease | `operation:execute` |
+| `POST` | `/v1/workflows/{id}/release` | Release the exact workflow lease | `operation:execute` |
+| `POST` | `/v1/workflows/{id}/advance` | Execute the next bounded deterministic steps | `operation:execute` |
+| `POST` | `/v1/workflows/{id}/approve` | Resolve an explicit approval wait | `tool:approve` |
+| `POST` | `/v1/workflows/{id}/verify` | Verify and reconcile one reserved external effect | `operation:execute` |
+| `POST` | `/v1/workflows/{id}/cancel` | Record a durable cancellation | `operation:execute` |
+| `POST` | `/v1/workflows/{id}/replay` | Replay recorded workflow transitions without effects | `operation:read` |
+| `GET` / `POST` | `/v1/workflows/{id}/receipt` | Read or finalize a replay-verified Work Receipt | `receipt:read` / `receipt:write` |
+
+The verify request must include `X-Operation-Fence`, `X-Effect-Fence`,
+`step_id`, `expected_effect_version`, `expected_link_version`, and a stable
+`idempotency_key`; task-bound workflows also require `X-Task-Fence`. The
+registered connector verifier receives normalized hashes and bounded provider
+identifiers, never raw payloads or credentials. The generic effect transition
+and domain-effect-link transition commit atomically in Postgres. A duplicate
+after that commit reconstructs the proof without invoking the verifier again,
+but still requires the current recovery lease. External execution remains
+at-least-once and is never described as exactly-once.
+
+For dispatcher paths that request a generic operation result, terminal effect
+state, domain-effect link, operation result, operation transition, and result
+authority link share one Postgres commit. A duplicate replays the immutable
+result. If a historical terminal effect has no requested result, Fornix
+returns a recovery-required error and does not invoke the external adapter
+again. An acknowledged but unfinalized effect also remains non-dispatchable
+until domain-specific reconciliation resolves it.
+
+The CLI's `fornix workflow verify` command derives a bounded default
+idempotency key from the workspace, workflow, step, and expected effect/link
+versions. Repeating a request for the same proof state replays the same
+attempt. After an inconclusive outcome, inspect the current versions and use
+those values for a new attempt; the derived key will change. An explicit
+`--idempotency` value overrides this behavior and remains the caller's
+responsibility to manage.
+
+The equivalent CLI commands are `fornix workflow create`, `lease`, `renew`,
+`release`, `advance`, `approve`, `verify`, `cancel`, `replay`, and `receipt`.
+
 ## Compatibility data-plane routes
 
 These routes support the original memo, chunk, symbol, coordination, and
@@ -452,12 +814,14 @@ stronger lineage and replay semantics are required.
 | `POST` | `/v1/symbol/edge` | Add a symbol graph edge |
 | `POST` | `/v1/symbol/reindex` | Rebuild the compatibility symbol index |
 | `GET` | `/v1/symbol/{id}/callers` or `/callees` | Read bounded symbol neighbors |
-| `POST` | `/v1/federation/peer` | Register a coordination compatibility peer |
-| `GET` | `/v1/federation/peers` | List registered peers |
+| `POST` | `/v1/federation/peer` | Register or revise a workspace-scoped peer |
+| `GET` | `/v1/federation/peers` | List workspace-scoped peers |
+| `POST` | `/v1/federation/peer/poll` | Poll a peer through managed credentials and controlled egress |
 
-Compatibility writes remain workspace-authorized. Their rows are not a reason
-to bypass the append-only event, evidence, artifact, or ingestion authorities
-when a durable workflow depends on replay or provenance.
+Compatibility writes remain workspace-authorized. Historical federation
+coordination imports remain quarantined and must not be used as a substitute
+for the new peer/poll authority. Peer configuration is append-only in
+Postgres; raw tokens, response bodies, and credentials are never durable.
 
 ## Multi-domain incident reference workflow
 

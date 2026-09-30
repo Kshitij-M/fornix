@@ -79,6 +79,37 @@ func New(workspaces []string, factory RunnerFactory) (*Supervisor, error) {
 	if factory == nil {
 		return nil, ErrNotConfigured
 	}
+	normalized, err := normalizeWorkspaces(workspaces, false)
+	if err != nil {
+		return nil, err
+	}
+	return &Supervisor{Workspaces: normalized, Factory: factory, MaxConcurrent: DefaultMaxConcurrent, PollInterval: DefaultPollInterval}, nil
+}
+
+// ReplaceWorkspaces atomically replaces the explicit workspace inventory used
+// by subsequent scheduling turns. An empty inventory is allowed so a server
+// can stop claiming work while no active workspace is available; Step still
+// fails closed if called with that inventory.
+func (s *Supervisor) ReplaceWorkspaces(workspaces []string) error {
+	if s == nil || s.Factory == nil {
+		return ErrNotConfigured
+	}
+	normalized, err := normalizeWorkspaces(workspaces, true)
+	if err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.Workspaces = normalized
+	if len(normalized) == 0 {
+		s.next = 0
+	} else {
+		s.next %= len(normalized)
+	}
+	s.mu.Unlock()
+	return nil
+}
+
+func normalizeWorkspaces(workspaces []string, allowEmpty bool) ([]string, error) {
 	seen := make(map[string]struct{}, len(workspaces))
 	normalized := make([]string, 0, len(workspaces))
 	for _, workspaceID := range workspaces {
@@ -92,10 +123,14 @@ func New(workspaces []string, factory RunnerFactory) (*Supervisor, error) {
 		seen[workspaceID] = struct{}{}
 		normalized = append(normalized, workspaceID)
 	}
-	if len(normalized) == 0 || len(normalized) > MaxWorkspaces {
-		return nil, fmt.Errorf("%w: workspace count must be between 1 and %d", ErrWorkspaceSet, MaxWorkspaces)
+	minimum := 1
+	if allowEmpty {
+		minimum = 0
 	}
-	return &Supervisor{Workspaces: normalized, Factory: factory, MaxConcurrent: DefaultMaxConcurrent, PollInterval: DefaultPollInterval}, nil
+	if (!allowEmpty && len(normalized) == 0) || len(normalized) > MaxWorkspaces {
+		return nil, fmt.Errorf("%w: workspace count must be between %d and %d", ErrWorkspaceSet, minimum, MaxWorkspaces)
+	}
+	return normalized, nil
 }
 
 func (s *Supervisor) concurrency() (int, error) {
@@ -116,18 +151,18 @@ func (s *Supervisor) selected() ([]string, error) {
 	if s == nil {
 		return nil, ErrNotConfigured
 	}
-	if len(s.Workspaces) == 0 || len(s.Workspaces) > MaxWorkspaces {
-		return nil, ErrWorkspaceSet
-	}
 	concurrency, err := s.concurrency()
 	if err != nil {
 		return nil, err
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.Workspaces) == 0 || len(s.Workspaces) > MaxWorkspaces {
+		return nil, ErrWorkspaceSet
+	}
 	if concurrency > len(s.Workspaces) {
 		concurrency = len(s.Workspaces)
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	start := s.next % len(s.Workspaces)
 	selected := make([]string, concurrency)
 	for index := range selected {

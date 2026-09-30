@@ -1,20 +1,22 @@
-// Package sqlreadonly exposes only bounded, read-only SQL capabilities. It
-// rejects unsafe statements before they reach an external database and never
-// makes the external database the authority for Fornix operation state.
+// Package sqlreadonly exposes bounded, structured read-only SQL capabilities
+// and never makes an external database the authority for Fornix operation
+// state.
 package sqlreadonly
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/omaveda/fornix/internal/connector"
@@ -23,12 +25,12 @@ import (
 
 const (
 	ConnectorName          = "sqlreadonly"
-	ConnectorVersion       = "1"
+	ConnectorVersion       = "2"
 	DescribeCapabilityName = "describe"
 	QueryCapabilityName    = "query_readonly"
 	ExplainCapabilityName  = "explain_readonly"
 	ResourceKind           = "database_table"
-	InputType              = "sql.request"
+	InputType              = "sql.request.v2"
 	DefaultMaxRows         = 1000
 	MaxMaxRows             = 10000
 	DefaultMaxResultBytes  = 1 << 20
@@ -37,18 +39,16 @@ const (
 	MaxMaxCostUnits        = 1000000
 	DefaultTimeout         = 5 * time.Second
 	MaxTimeout             = 10 * time.Minute
-	MaxStatementBytes      = 64 << 10
-	MaxParameters          = 32
+	MaxPayloadBytes        = 64 << 10
+	MaxQueryColumns        = 64
+	MaxFilters             = 32
+	MaxOrderTerms          = 8
+	MaxInValues            = 32
 	MaxParameterBytes      = 4096
 )
 
 var (
-	identifierPattern     = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
-	unsafeKeywordPattern  = regexp.MustCompile(`(?i)\b(insert|update|delete|drop|alter|create|truncate|grant|revoke|copy|call|do|begin|commit|rollback|savepoint|prepare|execute|merge|refresh|vacuum|analyze|listen|notify|lock)\b`)
-	tableReferencePattern = regexp.MustCompile(`(?i)\b(from|join)\s+([a-z_][a-z0-9_.]*)`)
-	tableKeywordPattern   = regexp.MustCompile(`(?i)\b(from|join)\b`)
-	parameterPattern      = regexp.MustCompile(`\$([0-9]+)`)
-	ErrUnsafeStatement    = errors.New("SQL statement is not permitted by read-only connector")
+	identifierPattern = regexp.MustCompile(`^[a-z_][a-z0-9_]{0,62}$`)
 )
 
 // Binding is the non-secret workspace binding for one external database.
@@ -67,32 +67,81 @@ type Binding struct {
 	TimeoutMS      int64    `json:"timeout_ms"`
 }
 
-// Payload is the typed SQL envelope resolved by OperationRequest.InputHash.
-// Parameter values are ephemeral and never copied into Fornix authority.
+// Payload is the versioned structured query envelope resolved by
+// OperationRequest.InputHash. It intentionally has no SQL text field.
 type Payload struct {
-	SchemaVersion int      `json:"schema_version"`
-	Statement     string   `json:"statement,omitempty"`
-	Parameters    []string `json:"parameters,omitempty"`
-	Schema        string   `json:"schema,omitempty"`
-	Table         string   `json:"table,omitempty"`
-	Limit         int      `json:"limit,omitempty"`
-	MaxBytes      int64    `json:"max_bytes,omitempty"`
+	SchemaVersion int         `json:"schema_version"`
+	Schema        string      `json:"schema"`
+	Table         string      `json:"table"`
+	Columns       []string    `json:"columns,omitempty"`
+	Filters       []Filter    `json:"filters,omitempty"`
+	OrderBy       []OrderTerm `json:"order_by,omitempty"`
+	Limit         int         `json:"limit,omitempty"`
+	MaxBytes      int64       `json:"max_bytes,omitempty"`
 }
 
-// QueryRequest is the already validated request passed to a database driver.
+// FilterOperator is a closed set of comparison operators emitted by the SQL
+// compiler. Callers cannot provide SQL fragments.
+type FilterOperator string
+
+const (
+	FilterEqual        FilterOperator = "eq"
+	FilterNotEqual     FilterOperator = "neq"
+	FilterLess         FilterOperator = "lt"
+	FilterLessEqual    FilterOperator = "lte"
+	FilterGreater      FilterOperator = "gt"
+	FilterGreaterEqual FilterOperator = "gte"
+	FilterLike         FilterOperator = "like"
+	FilterILike        FilterOperator = "ilike"
+	FilterIn           FilterOperator = "in"
+	FilterIsNull       FilterOperator = "is_null"
+	FilterIsNotNull    FilterOperator = "is_not_null"
+)
+
+// Filter contains one structured predicate. Value and Values must be JSON
+// scalar literals and are always bound as driver parameters.
+type Filter struct {
+	Column   string            `json:"column"`
+	Operator FilterOperator    `json:"operator"`
+	Value    json.RawMessage   `json:"value,omitempty"`
+	Values   []json.RawMessage `json:"values,omitempty"`
+}
+
+// OrderDirection is the only caller-controlled ordering fragment accepted.
+type OrderDirection string
+
+const (
+	OrderAscending  OrderDirection = "asc"
+	OrderDescending OrderDirection = "desc"
+)
+
+type OrderTerm struct {
+	Column    string         `json:"column"`
+	Direction OrderDirection `json:"direction"`
+}
+
+// QueryRequest is the normalized structured query passed to a database
+// driver. It cannot carry caller-authored SQL.
 type QueryRequest struct {
-	Statement  string
-	Parameters []string
-	MaxRows    int
-	MaxBytes   int64
-	Timeout    time.Duration
+	Schema   string
+	Table    string
+	Columns  []string
+	Filters  []Filter
+	OrderBy  []OrderTerm
+	Limit    int
+	MaxRows  int
+	MaxBytes int64
+	Timeout  time.Duration
 }
 
 // QueryResult is an ephemeral bounded result. Connector results persist only
 // its hashes and counts in OperationResult; Rows never cross that boundary.
 type QueryResult struct {
-	Columns   []string
-	Rows      [][]string
+	Columns []string
+	Rows    [][]string
+	// Nulls preserves SQL NULL separately from a text value such as "<nil>".
+	// Each entry, when present, has one bool per cell in the corresponding row.
+	Nulls     [][]bool `json:"nulls,omitempty"`
 	Bytes     int64
 	CostUnits int64
 	Truncated bool
@@ -106,55 +155,224 @@ type Database interface {
 	ExplainReadOnly(context.Context, QueryRequest) (QueryResult, error)
 }
 
-// PGDatabase adapts a pgx pool to the read-only driver seam.
-type PGDatabase struct{ Pool *pgxpool.Pool }
+// PGDatabase adapts a pgx pool to the read-only driver seam. Its table binding
+// is supplied by NewConnector (or NewPGDatabase) and cannot be widened by an
+// individual query request.
+type PGDatabase struct {
+	Pool    *pgxpool.Pool
+	binding Binding
+}
+
+// NewPGDatabase creates a driver with an explicit immutable table allowlist.
+func NewPGDatabase(pool *pgxpool.Pool, binding Binding) (PGDatabase, error) {
+	if pool == nil {
+		return PGDatabase{}, fmt.Errorf("SQL database is not configured")
+	}
+	if err := binding.Normalize(); err != nil {
+		return PGDatabase{}, err
+	}
+	return PGDatabase{Pool: pool, binding: binding}, nil
+}
 
 func (d PGDatabase) QueryReadOnly(ctx context.Context, request QueryRequest) (QueryResult, error) {
-	return d.query(ctx, request, request.Statement)
+	return d.query(ctx, request, false)
 }
 
 func (d PGDatabase) ExplainReadOnly(ctx context.Context, request QueryRequest) (QueryResult, error) {
-	return d.query(ctx, request, "EXPLAIN (FORMAT JSON) "+request.Statement)
+	return d.query(ctx, request, true)
 }
 
 func (d PGDatabase) Describe(ctx context.Context, schema, table string, maxRows int, maxBytes int64, timeout time.Duration) (QueryResult, error) {
-	return d.query(ctx, QueryRequest{Parameters: []string{schema, table}, MaxRows: maxRows, MaxBytes: maxBytes, Timeout: timeout}, `SELECT column_name,data_type FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 ORDER BY ordinal_position`)
+	request := QueryRequest{Schema: schema, Table: table, MaxRows: maxRows, MaxBytes: maxBytes, Timeout: timeout}
+	if err := d.validateBinding(request); err != nil {
+		return QueryResult{}, err
+	}
+	return d.describe(ctx, request)
 }
 
-func (d PGDatabase) query(ctx context.Context, request QueryRequest, statement string) (QueryResult, error) {
+func (d PGDatabase) query(ctx context.Context, request QueryRequest, explain bool) (QueryResult, error) {
 	if d.Pool == nil {
 		return QueryResult{}, fmt.Errorf("SQL database is not configured")
 	}
-	tx, err := d.Pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
-	if err != nil {
-		return QueryResult{}, fmt.Errorf("SQL read transaction unavailable")
+	if err := request.Normalize(); err != nil {
+		return QueryResult{}, err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
+	if err := d.validateBinding(request); err != nil {
+		return QueryResult{}, err
+	}
+	statement, parameters, err := compileQuery(request)
+	if err != nil {
+		return QueryResult{}, err
+	}
+	if explain {
+		statement = "EXPLAIN (FORMAT JSON) " + statement
+	}
+	ctx, cancel := context.WithTimeout(ctx, request.Timeout)
+	defer cancel()
+	tx, err := d.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return QueryResult{}, boundedDatabaseError(ctx, "SQL read transaction unavailable", err)
+	}
+	defer rollbackReadOnly(tx)
 	if _, err := tx.Exec(ctx, `SELECT set_config('statement_timeout',$1,true)`, fmt.Sprintf("%dms", request.Timeout.Milliseconds())); err != nil {
-		return QueryResult{}, fmt.Errorf("SQL timeout configuration failed")
+		return QueryResult{}, boundedDatabaseError(ctx, "SQL timeout configuration failed", err)
 	}
-	if _, err := tx.Prepare(ctx, "fornix_readonly", statement); err != nil {
-		return QueryResult{}, fmt.Errorf("SQL statement preparation failed")
+	if _, err := tx.Exec(ctx, `SELECT set_config('search_path','pg_catalog',true)`); err != nil {
+		return QueryResult{}, boundedDatabaseError(ctx, "SQL search path configuration failed", err)
 	}
-	values := make([]any, len(request.Parameters))
-	for i, value := range request.Parameters {
-		values[i] = value
+	if err := validateCatalogRelation(ctx, tx, request, false); err != nil {
+		return QueryResult{}, err
 	}
-	rows, err := tx.Query(ctx, "fornix_readonly", values...)
+	// Query the generated statement directly. A fixed prepared-statement name
+	// is unsafe on pooled connections because the SQL shape changes with the
+	// selected table, columns, and filters. pgx owns statement caching by SQL
+	// text when configured; the adapter must not alias distinct statements.
+	rows, err := tx.Query(ctx, statement, parameters...)
 	if err != nil {
-		return QueryResult{}, fmt.Errorf("SQL read failed")
+		return QueryResult{}, boundedDatabaseError(ctx, "SQL read failed", err)
 	}
-	result, err := collectRows(rows, request.MaxRows, request.MaxBytes)
+	result, err := collectRows(ctx, rows, request.MaxRows, request.MaxBytes)
 	if err != nil {
 		return QueryResult{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return QueryResult{}, fmt.Errorf("SQL read commit failed")
+		return QueryResult{}, boundedDatabaseError(ctx, "SQL read commit failed", err)
 	}
 	return result, nil
 }
 
-func collectRows(rows pgx.Rows, maxRows int, maxBytes int64) (QueryResult, error) {
+func (d PGDatabase) describe(ctx context.Context, request QueryRequest) (QueryResult, error) {
+	if d.Pool == nil {
+		return QueryResult{}, fmt.Errorf("SQL database is not configured")
+	}
+	if request.MaxRows < 1 || request.MaxRows > MaxMaxRows || request.MaxBytes < 1 || request.MaxBytes > MaxMaxResultBytes || request.Timeout <= 0 || request.Timeout > MaxTimeout {
+		return QueryResult{}, fmt.Errorf("SQL describe budgets are outside bounds")
+	}
+	ctx, cancel := context.WithTimeout(ctx, request.Timeout)
+	defer cancel()
+	tx, err := d.Pool.BeginTx(ctx, pgx.TxOptions{IsoLevel: pgx.RepeatableRead, AccessMode: pgx.ReadOnly})
+	if err != nil {
+		return QueryResult{}, boundedDatabaseError(ctx, "SQL read transaction unavailable", err)
+	}
+	defer rollbackReadOnly(tx)
+	if _, err := tx.Exec(ctx, `SELECT set_config('statement_timeout',$1,true)`, fmt.Sprintf("%dms", request.Timeout.Milliseconds())); err != nil {
+		return QueryResult{}, boundedDatabaseError(ctx, "SQL timeout configuration failed", err)
+	}
+	if _, err := tx.Exec(ctx, `SELECT set_config('search_path','pg_catalog',true)`); err != nil {
+		return QueryResult{}, boundedDatabaseError(ctx, "SQL search path configuration failed", err)
+	}
+	if err := validateCatalogRelation(ctx, tx, request, true); err != nil {
+		return QueryResult{}, err
+	}
+	statement := `SELECT column_name,data_type FROM information_schema.columns WHERE table_schema=$1 AND table_name=$2 ORDER BY ordinal_position`
+	rows, err := tx.Query(ctx, statement, request.Schema, request.Table)
+	if err != nil {
+		return QueryResult{}, boundedDatabaseError(ctx, "SQL describe failed", err)
+	}
+	result, err := collectRows(ctx, rows, request.MaxRows, request.MaxBytes)
+	if err != nil {
+		return QueryResult{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return QueryResult{}, boundedDatabaseError(ctx, "SQL read commit failed", err)
+	}
+	return result, nil
+}
+
+func rollbackReadOnly(tx pgx.Tx) {
+	if tx == nil {
+		return
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	_ = tx.Rollback(cleanupCtx)
+}
+
+func isStatementTimeout(err error) bool {
+	var postgresError *pgconn.PgError
+	return errors.As(err, &postgresError) && postgresError.Code == "57014"
+}
+
+func boundedDatabaseError(ctx context.Context, message string, err error) error {
+	if errors.Is(ctx.Err(), context.Canceled) || errors.Is(err, context.Canceled) {
+		return context.Canceled
+	}
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded) || isStatementTimeout(err) {
+		return context.DeadlineExceeded
+	}
+	return fmt.Errorf("%s", message)
+}
+
+func (d PGDatabase) validateBinding(request QueryRequest) error {
+	if d.binding.ID == "" || d.binding.WorkspaceID == "" {
+		return fmt.Errorf("SQL database binding is not configured")
+	}
+	if !d.binding.allowedTable(request.Schema, request.Table) {
+		return fmt.Errorf("SQL table is not allowlisted")
+	}
+	return nil
+}
+
+func validateCatalogRelation(ctx context.Context, tx pgx.Tx, request QueryRequest, describe bool) error {
+	rows, err := tx.Query(ctx, `
+SELECT c.relkind::text,c.relpersistence::text,COALESCE(a.attname,''),
+       COALESCE(tn.nspname='pg_catalog' AND t.typtype='b' AND t.typcategory<>'A',false)
+FROM pg_catalog.pg_class AS c
+JOIN pg_catalog.pg_namespace AS n ON n.oid=c.relnamespace
+LEFT JOIN pg_catalog.pg_attribute AS a ON a.attrelid=c.oid AND a.attnum>0 AND NOT a.attisdropped
+LEFT JOIN pg_catalog.pg_type AS t ON t.oid=a.atttypid
+LEFT JOIN pg_catalog.pg_namespace AS tn ON tn.oid=t.typnamespace
+WHERE n.nspname=$1 AND c.relname=$2
+ORDER BY a.attnum`, request.Schema, request.Table)
+	if err != nil {
+		return boundedDatabaseError(ctx, "SQL table metadata is unavailable", err)
+	}
+	defer rows.Close()
+	found := false
+	var relationKind, persistence string
+	columns := make(map[string]bool)
+	for rows.Next() {
+		var rowKind, rowPersistence string
+		var name string
+		var builtin bool
+		if err := rows.Scan(&rowKind, &rowPersistence, &name, &builtin); err != nil {
+			return boundedDatabaseError(ctx, "SQL table metadata is unavailable", err)
+		}
+		if !found {
+			found = true
+			relationKind, persistence = rowKind, rowPersistence
+		} else if relationKind != rowKind || persistence != rowPersistence {
+			return fmt.Errorf("SQL table metadata changed during validation")
+		}
+		if name != "" {
+			columns[name] = builtin
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return boundedDatabaseError(ctx, "SQL table metadata is unavailable", err)
+	}
+	if !found {
+		return fmt.Errorf("SQL table is unavailable")
+	}
+	if relationKind != "r" || persistence != "p" {
+		return fmt.Errorf("SQL connector permits only persistent ordinary tables")
+	}
+	if len(columns) == 0 {
+		return fmt.Errorf("SQL table has no readable columns")
+	}
+	if describe {
+		return nil
+	}
+	for _, column := range referencedColumns(request) {
+		builtin, exists := columns[column]
+		if !exists || !builtin {
+			return fmt.Errorf("SQL query column is unavailable or has an unsupported type")
+		}
+	}
+	return nil
+}
+
+func collectRows(ctx context.Context, rows pgx.Rows, maxRows int, maxBytes int64) (QueryResult, error) {
 	defer rows.Close()
 	fields := rows.FieldDescriptions()
 	result := QueryResult{Columns: make([]string, 0, len(fields))}
@@ -168,11 +386,16 @@ func collectRows(rows pgx.Rows, maxRows int, maxBytes int64) (QueryResult, error
 		}
 		values, err := rows.Values()
 		if err != nil {
-			return QueryResult{}, fmt.Errorf("SQL result decode failed")
+			return QueryResult{}, boundedDatabaseError(ctx, "SQL result decode failed", err)
 		}
 		row := make([]string, len(values))
+		nulls := make([]bool, len(values))
 		rowBytes := int64(0)
 		for index, value := range values {
+			if value == nil {
+				nulls[index] = true
+				continue
+			}
 			row[index] = fmt.Sprint(value)
 			rowBytes += int64(len(row[index]))
 		}
@@ -181,11 +404,12 @@ func collectRows(rows pgx.Rows, maxRows int, maxBytes int64) (QueryResult, error
 			break
 		}
 		result.Rows = append(result.Rows, row)
+		result.Nulls = append(result.Nulls, nulls)
 		result.Bytes += rowBytes
 		result.CostUnits += 1 + (rowBytes+1023)/1024
 	}
 	if err := rows.Err(); err != nil {
-		return QueryResult{}, fmt.Errorf("SQL result iteration failed")
+		return QueryResult{}, boundedDatabaseError(ctx, "SQL result iteration failed", err)
 	}
 	return result, nil
 }
@@ -205,7 +429,11 @@ func (f *FixtureDatabase) QueryReadOnly(_ context.Context, request QueryRequest)
 		return QueryResult{}, fmt.Errorf("fixture database is nil")
 	}
 	f.Calls++
-	result, ok := f.QueryResults[connector.HashPayload([]byte(request.Statement))]
+	key, err := QueryIdentityHash(request)
+	if err != nil {
+		return QueryResult{}, err
+	}
+	result, ok := f.QueryResults[key]
 	if !ok {
 		return QueryResult{}, fmt.Errorf("fixture query not found")
 	}
@@ -229,7 +457,11 @@ func (f *FixtureDatabase) ExplainReadOnly(_ context.Context, request QueryReques
 		return QueryResult{}, fmt.Errorf("fixture database is nil")
 	}
 	f.Calls++
-	result, ok := f.ExplainResults[connector.HashPayload([]byte(request.Statement))]
+	key, err := QueryIdentityHash(request)
+	if err != nil {
+		return QueryResult{}, err
+	}
+	result, ok := f.ExplainResults[key]
 	if !ok {
 		return QueryResult{}, fmt.Errorf("fixture explanation not found")
 	}
@@ -251,6 +483,11 @@ func NewConnector(binding Binding, resolver connector.PayloadResolver, database 
 	if resolver == nil || database == nil {
 		return nil, fmt.Errorf("SQL payload resolver and database are required")
 	}
+	boundDatabase, err := bindPGDatabase(database, binding)
+	if err != nil {
+		return nil, err
+	}
+	database = boundDatabase
 	ref := contracts.ConnectorRef{WorkspaceID: binding.WorkspaceID, Name: ConnectorName, Version: ConnectorVersion}
 	if err := ref.Normalize(); err != nil {
 		return nil, err
@@ -264,11 +501,11 @@ func NewConnector(binding Binding, resolver connector.PayloadResolver, database 
 		name, input, output string
 		effect              contracts.EffectClass
 	}{
-		{name: DescribeCapabilityName, input: "sql.describe.input.v1", output: "sql.describe.output.v1", effect: contracts.EffectClassObservation},
-		{name: QueryCapabilityName, input: "sql.query.input.v1", output: "sql.query.output.v1", effect: contracts.EffectClassReadOnly},
-		{name: ExplainCapabilityName, input: "sql.explain.input.v1", output: "sql.explain.output.v1", effect: contracts.EffectClassObservation},
+		{name: DescribeCapabilityName, input: "sql.describe.input.v2", output: "sql.describe.output.v1", effect: contracts.EffectClassObservation},
+		{name: QueryCapabilityName, input: "sql.query.input.v2", output: "sql.query.output.v1", effect: contracts.EffectClassReadOnly},
+		{name: ExplainCapabilityName, input: "sql.explain.input.v2", output: "sql.explain.output.v1", effect: contracts.EffectClassObservation},
 	} {
-		definition := contracts.CapabilityDefinition{WorkspaceID: binding.WorkspaceID, Ref: contracts.CapabilityRef{WorkspaceID: binding.WorkspaceID, Connector: ref, Name: spec.name, Version: "1"}, Description: "bounded read-only SQL capability", InputSchemaVersion: 1, InputSchemaHash: schemaHash(spec.input), OutputSchemaVersion: 1, OutputSchemaHash: schemaHash(spec.output), Effect: spec.effect, Profile: sqlProfile(), Evidence: []contracts.EvidenceRequirement{{WorkspaceID: binding.WorkspaceID, Kind: "sql_result", MinItems: 1, MaxItems: 1, RequireHash: true, RequireProvenance: true}}, ResourceKinds: []string{ResourceKind}, RetryPolicy: contracts.CapabilityRetryPolicy{MaxAttempts: 1, BackoffMS: 1, MaxBackoffMS: 1, Jitter: "none"}, MaxRows: binding.MaxRows, RateLimitPerMinute: 60, RequiredCredentialRefs: credentialRefs, SupportsCancellation: true, SupportsIdempotency: true, SupportsVerification: true, Enabled: true}
+		definition := contracts.CapabilityDefinition{WorkspaceID: binding.WorkspaceID, Ref: contracts.CapabilityRef{WorkspaceID: binding.WorkspaceID, Connector: ref, Name: spec.name, Version: "2"}, Description: "bounded read-only SQL capability", InputSchemaVersion: 2, InputSchemaHash: schemaHash(spec.input), OutputSchemaVersion: 1, OutputSchemaHash: schemaHash(spec.output), Effect: spec.effect, Profile: sqlProfile(), Evidence: []contracts.EvidenceRequirement{{WorkspaceID: binding.WorkspaceID, Kind: "sql_result", MinItems: 1, MaxItems: 1, RequireHash: true, RequireProvenance: true}}, ResourceKinds: []string{ResourceKind}, RetryPolicy: contracts.CapabilityRetryPolicy{MaxAttempts: 1, BackoffMS: 1, MaxBackoffMS: 1, Jitter: "none"}, MaxRows: binding.MaxRows, RateLimitPerMinute: 60, RequiredCredentialRefs: credentialRefs, SupportsCancellation: true, SupportsIdempotency: true, SupportsVerification: true, Enabled: true}
 		if err := definition.Normalize(); err != nil {
 			return nil, fmt.Errorf("SQL capability %s: %w", spec.name, err)
 		}
@@ -299,6 +536,9 @@ func (b *Binding) Normalize() error {
 		parts := strings.Split(table, ".")
 		if len(parts) != 2 || !identifierPattern.MatchString(parts[0]) || !identifierPattern.MatchString(parts[1]) {
 			return fmt.Errorf("SQL table allowlist requires schema.table identifiers")
+		}
+		if !contains(b.AllowedSchemas, parts[0]) {
+			return fmt.Errorf("SQL table allowlist schema is not allowlisted")
 		}
 	}
 	if b.MaxRows == 0 {
@@ -399,44 +639,45 @@ func (c *capability) Execute(ctx context.Context, request contracts.OperationReq
 		return contracts.OperationResult{}, err
 	}
 	payloadBytes, err := c.parent.resolver(ctx, request.WorkspaceID, request.InputHash)
-	if err != nil || !connector.VerifyPayload(payloadBytes, request.InputHash) || len(payloadBytes) > MaxMaxResultBytes {
+	if err != nil || !connector.VerifyPayload(payloadBytes, request.InputHash) || len(payloadBytes) > MaxPayloadBytes {
 		return contracts.OperationResult{}, &connector.FailureError{Code: "invalid_request", Retryable: false, Err: err}
 	}
 	var payload Payload
-	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(payloadBytes))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil {
 		return contracts.OperationResult{}, &connector.FailureError{Code: "invalid_request", Retryable: false, Err: err}
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return contracts.OperationResult{}, &connector.FailureError{Code: "invalid_request", Retryable: false, Err: fmt.Errorf("SQL payload contains trailing data")}
 	}
 	if err := payload.Normalize(c.name); err != nil {
 		return contracts.OperationResult{}, &connector.FailureError{Code: "invalid_request", Retryable: false, Err: err}
 	}
-	if c.name == DescribeCapabilityName {
-		if !c.parent.allowedTable(payload.Schema, payload.Table) {
-			return contracts.OperationResult{}, &connector.FailureError{Code: "unauthorized", Retryable: false}
-		}
+	if !c.parent.allowedTable(payload.Schema, payload.Table) {
+		return contracts.OperationResult{}, &connector.FailureError{Code: "unauthorized", Retryable: false}
 	}
+	resultMaxRows := min(payload.Limit, c.parent.binding.MaxRows)
+	resultMaxBytes := minBytes(payload.MaxBytes, c.parent.binding.MaxResultBytes)
 	var result QueryResult
 	switch c.name {
 	case DescribeCapabilityName:
-		result, err = c.parent.database.Describe(ctx, payload.Schema, payload.Table, min(payload.Limit, c.parent.binding.MaxRows), minBytes(payload.MaxBytes, c.parent.binding.MaxResultBytes), time.Duration(c.parent.binding.TimeoutMS)*time.Millisecond)
+		result, err = c.parent.database.Describe(ctx, payload.Schema, payload.Table, resultMaxRows, resultMaxBytes, time.Duration(c.parent.binding.TimeoutMS)*time.Millisecond)
 	case QueryCapabilityName:
-		if err = validateStatement(payload.Statement, c.parent.binding, payload.Parameters); err == nil {
-			result, err = c.parent.database.QueryReadOnly(ctx, QueryRequest{Statement: payload.Statement, Parameters: payload.Parameters, MaxRows: min(payload.Limit, c.parent.binding.MaxRows), MaxBytes: minBytes(payload.MaxBytes, c.parent.binding.MaxResultBytes), Timeout: time.Duration(c.parent.binding.TimeoutMS) * time.Millisecond})
-		}
+		result, err = c.parent.database.QueryReadOnly(ctx, payload.queryRequest(c.parent.binding))
 	case ExplainCapabilityName:
-		if err = validateStatement(payload.Statement, c.parent.binding, payload.Parameters); err == nil {
-			result, err = c.parent.database.ExplainReadOnly(ctx, QueryRequest{Statement: payload.Statement, Parameters: payload.Parameters, MaxRows: min(payload.Limit, c.parent.binding.MaxRows), MaxBytes: minBytes(payload.MaxBytes, c.parent.binding.MaxResultBytes), Timeout: time.Duration(c.parent.binding.TimeoutMS) * time.Millisecond})
-		}
+		result, err = c.parent.database.ExplainReadOnly(ctx, payload.queryRequest(c.parent.binding))
 	}
 	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return contracts.OperationResult{}, &connector.FailureError{Code: "cancelled", Retryable: false}
+		}
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) || isStatementTimeout(err) {
 			return contracts.OperationResult{}, &connector.FailureError{Code: "timeout", Retryable: false, Err: err}
 		}
 		return contracts.OperationResult{}, &connector.FailureError{Code: "adapter", Retryable: false, Err: err}
 	}
-	if result.Bytes > c.parent.binding.MaxResultBytes {
-		return contracts.OperationResult{}, &connector.FailureError{Code: "budget", Retryable: false}
-	}
-	if len(result.Rows) > c.parent.binding.MaxRows {
+	if err := validateQueryResult(result, resultMaxRows, resultMaxBytes); err != nil {
 		return contracts.OperationResult{}, &connector.FailureError{Code: "budget", Retryable: false}
 	}
 	result.CostUnits = boundedCostUnits(result)
@@ -459,16 +700,8 @@ func (p *Payload) Normalize(kind string) error {
 	if p == nil {
 		return fmt.Errorf("SQL payload is nil")
 	}
-	if p.SchemaVersion == 0 {
-		p.SchemaVersion = 1
-	}
-	if p.SchemaVersion != 1 || len(p.Parameters) > MaxParameters {
-		return fmt.Errorf("SQL payload schema or parameter budget is invalid")
-	}
-	for _, parameter := range p.Parameters {
-		if len(parameter) > MaxParameterBytes || strings.ContainsRune(parameter, '\x00') {
-			return fmt.Errorf("SQL parameter is too large or invalid")
-		}
+	if p.SchemaVersion != 2 {
+		return fmt.Errorf("SQL payload schema version is unsupported")
 	}
 	if p.Limit == 0 {
 		p.Limit = DefaultMaxRows
@@ -476,54 +709,28 @@ func (p *Payload) Normalize(kind string) error {
 	if p.Limit < 1 || p.Limit > MaxMaxRows || p.MaxBytes < 0 || p.MaxBytes > MaxMaxResultBytes {
 		return fmt.Errorf("SQL result budget is invalid")
 	}
+	if p.MaxBytes == 0 {
+		p.MaxBytes = DefaultMaxResultBytes
+	}
+	if !identifierPattern.MatchString(strings.ToLower(p.Schema)) || !identifierPattern.MatchString(strings.ToLower(p.Table)) {
+		return fmt.Errorf("SQL relation identity is invalid")
+	}
+	p.Schema, p.Table = strings.ToLower(p.Schema), strings.ToLower(p.Table)
 	if kind == DescribeCapabilityName {
-		if !identifierPattern.MatchString(strings.ToLower(p.Schema)) || !identifierPattern.MatchString(strings.ToLower(p.Table)) {
-			return fmt.Errorf("SQL describe identity is invalid")
+		if len(p.Columns) != 0 || len(p.Filters) != 0 || len(p.OrderBy) != 0 {
+			return fmt.Errorf("SQL describe request cannot include query terms")
 		}
-		p.Schema, p.Table = strings.ToLower(p.Schema), strings.ToLower(p.Table)
 		return nil
 	}
-	if err := validateStatementShape(p.Statement); err != nil {
+	if kind != QueryCapabilityName && kind != ExplainCapabilityName {
+		return fmt.Errorf("SQL capability is unknown")
+	}
+	query := p.queryRequest(Binding{MaxRows: MaxMaxRows, MaxResultBytes: MaxMaxResultBytes, TimeoutMS: int64(MaxTimeout / time.Millisecond)})
+	if err := query.Normalize(); err != nil {
 		return err
 	}
-	return nil
-}
-
-func validateStatement(statement string, binding Binding, parameters []string) error {
-	if err := validateStatementShape(statement); err != nil {
-		return err
-	}
-	references := tableReferencePattern.FindAllStringSubmatch(strings.ToLower(statement), -1)
-	for _, reference := range references {
-		parts := strings.Split(reference[2], ".")
-		if len(parts) != 2 || !contains(binding.AllowedSchemas, parts[0]) || !contains(binding.AllowedTables, reference[2]) {
-			return fmt.Errorf("SQL table is not allowlisted")
-		}
-	}
-	if len(tableKeywordPattern.FindAllString(statement, -1)) != len(references) {
-		return fmt.Errorf("SQL table references must be explicit schema.table identities")
-	}
-	for _, match := range parameterPattern.FindAllStringSubmatch(statement, -1) {
-		index, err := strconv.Atoi(match[1])
-		if err != nil || index == 0 || index > len(parameters) {
-			return fmt.Errorf("SQL parameter placeholder is not bound")
-		}
-	}
-	return nil
-}
-
-func validateStatementShape(statement string) error {
-	trimmed := strings.TrimSpace(statement)
-	if trimmed == "" || len(trimmed) > MaxStatementBytes || strings.ContainsRune(trimmed, '\x00') || strings.Contains(trimmed, ";") || strings.Contains(trimmed, "--") || strings.Contains(trimmed, "/*") || strings.Contains(trimmed, "*/") {
-		return ErrUnsafeStatement
-	}
-	fields := strings.Fields(trimmed)
-	if len(fields) == 0 || (strings.ToLower(fields[0]) != "select" && strings.ToLower(fields[0]) != "with") {
-		return ErrUnsafeStatement
-	}
-	if unsafeKeywordPattern.MatchString(trimmed) {
-		return ErrUnsafeStatement
-	}
+	p.Schema, p.Table = query.Schema, query.Table
+	p.Columns, p.Filters, p.OrderBy = query.Columns, query.Filters, query.OrderBy
 	return nil
 }
 
@@ -533,15 +740,41 @@ func resultSummary(result QueryResult, inputHash string) map[string]any {
 	return map[string]any{"input_hash": inputHash, "columns": columns, "columns_hash": connector.HashPayload([]byte(strings.Join(columns, "\x00"))), "rows": len(result.Rows), "bytes": result.Bytes, "cost_units": boundedCostUnits(result), "truncated": result.Truncated, "result_hash": connector.HashPayload(canonical)}
 }
 
+func validateQueryResult(result QueryResult, maxRows int, maxBytes int64) error {
+	if result.Bytes < 0 || result.CostUnits < 0 || result.Bytes > maxBytes || len(result.Rows) > maxRows || len(result.Columns) == 0 || len(result.Columns) > MaxQueryColumns {
+		return fmt.Errorf("SQL result exceeds its declared bounds")
+	}
+	var measuredBytes int64
+	if len(result.Nulls) != 0 && len(result.Nulls) != len(result.Rows) {
+		return fmt.Errorf("SQL result null metadata shape is invalid")
+	}
+	for rowIndex, row := range result.Rows {
+		if len(row) != len(result.Columns) {
+			return fmt.Errorf("SQL result row shape is invalid")
+		}
+		if len(result.Nulls) != 0 && len(result.Nulls[rowIndex]) != len(row) {
+			return fmt.Errorf("SQL result null metadata shape is invalid")
+		}
+		for _, value := range row {
+			measuredBytes += int64(len(value))
+		}
+	}
+	if measuredBytes != result.Bytes || measuredBytes > maxBytes {
+		return fmt.Errorf("SQL result byte accounting is invalid")
+	}
+	return nil
+}
+
 // boundedCostUnits is a conservative deterministic budget proxy for adapters
 // whose database driver does not expose a portable planner cost. It is not
 // presented as a provider billing amount: each returned row costs one unit
 // plus one unit per started KiB of encoded values, with a one-unit query base.
 func boundedCostUnits(result QueryResult) int64 {
-	if result.CostUnits > 0 {
+	calculated := int64(len(result.Rows)) + (result.Bytes+1023)/1024 + 1
+	if result.CostUnits > calculated {
 		return result.CostUnits
 	}
-	return int64(len(result.Rows)) + (result.Bytes+1023)/1024 + 1
+	return calculated
 }
 
 func cloneResult(result QueryResult) QueryResult {
@@ -600,7 +833,7 @@ func minBytes(a, b int64) int64 {
 func schemaHash(value string) string { return connector.HashPayload([]byte(value)) }
 func sqlProfile() contracts.ExecutionProfile {
 	profile := contracts.DefaultExecutionProfile()
-	profile.MaxInputBytes = MaxStatementBytes
+	profile.MaxInputBytes = MaxPayloadBytes
 	profile.MaxOutputBytes = DefaultMaxResultBytes
 	profile.MaxRetries = 0
 	return profile

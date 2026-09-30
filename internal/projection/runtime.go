@@ -170,7 +170,7 @@ func (r *Runner) runBatchWithLease(ctx context.Context, lease contracts.Consumer
 		WorkspaceID: workspaceID,
 		LeaseFence:  lease.Fence,
 	}
-	tx, err := r.events.Begin(ctx)
+	tx, err := r.events.BeginWorkspace(ctx, workspaceID)
 	if err != nil {
 		return result, fmt.Errorf("begin projection batch: %w", err)
 	}
@@ -260,7 +260,7 @@ func (r *Runner) Rebuild(ctx context.Context, workspaceID string) (RebuildResult
 	}
 	lease := acquired.Lease
 	started := time.Now()
-	resetTx, err := r.events.Begin(ctx)
+	resetTx, err := r.events.BeginWorkspace(ctx, workspaceID)
 	if err != nil {
 		return RebuildResult{}, fmt.Errorf("begin projection rebuild: %w", err)
 	}

@@ -125,9 +125,11 @@ silently bypass Fornix identity, policy, fencing, evidence, or receipt rules.
 | Universal operation fairness and resource coordination | Implemented qualification foundation | Explicit-workspace round-robin supervision, bounded workspace active-lease quota, declared resource serialization, monotonic resource fences, and cancellation; no autoscaling or weighted global scheduler |
 | Universal policy, approvals, and external effects | Implemented alpha foundation: Issue [#46](https://github.com/Kshitij-M/fornix/issues/46) | Postgres-backed deterministic admission, exact approvals, quota gates, and fenced at-least-once effect recovery; connector qualification remains |
 | Bounded HTTP/API connector | Alpha reference adapter: Issue [#43](https://github.com/Kshitij-M/fornix/issues/43) | Read/list/idempotent-submit capabilities with configured egress, response, pagination, retry, credential-reference, and effect bounds |
-| Read-only SQL connector | Alpha reference adapter: Issue [#43](https://github.com/Kshitij-M/fornix/issues/43) | Describe/query/explain capabilities with prepared statements, read-only transactions, schema/table allowlists, row/byte/cost bounds, and write rejection |
+| Read-only SQL connector | Alpha reference adapter: Issue [#43](https://github.com/Kshitij-M/fornix/issues/43) | v2 structured describe/query/explain; no caller SQL, exact table/column checks, generated `FROM ONLY`, read-only transactions, and bounded result/cost disclosure |
 | Durable multi-step workflow runtime | Alpha foundation: Issue [#44](https://github.com/Kshitij-M/fornix/issues/44) | Typed model, tool, connector, approval, human, validation, callback, and compensation steps; qualification remains |
+| Generic workflow service/API/CLI | Implemented bounded foundation: Tasks 95–96 | Explicit workspace-scoped leases, fenced advance/resume/cancel/verify, deterministic replay, operation-backed receipt finalization, connector-backed read/observation execution, and registered hash-only external verification; live provider reconciliation remains qualification work |
 | Multi-domain incident reference workflow | Alpha reference workflow: Issue [#42](https://github.com/Kshitij-M/fornix/issues/42) | Fake-first incident investigation, approval, remediation-record, verification, receipt, and inert replay path; live qualification remains |
+| Data-pipeline and customer-support reference adapters | Implemented offline qualification adapters: Tasks 95–96 | Distinct capability schemas, approval-gated effect descriptions, and deterministic mismatch/uncertain/verified proof outcomes; no live provider or external-system execution |
 | Universal production qualification | Roadmap: Issue [#40](https://github.com/Kshitij-M/fornix/issues/40) | Isolation, trust, egress, quotas, recovery, backup/restore, load, and support evidence |
 
 This matrix is a product-status statement, not a promise that planned
@@ -166,6 +168,9 @@ Its implementation sequence is:
 6. [#44 — Durable multi-step workflow runtime](https://github.com/Kshitij-M/fornix/issues/44).
 7. [#42 — Multi-domain incident investigation and controlled remediation](https://github.com/Kshitij-M/fornix/issues/42) (fake-first reference workflow implemented; live connector qualification remains).
 8. [#40 — Universal execution-plane production qualification](https://github.com/Kshitij-M/fornix/issues/40).
+9. Task 95 — Generic workflow service, explicit lease API, reference adapters,
+   and operator surface (bounded foundation implemented; effect dispatch and
+   live adapter qualification remain).
 
 Issues [#23–#30](https://github.com/Kshitij-M/fornix/issues?q=is%3Aissue+is%3Aopen)
 remain supporting production work. They should be closed or re-scoped as the

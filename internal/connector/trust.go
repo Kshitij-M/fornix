@@ -1,13 +1,17 @@
 package connector
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/omaveda/fornix/internal/contracts"
 )
@@ -15,6 +19,9 @@ import (
 var (
 	ErrTrustPolicyMissing  = errors.New("connector trust policy is missing")
 	ErrCapabilityUntrusted = errors.New("connector capability is not trusted")
+	ErrTrustSignature      = errors.New("connector trust signature is invalid")
+	ErrTrustExpired        = errors.New("connector trust policy is expired")
+	ErrTrustDowngrade      = errors.New("connector trust policy revision is not monotonic")
 )
 
 // TrustEntry pins one exact connector version and capability definition hash.
@@ -26,14 +33,19 @@ type TrustEntry struct {
 }
 
 // TrustPolicy is an immutable, workspace-scoped allowlist for executable
-// capability definitions. It is intentionally a process configuration seam
-// in this slice; a future signed catalog may produce the same normalized
-// policy, but registration never expands it implicitly.
+// capability definitions. Development may install an unsigned process
+// snapshot; production composition can require the detached Ed25519 fields
+// and monotonic revision checks below.
 type TrustPolicy struct {
-	WorkspaceID string       `json:"workspace_id"`
-	Revision    string       `json:"revision"`
-	Entries     []TrustEntry `json:"entries"`
-	PolicyHash  string       `json:"policy_hash"`
+	WorkspaceID     string       `json:"workspace_id"`
+	Revision        string       `json:"revision"`
+	Entries         []TrustEntry `json:"entries"`
+	PolicyHash      string       `json:"policy_hash"`
+	SignatureScheme string       `json:"signature_scheme,omitempty"`
+	SignerID        string       `json:"signer_id,omitempty"`
+	Signature       string       `json:"signature,omitempty"`
+	IssuedAt        time.Time    `json:"issued_at,omitempty"`
+	ExpiresAt       time.Time    `json:"expires_at,omitempty"`
 }
 
 // NewTrustPolicy snapshots the supplied normalized definitions in stable
@@ -112,6 +124,68 @@ func (p TrustPolicy) Authorize(definition contracts.CapabilityDefinition) error 
 		}
 	}
 	return ErrCapabilityUntrusted
+}
+
+// Sign creates a detached Ed25519 signature over the normalized policy hash.
+// The private key is consumed only at composition time and is never part of
+// the policy or registry state.
+func (p *TrustPolicy) Sign(signerID string, privateKey ed25519.PrivateKey, issuedAt, expiresAt time.Time) error {
+	if p == nil || len(privateKey) != ed25519.PrivateKeySize || strings.TrimSpace(signerID) == "" {
+		return ErrTrustSignature
+	}
+	if issuedAt.IsZero() || expiresAt.IsZero() || !expiresAt.After(issuedAt) {
+		return fmt.Errorf("trust policy signature window is invalid")
+	}
+	if p.PolicyHash != trustPolicyHash(*p) {
+		return fmt.Errorf("trust policy hash does not match normalized entries")
+	}
+	p.SignatureScheme = "ed25519"
+	p.SignerID = strings.TrimSpace(signerID)
+	p.IssuedAt = issuedAt.UTC()
+	p.ExpiresAt = expiresAt.UTC()
+	signature := ed25519.Sign(privateKey, trustSigningBytes(*p))
+	p.Signature = base64.RawURLEncoding.EncodeToString(signature)
+	return nil
+}
+
+// Verify checks signer identity, detached signature, validity window, and the
+// policy hash. It is intentionally independent of connector registration so a
+// caller can verify a catalog before installing or admitting it.
+func (p TrustPolicy) Verify(publicKeys map[string]ed25519.PublicKey, now time.Time) error {
+	if p.SignatureScheme != "ed25519" || strings.TrimSpace(p.SignerID) == "" || strings.TrimSpace(p.Signature) == "" {
+		return ErrTrustSignature
+	}
+	if p.PolicyHash == "" || p.PolicyHash != trustPolicyHash(p) {
+		return ErrTrustSignature
+	}
+	if p.IssuedAt.IsZero() || p.ExpiresAt.IsZero() || !p.ExpiresAt.After(p.IssuedAt) {
+		return ErrTrustSignature
+	}
+	now = now.UTC()
+	if now.Before(p.IssuedAt) || !now.Before(p.ExpiresAt) {
+		return ErrTrustExpired
+	}
+	key, ok := publicKeys[p.SignerID]
+	if !ok || len(key) != ed25519.PublicKeySize {
+		return ErrTrustSignature
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(p.Signature)
+	if err != nil || !ed25519.Verify(key, trustSigningBytes(p), signature) {
+		return ErrTrustSignature
+	}
+	return nil
+}
+
+func trustSigningBytes(policy TrustPolicy) []byte {
+	return []byte("fornix-trust-v1\x00" + policy.PolicyHash + "\x00" + policy.WorkspaceID + "\x00" + policy.Revision + "\x00" + policy.IssuedAt.UTC().Format(time.RFC3339Nano) + "\x00" + policy.ExpiresAt.UTC().Format(time.RFC3339Nano) + "\x00" + policy.SignerID)
+}
+
+func trustRevisionNumber(value string) (uint64, error) {
+	n, err := strconv.ParseUint(strings.TrimSpace(value), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("signed trust revision must be an unsigned integer")
+	}
+	return n, nil
 }
 
 // StableHash is the normalized trust snapshot identity.

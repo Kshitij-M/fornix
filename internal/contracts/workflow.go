@@ -256,6 +256,14 @@ func (r *WorkflowStepResult) Normalize(workspaceID string) error {
 	if err := r.Wait.Normalize(workspaceID); err != nil {
 		return err
 	}
+	if r.Wait != nil {
+		if r.Status == WorkflowStepAwaitingRetry && r.Wait.Kind != WorkflowWaitRetry {
+			return fmt.Errorf("awaiting_retry result requires a retry wait")
+		}
+		if r.Status != WorkflowStepAwaitingRetry && r.Wait.Kind == WorkflowWaitRetry {
+			return fmt.Errorf("retry wait requires awaiting_retry result")
+		}
+	}
 	if err := r.Failure.Normalize(); err != nil {
 		return err
 	}

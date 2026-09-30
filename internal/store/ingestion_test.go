@@ -156,6 +156,92 @@ func TestIngestStoreDuplicateResumeAndCrashRecovery(t *testing.T) {
 	}
 }
 
+func TestIngestStoreEmbeddingAttachmentCommitsWithChunkBatch(t *testing.T) {
+	store, pool, workspace, root := newIngestTestStore(t)
+	if err := os.WriteFile(filepath.Join(root, "embedded.txt"), []byte("bounded durable embedding attachment\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	embeddingCalls := NewEmbeddingCallStore(pool)
+	store.SetEmbeddingCallStore(embeddingCalls)
+	store.SetEmbedder(func(ctx context.Context, request contracts.EmbeddingRequest) ([]float32, error) {
+		request.Provider = contracts.ProviderRef{Provider: "fake", Model: "fake-model"}
+		request.Model = "fake-model"
+		start, err := embeddingCalls.Start(ctx, request, nil)
+		if err != nil {
+			return nil, err
+		}
+		if start.Existing {
+			return start.Record.Vector, nil
+		}
+		if err := embeddingCalls.Attempt(ctx, request.WorkspaceID, request.RequestID); err != nil {
+			return nil, err
+		}
+		vector := make([]float32, contracts.EmbeddingDimension)
+		for index := range vector {
+			vector[index] = float32(index%11) / 11
+		}
+		if err := embeddingCalls.Finish(ctx, contracts.EmbeddingCallResult{
+			WorkspaceID: request.WorkspaceID, RequestID: request.RequestID,
+			Status: contracts.EmbeddingCallSucceeded, AttemptCount: 1, Vector: vector,
+			Usage: contracts.EmbeddingUsage{InputBytes: int64(len(request.Text)), Dimension: len(vector), Source: "measured", Measured: true},
+		}); err != nil {
+			return nil, err
+		}
+		return vector, nil
+	})
+	source := contracts.RepositorySource{
+		Repository: "embedding-attachment", SourceRoot: root, MountRoot: root,
+		ChunkBytes: 128, Embedding: contracts.EmbeddingPolicy{Enabled: true, MaxChunks: 4, MaxBytes: 2048, RequireProvider: true},
+	}
+	discovery, err := ingest.Discover(context.Background(), source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	actor := contracts.ActorRef{ID: "embedding-test", Kind: "test", WorkspaceID: workspace}
+	job, created, err := store.Submit(context.Background(), contracts.IngestJobRequest{
+		WorkspaceID: workspace, IdempotencyKey: "embedding-attachment-job", Actor: actor, Source: source, BatchSize: 1,
+	}, discovery)
+	if err != nil || !created {
+		t.Fatalf("submit created=%t err=%v", created, err)
+	}
+	checkpointBefore := job.Checkpoint
+	store.SetFailureHook(func() error { return errors.New("injected attachment batch crash") })
+	if _, err := store.ProcessBatch(context.Background(), contracts.IngestBatchRequest{WorkspaceID: workspace, JobID: job.ID, BatchSize: 1, Actor: actor}); err == nil {
+		t.Fatal("expected injected batch crash")
+	}
+	store.SetFailureHook(nil)
+	afterCrash, _, err := store.Get(context.Background(), workspace, job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterCrash.Checkpoint.NextOrdinal != checkpointBefore.NextOrdinal {
+		t.Fatalf("crash advanced checkpoint from %d to %d", checkpointBefore.NextOrdinal, afterCrash.Checkpoint.NextOrdinal)
+	}
+	var chunksAfterCrash, attachmentsAfterCrash int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM fornix.chunks WHERE workspace_id=$1`, workspace).Scan(&chunksAfterCrash); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM fornix.embedding_target_attachments WHERE workspace_id=$1`, workspace).Scan(&attachmentsAfterCrash); err != nil {
+		t.Fatal(err)
+	}
+	if chunksAfterCrash != 0 || attachmentsAfterCrash != 0 {
+		t.Fatalf("crash left target state chunks=%d attachments=%d", chunksAfterCrash, attachmentsAfterCrash)
+	}
+	if _, err := store.ProcessBatch(context.Background(), contracts.IngestBatchRequest{WorkspaceID: workspace, JobID: job.ID, BatchSize: 1, Actor: actor}); err != nil {
+		t.Fatal(err)
+	}
+	var attachments, embeddedChunks int
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM fornix.embedding_target_attachments WHERE workspace_id=$1`, workspace).Scan(&attachments); err != nil {
+		t.Fatal(err)
+	}
+	if err := pool.QueryRow(context.Background(), `SELECT count(*) FROM fornix.chunks WHERE workspace_id=$1 AND embedding IS NOT NULL`, workspace).Scan(&embeddedChunks); err != nil {
+		t.Fatal(err)
+	}
+	if attachments != embeddedChunks || attachments == 0 {
+		t.Fatalf("attachment count=%d embedded chunks=%d", attachments, embeddedChunks)
+	}
+}
+
 func TestIngestStoreDeduplicatesIdenticalChunkContentAcrossFiles(t *testing.T) {
 	store, pool, workspace, root := newIngestTestStore(t)
 	content := []byte("same repository content\n")

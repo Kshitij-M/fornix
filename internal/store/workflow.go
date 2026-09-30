@@ -36,6 +36,7 @@ var (
 	ErrWorkflowStepAlreadyStarted = errors.New("workflow step is already started")
 	ErrWorkflowReplay             = errors.New("workflow replay integrity failure")
 	ErrWorkflowBudget             = errors.New("workflow budget exceeded")
+	ErrWorkflowRetryNotDue        = errors.New("workflow retry deadline has not elapsed")
 )
 
 // WorkflowStore owns the durable workflow projection. OperationStore remains
@@ -150,7 +151,7 @@ func (s *WorkflowStore) Create(ctx context.Context, input WorkflowCreateInput) (
 	if err := input.Budget.Normalize(); err != nil {
 		return WorkflowCreateResult{}, fmt.Errorf("normalize workflow budget: %w", err)
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, input.Operation.Request.WorkspaceID)
 	if err != nil {
 		return WorkflowCreateResult{}, fmt.Errorf("begin workflow create: %w", err)
 	}
@@ -283,7 +284,7 @@ func (s *WorkflowStore) StartStep(ctx context.Context, input WorkflowStepStartIn
 	if input.RequestID == "" {
 		input.RequestID = contracts.NewID("workflow-start")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, input.WorkspaceID)
 	if err != nil {
 		return WorkflowStepStartResult{}, err
 	}
@@ -321,6 +322,18 @@ func (s *WorkflowStore) StartStep(ctx context.Context, input WorkflowStepStartIn
 	if err != nil {
 		return WorkflowStepStartResult{}, err
 	}
+	if step.Status == contracts.WorkflowStepAwaitingRetry && step.NextRetryAt != nil {
+		// Queue selection is not the final boundary: callers can acquire a
+		// workflow lease directly, so recheck the durable deadline with the
+		// same database clock before reserving this attempt.
+		var due bool
+		if err := tx.QueryRow(ctx, `SELECT $1::timestamptz <= clock_timestamp()`, *step.NextRetryAt).Scan(&due); err != nil {
+			return WorkflowStepStartResult{}, fmt.Errorf("check workflow retry deadline: %w", err)
+		}
+		if !due {
+			return WorkflowStepStartResult{}, ErrWorkflowRetryNotDue
+		}
+	}
 	if contracts.IsTerminalOperationStatus(operation.Status) || run.Status == contracts.WorkflowStatusCancelled || run.Status == contracts.WorkflowStatusSucceeded || run.Status == contracts.WorkflowStatusFailed || run.Status == contracts.WorkflowStatusDeadLetter {
 		return WorkflowStepStartResult{}, ErrWorkflowTerminal
 	}
@@ -354,7 +367,7 @@ func (s *WorkflowStore) StartStep(ctx context.Context, input WorkflowStepStartIn
 	if err := s.finalizeWorkflowTransition(ctx, tx, operation, run, next, input.StepID, step.Status, nextStep.Status, input.OwnerID, input.Fence, input.TaskOwnerID, input.TaskFence, input.Actor, input.RequestID, input.IdempotencyKey, input.CausationID, input.CorrelationID, commandHash, nil); err != nil {
 		return WorkflowStepStartResult{}, err
 	}
-	if _, err := s.advanceOperationForWorkflow(ctx, tx, operation, workflowOperationStatus(next.Status), next.StateHash, input, "start", nil); err != nil {
+	if _, err := s.advanceOperationForWorkflow(ctx, tx, operation, workflowOperationStatus(next.Status), next.StateHash, input, "start", nil, nil); err != nil {
 		return WorkflowStepStartResult{}, err
 	}
 	if err := s.fail("workflow_step_started"); err != nil {
@@ -383,7 +396,7 @@ func (s *WorkflowStore) CompleteStep(ctx context.Context, input WorkflowStepComp
 	if input.RequestID == "" {
 		input.RequestID = contracts.NewID("workflow-complete")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, input.WorkspaceID)
 	if err != nil {
 		return WorkflowStepCompleteResult{}, err
 	}
@@ -424,12 +437,13 @@ func (s *WorkflowStore) CompleteStep(ctx context.Context, input WorkflowStepComp
 	if duplicate {
 		return workflowCompleteDuplicate(run, input.StepID)
 	}
-	resumable := step.Status == contracts.WorkflowStepAwaitingApproval || step.Status == contracts.WorkflowStepAwaitingHuman || step.Status == contracts.WorkflowStepAwaitingCallback || step.Status == contracts.WorkflowStepAwaitingRetry || step.Status == contracts.WorkflowStepAwaitingExternal
+	resumable := step.Status == contracts.WorkflowStepAwaitingApproval || step.Status == contracts.WorkflowStepAwaitingHuman || step.Status == contracts.WorkflowStepAwaitingCallback || step.Status == contracts.WorkflowStepAwaitingRetry || step.Status == contracts.WorkflowStepAwaitingExternal || step.Status == contracts.WorkflowStepRecoveryRequired
 	if (step.Status != contracts.WorkflowStepRunning && !resumable) || step.Attempt != input.Attempt {
 		return WorkflowStepCompleteResult{}, ErrWorkflowTransition
 	}
 	if result.Status == contracts.WorkflowStepAwaitingRetry && step.Attempt >= run.Budget.MaxRetries+1 {
 		result.Status = contracts.WorkflowStepFailed
+		result.Wait = nil
 		result.Failure = &contracts.WorkflowFailure{Code: "retry_budget_exhausted", Retryable: false, Attempt: step.Attempt}
 	}
 	next := cloneWorkflowRun(run)
@@ -455,6 +469,9 @@ func (s *WorkflowStore) CompleteStep(ctx context.Context, input WorkflowStepComp
 	next.Status = workflowStatusAfterStep(next, result.Status)
 	next.Wait = result.Wait
 	next.Failure = result.Failure
+	if waitStatus(next.Status) {
+		next.Wait, next.Failure = workflowWaitDetailsForStatus(next, next.Status)
+	}
 	if next.Status == contracts.WorkflowStatusSucceeded {
 		next.TerminalReason = "all_steps_succeeded"
 	} else if result.Failure != nil {
@@ -466,7 +483,11 @@ func (s *WorkflowStore) CompleteStep(ctx context.Context, input WorkflowStepComp
 	if err := s.finalizeWorkflowTransition(ctx, tx, operation, run, next, input.StepID, step.Status, nextStep.Status, input.OwnerID, input.Fence, input.TaskOwnerID, input.TaskFence, input.Actor, input.RequestID, input.IdempotencyKey, input.CausationID, input.CorrelationID, commandHash, result.Failure); err != nil {
 		return WorkflowStepCompleteResult{}, err
 	}
-	if _, err := s.advanceOperationForWorkflow(ctx, tx, operation, workflowOperationStatus(next.Status), next.StateHash, input, "complete", result.Failure); err != nil {
+	var retryDeadline *time.Time
+	if next.Status == contracts.WorkflowStatusAwaitingRetry {
+		retryDeadline = workflowRetryDeadline(next)
+	}
+	if _, err := s.advanceOperationForWorkflow(ctx, tx, operation, workflowOperationStatus(next.Status), next.StateHash, input, "complete", retryDeadline, result.Failure); err != nil {
 		return WorkflowStepCompleteResult{}, err
 	}
 	if err := s.fail("workflow_step_completed"); err != nil {
@@ -482,7 +503,7 @@ func (s *WorkflowStore) Cancel(ctx context.Context, workspaceID, runID, ownerID 
 	if err := normalizeWorkflowCommand(workspaceID, runID, runID, ownerID, fence, idempotencyKey); err != nil {
 		return contracts.WorkflowRun{}, err
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, workspaceID)
 	if err != nil {
 		return contracts.WorkflowRun{}, err
 	}
@@ -530,7 +551,7 @@ func (s *WorkflowStore) Cancel(ctx context.Context, workspaceID, runID, ownerID 
 	if err := s.finalizeWorkflowTransition(ctx, tx, operation, run, next, "", "", contracts.WorkflowStepCancelled, ownerID, fence, taskOwnerID, taskFence, actor, contracts.NewID("workflow-cancel"), idempotencyKey, "", "", commandHash, &contracts.WorkflowFailure{Code: "cancelled", Message: "workflow cancelled"}); err != nil {
 		return contracts.WorkflowRun{}, err
 	}
-	if _, err := s.advanceOperationForWorkflow(ctx, tx, operation, contracts.OperationStatusCancelled, next.StateHash, WorkflowStepStartInput{WorkspaceID: workspaceID, RunID: runID, OwnerID: ownerID, Fence: fence, TaskOwnerID: taskOwnerID, TaskFence: taskFence, Actor: actor, RequestID: contracts.NewID("workflow-cancel-request"), IdempotencyKey: idempotencyKey}, "cancel", &contracts.WorkflowFailure{Code: "cancelled", Message: "workflow cancelled"}); err != nil {
+	if _, err := s.advanceOperationForWorkflow(ctx, tx, operation, contracts.OperationStatusCancelled, next.StateHash, WorkflowStepStartInput{WorkspaceID: workspaceID, RunID: runID, OwnerID: ownerID, Fence: fence, TaskOwnerID: taskOwnerID, TaskFence: taskFence, Actor: actor, RequestID: contracts.NewID("workflow-cancel-request"), IdempotencyKey: idempotencyKey}, "cancel", nil, &contracts.WorkflowFailure{Code: "cancelled", Message: "workflow cancelled"}); err != nil {
 		return contracts.WorkflowRun{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -574,7 +595,7 @@ func (s *WorkflowStore) RetryRecovery(ctx context.Context, input WorkflowStepSta
 	if input.RequestID == "" {
 		input.RequestID = contracts.NewID("workflow-recovery")
 	}
-	tx, err := s.pool.Begin(ctx)
+	tx, err := beginWorkspaceTx(ctx, s.pool, input.WorkspaceID)
 	if err != nil {
 		return contracts.WorkflowRun{}, err
 	}
@@ -640,7 +661,7 @@ func (s *WorkflowStore) RetryRecovery(ctx context.Context, input WorkflowStepSta
 	if err := s.finalizeWorkflowTransition(ctx, tx, operation, run, next, input.StepID, step.Status, nextStep.Status, input.OwnerID, input.Fence, input.TaskOwnerID, input.TaskFence, input.Actor, input.RequestID, input.IdempotencyKey, input.CausationID, input.CorrelationID, commandHash, nil); err != nil {
 		return contracts.WorkflowRun{}, err
 	}
-	if _, err := s.advanceOperationForWorkflow(ctx, tx, operation, contracts.OperationStatusRunning, next.StateHash, input, "recovery_retry", nil); err != nil {
+	if _, err := s.advanceOperationForWorkflow(ctx, tx, operation, contracts.OperationStatusRunning, next.StateHash, input, "recovery_retry", nil, nil); err != nil {
 		return contracts.WorkflowRun{}, err
 	}
 	if err := s.fail("workflow_recovery_retried"); err != nil {
@@ -674,50 +695,48 @@ func (s *WorkflowStore) Replay(ctx context.Context, workspaceID, runID string, f
 	initial.StateHash = initial.StableHash()
 	previousHash := initial.StateHash
 	previousVersion := int64(0)
-	rows, err := s.pool.Query(ctx, `SELECT version,step_id,from_run_status,to_run_status,from_step_status,to_step_status,command_hash,previous_state_hash,state_hash,state,event_sequence FROM fornix.workflow_transitions WHERE workspace_id=$1 AND run_id=$2 ORDER BY version ASC LIMIT $3`, workspaceID, runID, limit)
-	if err != nil {
-		return WorkflowReplayResult{}, err
-	}
-	defer rows.Close()
 	transitions := make([]string, 0)
 	count := 0
 	checkpointSeen := fromVersion == 0
 	current := initial
-	for rows.Next() {
-		var version int64
-		var stepID, fromStatus, toStatus, fromStepStatus, toStepStatus, commandHash, storedPrevious, stateHash string
-		var stateJSON []byte
-		var eventSequence *int64
-		if err := rows.Scan(&version, &stepID, &fromStatus, &toStatus, &fromStepStatus, &toStepStatus, &commandHash, &storedPrevious, &stateHash, &stateJSON, &eventSequence); err != nil {
-			return WorkflowReplayResult{}, err
+	err = workspaceQueryRows(ctx, s.pool, workspaceID, `SELECT version,step_id,from_run_status,to_run_status,from_step_status,to_step_status,command_hash,previous_state_hash,state_hash,state,event_sequence FROM fornix.workflow_transitions WHERE workspace_id=$1 AND run_id=$2 ORDER BY version ASC LIMIT $3`, []any{workspaceID, runID, limit}, func(rows pgx.Rows) error {
+		for rows.Next() {
+			var version int64
+			var stepID, fromStatus, toStatus, fromStepStatus, toStepStatus, commandHash, storedPrevious, stateHash string
+			var stateJSON []byte
+			var eventSequence *int64
+			if err := rows.Scan(&version, &stepID, &fromStatus, &toStatus, &fromStepStatus, &toStepStatus, &commandHash, &storedPrevious, &stateHash, &stateJSON, &eventSequence); err != nil {
+				return err
+			}
+			if version != previousVersion+1 || storedPrevious != previousHash || eventSequence == nil || fromStatus != current.Status {
+				return fmt.Errorf("%w: broken chain at version %d", ErrWorkflowReplay, version)
+			}
+			var checkpoint contracts.WorkflowCheckpoint
+			if err := json.Unmarshal(stateJSON, &checkpoint); err != nil || checkpoint.Version != version || checkpoint.PreviousHash != storedPrevious || checkpoint.StateHash != stateHash {
+				return ErrWorkflowReplay
+			}
+			current.Status, current.Steps = checkpoint.Status, checkpoint.StepStates
+			current.Wait, current.Failure, current.TerminalReason = checkpoint.Wait, checkpoint.Failure, checkpoint.TerminalReason
+			current.OutputBytes, current.Tokens, current.CostMicros = checkpoint.OutputBytes, checkpoint.Tokens, checkpoint.CostMicros
+			current.StateVersion, current.StateHash = version, stateHash
+			if current.StableHash() != stateHash || toStatus != current.Status {
+				return ErrWorkflowReplay
+			}
+			previousVersion, previousHash = version, stateHash
+			if version == fromVersion {
+				checkpointSeen = true
+			}
+			if version > fromVersion {
+				count++
+				transitions = append(transitions, fmt.Sprintf("%d:%s:%s", version, commandHash, stateHash))
+			}
+			_ = stepID
+			_ = fromStepStatus
+			_ = toStepStatus
 		}
-		if version != previousVersion+1 || storedPrevious != previousHash || eventSequence == nil || fromStatus != current.Status {
-			return WorkflowReplayResult{}, fmt.Errorf("%w: broken chain at version %d", ErrWorkflowReplay, version)
-		}
-		var checkpoint contracts.WorkflowCheckpoint
-		if err := json.Unmarshal(stateJSON, &checkpoint); err != nil || checkpoint.Version != version || checkpoint.PreviousHash != storedPrevious || checkpoint.StateHash != stateHash {
-			return WorkflowReplayResult{}, ErrWorkflowReplay
-		}
-		current.Status, current.Steps = checkpoint.Status, checkpoint.StepStates
-		current.Wait, current.Failure, current.TerminalReason = checkpoint.Wait, checkpoint.Failure, checkpoint.TerminalReason
-		current.OutputBytes, current.Tokens, current.CostMicros = checkpoint.OutputBytes, checkpoint.Tokens, checkpoint.CostMicros
-		current.StateVersion, current.StateHash = version, stateHash
-		if current.StableHash() != stateHash || toStatus != current.Status {
-			return WorkflowReplayResult{}, ErrWorkflowReplay
-		}
-		previousVersion, previousHash = version, stateHash
-		if version == fromVersion {
-			checkpointSeen = true
-		}
-		if version > fromVersion {
-			count++
-			transitions = append(transitions, fmt.Sprintf("%d:%s:%s", version, commandHash, stateHash))
-		}
-		_ = stepID
-		_ = fromStepStatus
-		_ = toStepStatus
-	}
-	if err := rows.Err(); err != nil {
+		return nil
+	})
+	if err != nil {
 		return WorkflowReplayResult{}, err
 	}
 	if !checkpointSeen || previousVersion != run.StateVersion || previousHash != run.StateHash || current.StableHash() != run.StateHash {
@@ -813,7 +832,7 @@ func (s *WorkflowStore) finalizeWorkflowTransition(ctx context.Context, tx pgx.T
 	return nil
 }
 
-func (s *WorkflowStore) advanceOperationForWorkflow(ctx context.Context, tx pgx.Tx, operation Operation, target, resultHash string, input interface{}, phase string, workflowFailure *contracts.WorkflowFailure) (Operation, error) {
+func (s *WorkflowStore) advanceOperationForWorkflow(ctx context.Context, tx pgx.Tx, operation Operation, target, resultHash string, input interface{}, phase string, retryDeadline *time.Time, workflowFailure *contracts.WorkflowFailure) (Operation, error) {
 	var owner, taskOwner, correlation, causation, requestID, key string
 	var fence, taskFence uint64
 	var actor contracts.ActorRef
@@ -832,7 +851,11 @@ func (s *WorkflowStore) advanceOperationForWorkflow(ctx context.Context, tx pgx.
 			return Operation{}, fmt.Errorf("%w: operation %s -> %s", ErrWorkflowTransition, operation.Status, target)
 		}
 		transitionKey := "workflow-op-" + workflowHashString(operation.ID + "\x00" + phase + "\x00" + key + "\x00" + next)[:48]
-		transitionInput := OperationTransitionInput{WorkspaceID: operation.WorkspaceID, OperationID: operation.ID, OwnerID: owner, Fence: fence, TaskOwnerID: taskOwner, TaskFence: taskFence, Actor: actor, RequestID: requestID, IdempotencyKey: transitionKey, CausationID: causation, CorrelationID: correlation, ToStatus: next, ResultHash: resultHash, Failure: operationFailureFromWorkflow(operation.WorkspaceID, workflowFailure)}
+		var transitionDeadline *time.Time
+		if next == contracts.OperationStatusAwaitingRetry {
+			transitionDeadline = retryDeadline
+		}
+		transitionInput := OperationTransitionInput{WorkspaceID: operation.WorkspaceID, OperationID: operation.ID, OwnerID: owner, Fence: fence, TaskOwnerID: taskOwner, TaskFence: taskFence, Actor: actor, RequestID: requestID, IdempotencyKey: transitionKey, CausationID: causation, CorrelationID: correlation, ToStatus: next, ResultHash: resultHash, Failure: operationFailureFromWorkflow(operation.WorkspaceID, workflowFailure), NextRetryAt: transitionDeadline}
 		updated, err := s.operations.transitionTx(ctx, tx, transitionInput)
 		if err != nil {
 			return Operation{}, err
@@ -840,6 +863,26 @@ func (s *WorkflowStore) advanceOperationForWorkflow(ctx context.Context, tx pgx.
 		operation = updated.Operation
 	}
 	return operation, nil
+}
+
+// workflowRetryDeadline returns the earliest pending retry time because the
+// operation queue represents a workflow with one not-before timestamp. A
+// retry without an expiry retains the existing immediately-eligible behavior.
+func workflowRetryDeadline(run contracts.WorkflowRun) *time.Time {
+	var earliest *time.Time
+	for _, step := range run.Steps {
+		if step.Status != contracts.WorkflowStepAwaitingRetry {
+			continue
+		}
+		if step.NextRetryAt == nil {
+			return nil
+		}
+		if earliest == nil || step.NextRetryAt.Before(*earliest) {
+			deadline := *step.NextRetryAt
+			earliest = &deadline
+		}
+	}
+	return earliest
 }
 
 func operationFailureFromWorkflow(workspaceID string, failure *contracts.WorkflowFailure) *contracts.OperationFailure {
@@ -930,22 +973,27 @@ func workflowOperationStatus(status string) string {
 
 func workflowStatusAfterStep(run contracts.WorkflowRun, stepStatus string) string {
 	switch stepStatus {
-	case contracts.WorkflowStepAwaitingApproval:
-		return contracts.WorkflowStatusAwaitingApproval
-	case contracts.WorkflowStepAwaitingHuman:
-		return contracts.WorkflowStatusAwaitingHuman
-	case contracts.WorkflowStepAwaitingCallback:
-		return contracts.WorkflowStatusAwaitingCallback
-	case contracts.WorkflowStepAwaitingRetry:
-		return contracts.WorkflowStatusAwaitingRetry
-	case contracts.WorkflowStepAwaitingExternal:
-		return contracts.WorkflowStatusAwaitingExternal
-	case contracts.WorkflowStepRecoveryRequired:
-		return contracts.WorkflowStatusRecoveryRequired
 	case contracts.WorkflowStepFailed:
 		return contracts.WorkflowStatusFailed
 	case contracts.WorkflowStepCancelled:
 		return contracts.WorkflowStatusCancelled
+	}
+	// A run can contain several independent steps in different wait states.
+	// Explicit approval/human/external waits and uncertain recovery take
+	// precedence over timer retries so a due retry cannot bypass them.
+	for _, waiting := range []struct{ stepStatus, runStatus string }{
+		{contracts.WorkflowStepRecoveryRequired, contracts.WorkflowStatusRecoveryRequired},
+		{contracts.WorkflowStepAwaitingApproval, contracts.WorkflowStatusAwaitingApproval},
+		{contracts.WorkflowStepAwaitingHuman, contracts.WorkflowStatusAwaitingHuman},
+		{contracts.WorkflowStepAwaitingCallback, contracts.WorkflowStatusAwaitingCallback},
+		{contracts.WorkflowStepAwaitingExternal, contracts.WorkflowStatusAwaitingExternal},
+		{contracts.WorkflowStepAwaitingRetry, contracts.WorkflowStatusAwaitingRetry},
+	} {
+		for _, step := range run.Steps {
+			if step.Status == waiting.stepStatus {
+				return waiting.runStatus
+			}
+		}
 	}
 	for _, step := range run.Steps {
 		if step.Status != contracts.WorkflowStepSucceeded && step.Status != contracts.WorkflowStepCompensated {
@@ -953,6 +1001,77 @@ func workflowStatusAfterStep(run contracts.WorkflowRun, stepStatus string) strin
 		}
 	}
 	return contracts.WorkflowStatusSucceeded
+}
+
+func workflowWaitDetailsForStatus(run contracts.WorkflowRun, runStatus string) (*contracts.WorkflowWait, *contracts.WorkflowFailure) {
+	var stepStatus string
+	switch runStatus {
+	case contracts.WorkflowStatusAwaitingApproval:
+		stepStatus = contracts.WorkflowStepAwaitingApproval
+	case contracts.WorkflowStatusAwaitingHuman:
+		stepStatus = contracts.WorkflowStepAwaitingHuman
+	case contracts.WorkflowStatusAwaitingCallback:
+		stepStatus = contracts.WorkflowStepAwaitingCallback
+	case contracts.WorkflowStatusAwaitingRetry:
+		stepStatus = contracts.WorkflowStepAwaitingRetry
+	case contracts.WorkflowStatusAwaitingExternal:
+		stepStatus = contracts.WorkflowStepAwaitingExternal
+	case contracts.WorkflowStatusRecoveryRequired:
+		stepStatus = contracts.WorkflowStepRecoveryRequired
+	default:
+		return nil, nil
+	}
+	var selected *contracts.WorkflowStepState
+	for i := range run.Steps {
+		step := &run.Steps[i]
+		if step.Status != stepStatus {
+			continue
+		}
+		if selected == nil || stepStatus == contracts.WorkflowStepAwaitingRetry && workflowRetryWaitPrecedes(step, selected) {
+			selected = step
+		}
+	}
+	if selected == nil {
+		return nil, nil
+	}
+	var wait *contracts.WorkflowWait
+	if selected.Wait != nil {
+		value := *selected.Wait
+		wait = &value
+	}
+	var failure *contracts.WorkflowFailure
+	if selected.Failure != nil {
+		value := *selected.Failure
+		failure = &value
+	}
+	return wait, failure
+}
+
+func workflowRetryWaitPrecedes(candidate, current *contracts.WorkflowStepState) bool {
+	if candidate.NextRetryAt == nil {
+		if current.NextRetryAt != nil {
+			return true
+		}
+	} else if current.NextRetryAt != nil {
+		if !candidate.NextRetryAt.Equal(*current.NextRetryAt) {
+			return candidate.NextRetryAt.Before(*current.NextRetryAt)
+		}
+	} else {
+		return false
+	}
+	if candidate.Ordinal != current.Ordinal {
+		return candidate.Ordinal < current.Ordinal
+	}
+	return candidate.StepID < current.StepID
+}
+
+func waitStatus(status string) bool {
+	switch status {
+	case contracts.WorkflowStatusAwaitingApproval, contracts.WorkflowStatusAwaitingHuman, contracts.WorkflowStatusAwaitingCallback, contracts.WorkflowStatusAwaitingRetry, contracts.WorkflowStatusAwaitingExternal, contracts.WorkflowStatusRecoveryRequired:
+		return true
+	default:
+		return false
+	}
 }
 
 func initialWorkflowRun(operation Operation, budget contracts.WorkflowBudget) contracts.WorkflowRun {
