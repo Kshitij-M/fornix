@@ -141,18 +141,26 @@ func (s *QualificationTrustStore) RegisterSigner(ctx context.Context, input cont
 		}
 		return contracts.QualificationTrustedSigner{}, false, fmt.Errorf("insert qualification trusted signer: %w", err)
 	}
+	signerMetadata, err := qualificationSignerMetadata(signer)
+	if err != nil {
+		return contracts.QualificationTrustedSigner{}, false, fmt.Errorf("encode qualification signer metadata: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO fornix.qualification_trusted_signer_events(workspace_id,deployment_id,signer_id,key_id,event,actor,metadata)
-		VALUES($1,$2,$3,$4,'registered',$5::jsonb,$6::jsonb)`, signer.WorkspaceID, signer.DeploymentID, signer.ID, signer.KeyID, actorJSON, qualificationSignerMetadata(signer)); err != nil {
+		VALUES($1,$2,$3,$4,'registered',$5::jsonb,$6::jsonb)`, signer.WorkspaceID, signer.DeploymentID, signer.ID, signer.KeyID, actorJSON, signerMetadata); err != nil {
 		return contracts.QualificationTrustedSigner{}, false, fmt.Errorf("record qualification signer registration: %w", err)
 	}
 	if signer.SupersedesKeyID != "" {
+		supersededMetadata, err := json.Marshal(map[string]string{"superseded_by_key_id": signer.KeyID})
+		if err != nil {
+			return contracts.QualificationTrustedSigner{}, false, fmt.Errorf("encode qualification supersession metadata: %w", err)
+		}
 		if _, err := tx.Exec(ctx, `UPDATE fornix.qualification_trusted_signers SET status='superseded',superseded_by_key_id=$1,superseded_at=clock_timestamp() WHERE workspace_id=$2 AND deployment_id=$3 AND key_id=$4 AND status='active'`, signer.KeyID, signer.WorkspaceID, signer.DeploymentID, predecessor.KeyID); err != nil {
 			return contracts.QualificationTrustedSigner{}, false, fmt.Errorf("supersede qualification signer: %w", err)
 		}
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO fornix.qualification_trusted_signer_events(workspace_id,deployment_id,signer_id,key_id,event,actor,metadata)
-			VALUES($1,$2,$3,$4,'superseded',$5::jsonb,$6::jsonb)`, predecessor.WorkspaceID, predecessor.DeploymentID, predecessor.ID, predecessor.KeyID, actorJSON, `{"superseded_by_key_id":"`+signer.KeyID+`"}`); err != nil {
+			VALUES($1,$2,$3,$4,'superseded',$5::jsonb,$6::jsonb)`, predecessor.WorkspaceID, predecessor.DeploymentID, predecessor.ID, predecessor.KeyID, actorJSON, supersededMetadata); err != nil {
 			return contracts.QualificationTrustedSigner{}, false, fmt.Errorf("record qualification signer supersession: %w", err)
 		}
 	}
@@ -385,7 +393,11 @@ func (s *QualificationTrustStore) ImportAuthorized(ctx context.Context, request 
 		}
 		return contracts.QualificationImportResult{}, fmt.Errorf("insert qualification import: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `INSERT INTO fornix.qualification_import_events(workspace_id,deployment_id,import_id,event,actor,metadata) VALUES($1,$2,$3,'accepted',$4::jsonb,$5::jsonb)`, expectedRecord.WorkspaceID, expectedRecord.DeploymentID, expectedRecord.ID, actorJSON, qualificationImportMetadata(expectedRecord)); err != nil {
+	importMetadata, err := qualificationImportMetadata(expectedRecord)
+	if err != nil {
+		return contracts.QualificationImportResult{}, fmt.Errorf("encode qualification import metadata: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `INSERT INTO fornix.qualification_import_events(workspace_id,deployment_id,import_id,event,actor,metadata) VALUES($1,$2,$3,'accepted',$4::jsonb,$5::jsonb)`, expectedRecord.WorkspaceID, expectedRecord.DeploymentID, expectedRecord.ID, actorJSON, importMetadata); err != nil {
 		return contracts.QualificationImportResult{}, fmt.Errorf("record qualification import event: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -688,12 +700,20 @@ func qualificationSignerEquivalent(left, right contracts.QualificationTrustedSig
 	return left.WorkspaceID == right.WorkspaceID && left.DeploymentID == right.DeploymentID && left.KeyID == right.KeyID && left.Algorithm == right.Algorithm && left.PublicKey == right.PublicKey && left.PublicKeyHash == right.PublicKeyHash && left.SupersedesKeyID == right.SupersedesKeyID && left.ValidFrom.Equal(right.ValidFrom) && left.ValidUntil.Equal(right.ValidUntil)
 }
 
-func qualificationSignerMetadata(signer contracts.QualificationTrustedSigner) string {
-	return `{"public_key_hash":"` + signer.PublicKeyHash + `","valid_from":"` + signer.ValidFrom.Format(time.RFC3339Nano) + `","valid_until":"` + signer.ValidUntil.Format(time.RFC3339Nano) + `"}`
+func qualificationSignerMetadata(signer contracts.QualificationTrustedSigner) ([]byte, error) {
+	return json.Marshal(map[string]string{
+		"public_key_hash": signer.PublicKeyHash,
+		"valid_from":      signer.ValidFrom.Format(time.RFC3339Nano),
+		"valid_until":     signer.ValidUntil.Format(time.RFC3339Nano),
+	})
 }
 
-func qualificationImportMetadata(record contracts.QualificationImportRecord) string {
-	return `{"signed_hash":"` + record.SignedHash + `","observation_hash":"` + record.ObservationHash + `","source_hash":"` + record.SourceHash + `"}`
+func qualificationImportMetadata(record contracts.QualificationImportRecord) ([]byte, error) {
+	return json.Marshal(map[string]string{
+		"signed_hash":      record.SignedHash,
+		"observation_hash": record.ObservationHash,
+		"source_hash":      record.SourceHash,
+	})
 }
 
 func validateQualificationActor(actor contracts.AuditActor, workspaceID string) error {

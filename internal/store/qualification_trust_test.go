@@ -17,6 +17,42 @@ import (
 	"github.com/omaveda/fornix/internal/contracts"
 )
 
+func TestQualificationEventMetadataUsesJSONEncoding(t *testing.T) {
+	signer := contracts.QualificationTrustedSigner{
+		PublicKeyHash: `hash"} , "injected":true`,
+		ValidFrom:     time.Unix(1, 0).UTC(),
+		ValidUntil:    time.Unix(2, 0).UTC(),
+	}
+	signerRaw, err := qualificationSignerMetadata(signer)
+	if err != nil {
+		t.Fatalf("encode signer metadata: %v", err)
+	}
+	var signerMetadata map[string]any
+	if err := json.Unmarshal(signerRaw, &signerMetadata); err != nil {
+		t.Fatalf("signer metadata is not valid JSON: %v", err)
+	}
+	if signerMetadata["public_key_hash"] != signer.PublicKeyHash || signerMetadata["injected"] != nil {
+		t.Fatalf("signer metadata did not preserve a single escaped field: %s", signerRaw)
+	}
+
+	importRecord := contracts.QualificationImportRecord{
+		SignedHash:      `signed"},"injected":true`,
+		ObservationHash: "observation-hash",
+		SourceHash:      "source-hash",
+	}
+	importRaw, err := qualificationImportMetadata(importRecord)
+	if err != nil {
+		t.Fatalf("encode import metadata: %v", err)
+	}
+	var importMetadata map[string]any
+	if err := json.Unmarshal(importRaw, &importMetadata); err != nil {
+		t.Fatalf("import metadata is not valid JSON: %v", err)
+	}
+	if importMetadata["signed_hash"] != importRecord.SignedHash || importMetadata["injected"] != nil {
+		t.Fatalf("import metadata did not preserve a single escaped field: %s", importRaw)
+	}
+}
+
 type qualificationTrustFixture struct {
 	store     *QualificationTrustStore
 	pool      *pgxpool.Pool

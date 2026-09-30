@@ -121,6 +121,13 @@ func (s *QualificationTrustStore) PublishSnapshot(ctx context.Context, request c
 	if err != nil {
 		return contracts.QualificationTrustSnapshotRecord{}, false, err
 	}
+	metadataJSON, err := json.Marshal(map[string]string{
+		"snapshot_hash": record.Snapshot.SnapshotHash,
+		"source_hash":   record.SourceHash,
+	})
+	if err != nil {
+		return contracts.QualificationTrustSnapshotRecord{}, false, fmt.Errorf("encode qualification snapshot metadata: %w", err)
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO fornix.qualification_trust_snapshots
 		  (id,workspace_id,deployment_id,revision,snapshot_hash,source_hash,source_reference,signer_key_id,signature_scheme,signer_public_key,signature,issued_at,expires_at,status,signed_bytes,actor,request_id,idempotency_key,causation_id,correlation_id)
@@ -133,7 +140,7 @@ func (s *QualificationTrustStore) PublishSnapshot(ctx context.Context, request c
 	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO fornix.qualification_trust_snapshot_events(workspace_id,deployment_id,snapshot_id,revision,event,actor,metadata)
-		VALUES($1,$2,$3,$4,'published',$5::jsonb,$6::jsonb)`, record.Snapshot.WorkspaceID, record.Snapshot.DeploymentID, record.ID, record.Snapshot.Revision, actorJSON, `{"snapshot_hash":"`+record.Snapshot.SnapshotHash+`","source_hash":"`+record.SourceHash+`"}`); err != nil {
+		VALUES($1,$2,$3,$4,'published',$5::jsonb,$6::jsonb)`, record.Snapshot.WorkspaceID, record.Snapshot.DeploymentID, record.ID, record.Snapshot.Revision, actorJSON, metadataJSON); err != nil {
 		return contracts.QualificationTrustSnapshotRecord{}, false, fmt.Errorf("record qualification snapshot publication: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
