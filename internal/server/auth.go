@@ -3,7 +3,6 @@ package server
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -64,9 +63,7 @@ func (s *server) authenticateRequest(r *http.Request) (contracts.Principal, erro
 	// accepted on the workspace-bootstrap route and is never persisted or
 	// included in the resulting principal/audit payload.
 	if r.URL.Path == "/v1/operator/workspaces/bootstrap" && strings.TrimSpace(s.bootstrapKey) != "" {
-		expected := sha256.Sum256([]byte(s.bootstrapKey))
-		provided := sha256.Sum256([]byte(token))
-		if subtle.ConstantTimeCompare(expected[:], provided[:]) == 1 {
+		if subtle.ConstantTimeCompare([]byte(s.bootstrapKey), []byte(token)) == 1 {
 			workspaceID := contracts.DefaultWorkspaceID
 			if candidates := requestWorkspaceCandidates(r); len(candidates) > 0 {
 				workspaceID = candidates[0]
@@ -75,9 +72,7 @@ func (s *server) authenticateRequest(r *http.Request) (contracts.Principal, erro
 		}
 	}
 	if s.authMode == "development" {
-		expected := sha256.Sum256([]byte(s.apiKey))
-		provided := sha256.Sum256([]byte(token))
-		if subtle.ConstantTimeCompare(expected[:], provided[:]) != 1 {
+		if subtle.ConstantTimeCompare([]byte(s.apiKey), []byte(token)) != 1 {
 			return contracts.Principal{}, store.ErrUnauthenticated
 		}
 		workspaceID := contracts.DefaultWorkspaceID
