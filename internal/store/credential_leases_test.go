@@ -250,3 +250,15 @@ func TestCredentialLeaseResolvesTheExactAdmittedFence(t *testing.T) {
 		t.Fatalf("stale exact lease error=%v, want revoked", err)
 	}
 }
+
+func TestCredentialLeaseOptionalTimestampMatchesPostgresPrecision(t *testing.T) {
+	left := time.Date(2026, time.January, 2, 3, 4, 5, 123456100, time.UTC)
+	roundTripped := time.Date(2026, time.January, 2, 3, 4, 5, 123456900, time.UTC)
+	if !sameOptionalTime(&left, &roundTripped) {
+		t.Fatal("timestamps within the same PostgreSQL microsecond should match")
+	}
+	differentMicrosecond := roundTripped.Add(time.Microsecond)
+	if sameOptionalTime(&left, &differentMicrosecond) {
+		t.Fatal("timestamps in different PostgreSQL microseconds must not match")
+	}
+}

@@ -365,7 +365,11 @@ func sameOptionalTime(left, right *time.Time) bool {
 	if left == nil || right == nil {
 		return left == nil && right == nil
 	}
-	return left.UTC().Equal(right.UTC())
+	// PostgreSQL timestamptz values have microsecond precision. Normalize both
+	// source-authority timestamps before comparison so an in-memory nanosecond
+	// value round-tripped through Postgres does not spuriously revoke a valid
+	// credential lease.
+	return left.UTC().Truncate(time.Microsecond).Equal(right.UTC().Truncate(time.Microsecond))
 }
 
 // Release is idempotent for the exact current fence. A stale holder cannot
