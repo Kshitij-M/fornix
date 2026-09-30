@@ -160,11 +160,25 @@ DELETE FROM fornix.workspace_federation_peers WHERE workspace_id IN (:'federatio
 SQL
 }
 trap cleanup_federation_fixture EXIT
-federation_scope_count=$(psql "$app_dsn" -v ON_ERROR_STOP=1 -At -c "SELECT fornix.set_workspace_context('$federation_workspace'); SELECT count(*) FROM fornix.workspace_federation_peers")
-federation_foreign_count=$(psql "$app_dsn" -v ON_ERROR_STOP=1 -At -c "SELECT fornix.set_workspace_context('$federation_workspace'); SELECT count(*) FROM fornix.workspace_federation_peers WHERE workspace_id='$federation_foreign'")
+federation_scope_result=$(psql "$app_dsn" -X -v ON_ERROR_STOP=1 -qAt -v federation_workspace="$federation_workspace" <<'SQL'
+BEGIN;
+SELECT fornix.set_workspace_context(:'federation_workspace');
+SELECT count(*) FROM fornix.workspace_federation_peers;
+COMMIT;
+SQL
+)
+federation_scope_count=$(printf '%s\n' "$federation_scope_result" | tail -n 1)
+federation_foreign_result=$(psql "$app_dsn" -X -v ON_ERROR_STOP=1 -qAt -v federation_workspace="$federation_workspace" -v federation_foreign="$federation_foreign" <<'SQL'
+BEGIN;
+SELECT fornix.set_workspace_context(:'federation_workspace');
+SELECT count(*) FROM fornix.workspace_federation_peers WHERE workspace_id=:'federation_foreign';
+COMMIT;
+SQL
+)
+federation_foreign_count=$(printf '%s\n' "$federation_foreign_result" | tail -n 1)
 case "$federation_scope_count:$federation_foreign_count" in
 	1:0) : ;;
-	*) printf '%s\n' 'runtime role federation RLS qualification failed' >&2; exit 1 ;;
+	*) printf 'runtime role federation RLS qualification failed (workspace rows=%s, foreign rows=%s)\n' "$federation_scope_count" "$federation_foreign_count" >&2; exit 1 ;;
 esac
 FORNIX_RLS_TEST_DSN="$app_dsn" FORNIX_RLS_APP_ROLE="$app_role" go test ./internal/store -run '^TestRuntimeRoleWorkspaceRLSPoolReuseFailsClosed$' -count=1 -v
 psql "$admin_dsn" -v ON_ERROR_STOP=1 -v federation_workspace="$federation_workspace" -v federation_foreign="$federation_foreign" <<'SQL'
