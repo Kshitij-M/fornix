@@ -209,7 +209,7 @@ func TestPGDatabaseUsesReadOnlyTransactionAndRejectsNonBaseRelations(t *testing.
 	// in sequence. A fixed adapter-level statement name used to make this
 	// depend on request order and pool assignment.
 	query.Columns = []string{"version", "checksum"}
-	query.Filters = []sqlreadonly.Filter{{Column: "version", Operator: sqlreadonly.FilterGreater, Value: json.RawMessage(`0`)}}
+	query.Filters = []sqlreadonly.Filter{{Column: "version", Operator: sqlreadonly.FilterGreater, Value: json.RawMessage(`"0"`)}}
 	if _, err := database.QueryReadOnly(ctx, query); err != nil {
 		t.Fatalf("second query shape failed on the reused pool connection: %v", err)
 	}
