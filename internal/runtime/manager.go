@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -98,7 +99,23 @@ func NewManagerWithEnvironment(profile Profile, manifest ManifestConfig, executo
 // Start creates or verifies the profile manifest and idempotently converges
 // the local services to healthy running state.
 func (m *Manager) Start(ctx context.Context) (Result, error) {
-	return m.lifecycle(ctx, []string{"up", "--detach", "--wait", "--remove-orphans"}, m.limits.LifecycleTimeout)
+	result, err := m.lifecycle(ctx, []string{"up", "--detach", "--wait", "--remove-orphans"}, m.limits.LifecycleTimeout)
+	if err == nil {
+		return result, nil
+	}
+	var commandErr *CommandError
+	if !errors.As(err, &commandErr) || !strings.Contains(strings.ToLower(commandErr.Diagnostic), "unhealthy") {
+		return result, err
+	}
+	logs, logsErr := m.lifecycle(ctx, []string{"logs", "--no-color", "--timestamps", "--tail", "20", "fornix"}, m.limits.LogsTimeout)
+	if logsErr != nil {
+		return result, err
+	}
+	serviceDiagnostic := safeDockerDiagnostic(logs.Stdout+"\n"+logs.Stderr, m.environment)
+	if serviceDiagnostic != "" && serviceDiagnostic != commandErr.Diagnostic {
+		commandErr.Diagnostic += "; Fornix service: " + serviceDiagnostic
+	}
+	return result, err
 }
 
 // Stop idempotently stops services while preserving containers and named data
