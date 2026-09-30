@@ -130,7 +130,7 @@ func (f *qualificationTrustFixture) register(t *testing.T, keyID, publicKey stri
 	now := time.Date(2026, 9, 27, 0, 0, 0, 0, time.UTC)
 	signer, created, err := f.store.RegisterSigner(context.Background(), contracts.QualificationTrustedSignerInput{
 		WorkspaceID: f.workspace, DeploymentID: "deployment-a", KeyID: keyID, PublicKey: publicKey,
-		ValidFrom: now.Add(-time.Hour), ValidUntil: now.Add(time.Hour), SupersedesKeyID: supersedes, Actor: f.actor,
+		ValidFrom: now.Add(-time.Hour), ValidUntil: now.Add(24 * time.Hour), SupersedesKeyID: supersedes, Actor: f.actor,
 	})
 	if err != nil {
 		t.Fatalf("register signer: %v", err)
