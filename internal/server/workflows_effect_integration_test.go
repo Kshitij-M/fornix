@@ -40,6 +40,17 @@ func TestAuthenticatedWorkflowCLIOverHTTPResumesUnknownEffectWithoutDuplicateVer
 		t.Fatal(err)
 	}
 	actor := principal.Actor()
+	reviewer, err := srv.auth.CreateIdentity(ctx, contracts.IdentityInput{
+		WorkspaceID: workspaceID, Subject: "workflow-reviewer", Kind: "user",
+		Permissions: []contracts.Permission{contracts.PermissionToolApprove},
+	})
+	if err != nil {
+		t.Fatalf("create distinct workflow reviewer: %v", err)
+	}
+	_, reviewerToken, err := srv.auth.CreateAPIKey(ctx, contracts.APIKeyInput{WorkspaceID: workspaceID, IdentityID: reviewer.ID})
+	if err != nil {
+		t.Fatalf("create reviewer API key: %v", err)
+	}
 
 	links := store.NewDomainEffectLinkStore(pool)
 	dispatcher := &effectdispatch.Dispatcher{Operations: srv.operations, Admission: srv.admission, Links: links}
@@ -130,9 +141,12 @@ func TestAuthenticatedWorkflowCLIOverHTTPResumesUnknownEffectWithoutDuplicateVer
 	if waiting.Run.Status != contracts.WorkflowStatusAwaitingApproval {
 		t.Fatalf("first CLI advance status=%s, want awaiting approval", waiting.Run.Status)
 	}
-	_ = runFornixCLIJSON[struct {
+	approved := runFornixCLIJSON[struct {
 		Run contracts.WorkflowRun `json:"run"`
-	}](t, cliBinary, api.URL, workspaceID, token, "workflow", "approve", "--id", runID, "--fence", strconv.FormatUint(fence, 10), "--step-id", "approval")
+	}](t, cliBinary, api.URL, workspaceID, reviewerToken, "workflow", "approve", "--id", runID, "--fence", strconv.FormatUint(fence, 10), "--step-id", "approval")
+	if approved.Run.Steps[0].Status != contracts.WorkflowStepSucceeded {
+		t.Fatalf("distinct reviewer approval status=%s, want succeeded", approved.Run.Steps[0].Status)
+	}
 	dispatchedEnvelope := runFornixCLIJSON[struct {
 		Run contracts.WorkflowRun `json:"run"`
 	}](t, cliBinary, api.URL, workspaceID, token, "workflow", "advance", "--id", runID, "--fence", strconv.FormatUint(fence, 10))
