@@ -79,11 +79,10 @@ func NewMTLSHTTPClient(config MTLSClientConfig) (*http.Client, error) {
 		transport = existing.Clone()
 	}
 	transport.TLSClientConfig = &tls.Config{
-		MinVersion:         tls.VersionTLS13,
-		Certificates:       []tls.Certificate{certificate},
-		RootCAs:            roots,
-		ServerName:         config.Policy.ServerName,
-		InsecureSkipVerify: true, // VerifyConnection performs the complete check.
+		MinVersion:   tls.VersionTLS13,
+		Certificates: []tls.Certificate{certificate},
+		RootCAs:      roots,
+		ServerName:   config.Policy.ServerName,
 		VerifyConnection: func(state tls.ConnectionState) error {
 			_, verifyErr := ValidateCertificateChain(state.PeerCertificates, roots, config.Policy, time.Now().UTC())
 			return verifyErr
