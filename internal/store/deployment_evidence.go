@@ -234,10 +234,7 @@ func (s *DeploymentEvidenceStore) linkEvidenceTx(ctx context.Context, tx pgx.Tx,
 	}
 	var predecessor contracts.DeploymentEvidenceLink
 	if existing, existingErr := queryDeploymentEvidenceByKind(ctx, tx, request.WorkspaceID, request.DeploymentID, request.ReleaseID, request.Kind, true); existingErr == nil {
-		if !sameDeploymentEvidenceRequest(existing, request) {
-			return contracts.DeploymentEvidenceLink{}, false, ErrDeploymentEvidenceConflict
-		}
-		if request.SupersedesLinkID == "" || request.SupersedesLinkID != existing.ID {
+		if request.SupersedesLinkID == "" || request.SupersedesLinkID != existing.ID || request.ImportID == existing.ImportID {
 			return contracts.DeploymentEvidenceLink{}, false, ErrDeploymentEvidenceConflict
 		}
 		predecessor = existing
