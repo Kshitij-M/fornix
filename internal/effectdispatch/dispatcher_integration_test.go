@@ -345,11 +345,12 @@ func TestDispatcherDuplicateFailsClosedWhenDomainLinkIsMissing(t *testing.T) {
 	if err != nil || first.DomainLink == nil || first.OperationResult == nil {
 		t.Fatalf("initial dispatch did not persist its domain link and result: %+v err=%v", first, err)
 	}
-	if _, err := pool.Exec(context.Background(), `DELETE FROM fornix.domain_effect_link_transitions WHERE workspace_id=$1 AND link_id=$2`, workspace, first.DomainLink.ID); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := pool.Exec(context.Background(), `DELETE FROM fornix.domain_effect_links WHERE workspace_id=$1 AND id=$2`, workspace, first.DomainLink.ID); err != nil {
-		t.Fatal(err)
+	// The binding and transitions are append-only. Model an unavailable source
+	// identity on duplicate delivery without corrupting authoritative history.
+	input.DomainLink = &contracts.DomainEffectLink{
+		DomainKind: contracts.DomainEffectKindHTTPRequest,
+		DomainID:   "missing-" + request.ID,
+		LinkRole:   contracts.DomainEffectLinkRolePrimary,
 	}
 	duplicate, err := dispatcher.Dispatch(context.Background(), input)
 	if !errors.Is(err, ErrDomainLinkRecoveryRequired) || !duplicate.Duplicate || duplicate.OperationResult != nil {
@@ -357,6 +358,9 @@ func TestDispatcherDuplicateFailsClosedWhenDomainLinkIsMissing(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("domain-link lookup failure caused a second external call: %d", calls.Load())
+	}
+	if _, err := dispatcher.Links.Get(context.Background(), workspace, first.DomainLink.ID); err != nil {
+		t.Fatalf("failed duplicate mutated append-only domain-link history: %v", err)
 	}
 }
 
