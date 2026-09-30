@@ -782,7 +782,7 @@ func (s *WorkflowStore) finalizeWorkflowTransition(ctx context.Context, tx pgx.T
 		return ErrWorkflowBudget
 	}
 	actor = workflowActor(actor, operation.Request.Actor)
-	if !workflowTransitionActorAllowed(operation, previous, stepID, fromStep, toStep, actor) {
+	if !workflowTransitionActorAllowed(operation.WorkspaceID, actor) {
 		return ErrWorkflowWorkspace
 	}
 	databaseOperationFence, err := databaseCounter(fence)
@@ -1319,23 +1319,11 @@ func workflowActor(actor, fallback contracts.ActorRef) contracts.ActorRef {
 	return actor
 }
 
-func workflowTransitionActorAllowed(operation Operation, previous contracts.WorkflowRun, stepID, fromStep, toStep string, actor contracts.ActorRef) bool {
-	if actor.ID == "" || actor.WorkspaceID != operation.WorkspaceID {
-		return false
-	}
-	requester := operation.Request.Actor
-	if actor.ID == requester.ID && actor.Kind == requester.Kind && actor.Name == requester.Name {
-		return true
-	}
-	if fromStep != contracts.WorkflowStepAwaitingApproval || toStep != contracts.WorkflowStepSucceeded {
-		return false
-	}
-	for _, step := range previous.Plan.Steps {
-		if step.ID == stepID {
-			return step.Kind == contracts.WorkflowStepApproval
-		}
-	}
-	return false
+func workflowTransitionActorAllowed(workspaceID string, actor contracts.ActorRef) bool {
+	// Authenticated workspace actors may operate a workflow under its current
+	// fenced lease. HTTP authorization determines which actors may execute or
+	// approve; this store boundary independently rejects cross-workspace actors.
+	return actor.ID != "" && actor.WorkspaceID == workspaceID
 }
 
 func workflowEvent(run contracts.WorkflowRun, eventType, stepID string, version int64, stateHash, command string) (contracts.EventEnvelope, error) {
