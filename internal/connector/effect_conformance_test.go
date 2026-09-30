@@ -38,6 +38,23 @@ func TestEffectAuthorityConformanceRejectsDirectEffectfulAdmission(t *testing.T)
 	if _, err := registry.Admit(context.Background(), request, connector.AdmissionOptions{ApprovalGranted: true}); err == nil {
 		t.Fatalf("direct effectful admission error=%v, want authority rejection", err)
 	}
+	if _, err := registry.Admit(context.Background(), request, connector.AdmissionOptions{ApprovalGranted: true, RequireAuthority: true, DeferEffectAuthority: true}); err == nil {
+		t.Fatal("deferred metadata admission bypassed an explicit authority requirement")
+	}
+	deferred, err := registry.Admit(context.Background(), request, connector.AdmissionOptions{ApprovalGranted: true, DeferEffectAuthority: true})
+	if err != nil {
+		t.Fatalf("pre-dispatch metadata admission: %v", err)
+	}
+	if deferred.Authority != nil {
+		t.Fatal("pre-dispatch admission unexpectedly contains effect authority")
+	}
+	deferredPlan, err := deferred.Capability.Plan(request)
+	if err != nil {
+		t.Fatalf("pre-dispatch planning: %v", err)
+	}
+	if _, err := deferred.Capability.Execute(context.Background(), request, deferredPlan); !errors.Is(err, connector.ErrAuthorityExecution) {
+		t.Fatalf("pre-dispatch plan execution error=%v, want ErrAuthorityExecution", err)
+	}
 	authority := contracts.EffectAuthority{WorkspaceID: workspace, OperationID: request.ID, OperationOwnerID: "worker-1", OperationFence: 1}
 	admitted, err := registry.Admit(context.Background(), request, connector.AdmissionOptions{ApprovalGranted: true, RequireAuthority: true, Authority: &authority})
 	if err != nil {

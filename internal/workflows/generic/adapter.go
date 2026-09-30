@@ -210,7 +210,7 @@ func (e *ConnectorStepExecutor) executeEffect(ctx context.Context, run contracts
 	request := operation.Request
 	principal := contracts.Principal{ID: run.Actor.ID, WorkspaceID: run.WorkspaceID, Subject: run.Actor.ID, Kind: run.Actor.Kind, DisplayName: run.Actor.Name, Authenticated: true}
 	approved := workflowApprovalSatisfied(run, step.ID)
-	options := connectorruntime.AdmissionOptions{Principal: &principal, ApprovalGranted: approved, Authorize: func(_ context.Context, value contracts.Principal, candidate contracts.OperationRequest, _ contracts.CapabilityDefinition) (bool, error) {
+	options := connectorruntime.AdmissionOptions{Principal: &principal, ApprovalGranted: approved, DeferEffectAuthority: true, Authorize: func(_ context.Context, value contracts.Principal, candidate contracts.OperationRequest, _ contracts.CapabilityDefinition) (bool, error) {
 		return value.WorkspaceID == candidate.WorkspaceID && value.ID == candidate.Actor.ID, nil
 	}}
 	admission, err := e.Registry.Admit(ctx, request, options)

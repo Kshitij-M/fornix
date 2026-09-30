@@ -55,7 +55,11 @@ func TestGenericWorkflowUnknownVerificationResumesWithoutRepeatingVerifier(t *te
 	if err := registry.Register(domainConnector); err != nil {
 		t.Fatal(err)
 	}
-	registry.TrustWorkspace(workspaceID, "integration-test")
+	registry.RequireTrustPolicy(true)
+	registry.RequireEffectAuthority(true)
+	if err := registry.TrustWorkspace(workspaceID, "integration-test"); err != nil {
+		t.Fatal(err)
+	}
 	var publish connectorruntime.Capability
 	for _, capability := range domainConnector.Capabilities() {
 		if capability.Definition().Ref.Name == "data_pipeline.publish" {

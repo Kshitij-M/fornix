@@ -62,6 +62,12 @@ func newIncidentTestHarness(t *testing.T) *incidentTestHarness {
 		pool.Close()
 		t.Fatal(err)
 	}
+	registry.RequireTrustPolicy(true)
+	registry.RequireEffectAuthority(true)
+	if err := registry.TrustWorkspace(workspace, "integration-test"); err != nil {
+		pool.Close()
+		t.Fatal(err)
+	}
 	providers := model.NewRegistry()
 	fake := model.NewFakeProvider(model.FakeConfig{Response: "stable incident investigation"})
 	if err := providers.Register(fake); err != nil {

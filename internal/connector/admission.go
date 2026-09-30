@@ -37,9 +37,15 @@ type AdmissionOptions struct {
 	// Authority is the non-secret durable effect envelope. It is required for
 	// strict effectful execution and is never a substitute for live Postgres
 	// fence/lease validation.
-	Authority         *contracts.EffectAuthority
-	RequireAuthority  bool
-	ValidateAuthority AuthorityValidator
+	Authority        *contracts.EffectAuthority
+	RequireAuthority bool
+	// DeferEffectAuthority permits metadata admission and planning before the
+	// durable effect dispatcher has reserved an attempt and minted its fence.
+	// The returned Admission is not executable for effectful capabilities in a
+	// strict registry; the actual Executor call must repeat admission with the
+	// dispatcher-issued Authority.
+	DeferEffectAuthority bool
+	ValidateAuthority    AuthorityValidator
 }
 
 // Admission is the normalized, immutable view passed to the execution
@@ -153,6 +159,9 @@ func (r *Registry) Admit(ctx context.Context, request contracts.OperationRequest
 		return Admission{}, ErrApprovalRequired
 	}
 	requireAuthority := options.RequireAuthority || r.isEffectAuthorityRequired()
+	if options.DeferEffectAuthority && !options.RequireAuthority && definition.Effect != contracts.EffectClassReadOnly && definition.Effect != contracts.EffectClassObservation {
+		requireAuthority = false
+	}
 	if requireAuthority && definition.Effect != contracts.EffectClassReadOnly && definition.Effect != contracts.EffectClassObservation {
 		if options.Authority == nil {
 			return Admission{}, fmt.Errorf("effect authority is required for effectful capability")

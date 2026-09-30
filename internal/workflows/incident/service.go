@@ -484,6 +484,7 @@ func (e *executor) connector(ctx context.Context, run contracts.WorkflowRun, sta
 		return contracts.WorkflowStepResult{}, connector.ErrCapabilityNotFound
 	}
 	definition := capability.Definition()
+	effectful := definition.Effect != contracts.EffectClassReadOnly && definition.Effect != contracts.EffectClassObservation
 	identity := contracts.HashStrings("incident-connector", run.ID, step.ID, fmt.Sprint(state.Attempt))[:48]
 	request := contracts.OperationRequest{ID: "incident-op-" + identity, RequestID: "incident-request-" + identity, IdempotencyKey: "incident-idempotency-" + identity, CausationID: run.Operation.ID, CorrelationID: run.ID, WorkspaceID: run.WorkspaceID, Actor: run.Actor, Capability: step.Capability, Target: step.Target, InputType: fakeincident.InputType, InputSchemaVersion: definition.InputSchemaVersion, InputSchemaHash: definition.InputSchemaHash, InputHash: step.InputHash, Profile: step.Profile}
 	principal := contracts.Principal{ID: run.Actor.ID, WorkspaceID: run.WorkspaceID, Subject: run.Actor.ID, Kind: run.Actor.Kind, Authenticated: true}
@@ -493,7 +494,9 @@ func (e *executor) connector(ctx context.Context, run contracts.WorkflowRun, sta
 			approved = true
 		}
 	}
-	admission, err := e.service.Registry.Admit(ctx, request, connector.AdmissionOptions{Principal: &principal, ApprovalGranted: approved})
+	admission, err := e.service.Registry.Admit(ctx, request, connector.AdmissionOptions{
+		Principal: &principal, ApprovalGranted: approved, DeferEffectAuthority: effectful,
+	})
 	if err != nil {
 		return contracts.WorkflowStepResult{}, err
 	}
@@ -502,7 +505,7 @@ func (e *executor) connector(ctx context.Context, run contracts.WorkflowRun, sta
 		return contracts.WorkflowStepResult{}, err
 	}
 	operationRequest := request
-	if definition.Effect != contracts.EffectClassReadOnly && definition.Effect != contracts.EffectClassObservation {
+	if effectful {
 		if e.service.Dispatcher == nil || e.service.Operations == nil || e.service.Admission == nil {
 			return contracts.WorkflowStepResult{}, fmt.Errorf("durable incident effect authority is unavailable")
 		}
