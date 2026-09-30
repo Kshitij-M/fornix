@@ -405,6 +405,9 @@ func (s *OperationStore) BeginEffectDispatch(ctx context.Context, authority cont
 	if err != nil {
 		return EffectStateResult{}, err
 	}
+	if err := s.fail("operation_dispatch_intent_before_commit"); err != nil {
+		return EffectStateResult{}, err
+	}
 	if state.State.State != contracts.ExternalEffectDispatching {
 		return EffectStateResult{}, fmt.Errorf("%w: dispatch intent committed in state %q", ErrOperationTransition, state.State.State)
 	}

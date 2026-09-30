@@ -519,8 +519,8 @@ func TestDispatcherPreDispatchCrashLeavesRecoverableReservation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	dispatcher.Admission.SetFailureHook(func(point string) error {
-		if point == "operation_effect_state_committed" {
+	operations.SetFailureHook(func(point string) error {
+		if point == "operation_dispatch_intent_before_commit" {
 			return errors.New("simulated crash before dispatch intent commit")
 		}
 		return nil
@@ -538,7 +538,7 @@ func TestDispatcherPreDispatchCrashLeavesRecoverableReservation(t *testing.T) {
 	if calls.Load() != 0 {
 		t.Fatal("pre-dispatch crash reached the external invoker")
 	}
-	dispatcher.Admission.SetFailureHook(nil)
+	operations.SetFailureHook(nil)
 	result, err := dispatcher.Dispatch(context.Background(), input)
 	if err != nil {
 		t.Fatal(err)
