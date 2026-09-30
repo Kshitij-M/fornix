@@ -370,14 +370,15 @@ func optionalInt(name string) (int64, bool, error) {
 }
 
 func optionalBoundedInt(name string, minimum, maximum int) (int, bool, error) {
-	value, present, err := optionalInt(name)
-	if err != nil || !present {
-		return 0, present, err
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return 0, false, nil
 	}
-	if value < int64(minimum) || value > int64(maximum) {
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < minimum || value > maximum {
 		return 0, false, fmt.Errorf("%s must be between %d and %d", name, minimum, maximum)
 	}
-	return int(value), true, nil
+	return value, true, nil
 }
 
 func positiveInt32(name string, fallback int32) (int32, error) {
