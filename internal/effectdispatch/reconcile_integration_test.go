@@ -97,9 +97,13 @@ func TestReconcileIsFencedAtomicCrashSafeAndDuplicateSafe(t *testing.T) {
 		t.Fatalf("expired reconciliation error=%v", err)
 	}
 
+	hookCalls := 0
 	dispatcher.Admission.SetFailureHook(func(point string) error {
 		if point == "operation_effect_state_committed" {
-			return fmt.Errorf("simulated reconciliation crash")
+			hookCalls++
+			if hookCalls == 2 {
+				return fmt.Errorf("simulated reconciliation crash after pending checkpoint")
+			}
 		}
 		return nil
 	})
