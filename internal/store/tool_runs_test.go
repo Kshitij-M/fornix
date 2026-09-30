@@ -289,8 +289,7 @@ func TestToolRunStoreAgentRunFenceRejectsStaleWorker(t *testing.T) {
 	replayRequest := request
 	replayRequest.AgentRunOwnerID, replayRequest.AgentRunFence = second.Lease.OwnerID, second.Lease.Fence
 	replayed, duplicate, err := store.Reserve(ctx, replayRequest, contracts.ToolModeAutomatic)
-	expectedHash, hashErr := request.RequestHash()
-	if err != nil || hashErr != nil || !duplicate || replayed.RequestHash != expectedHash {
+	if err != nil || !duplicate || replayed.RequestHash != reserved.RequestHash {
 		t.Fatalf("takeover duplicate was not replayable: %+v duplicate=%t err=%v", replayed, duplicate, err)
 	}
 	if _, err := store.MarkStarted(ctx, reserved); !errors.Is(err, ErrAgentRunLeaseFenced) {
