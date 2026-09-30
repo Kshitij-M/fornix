@@ -166,17 +166,30 @@ func TestDeploymentEvidenceRevocationAndReplacementAreAuditable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	linkTwo, created, err := deployment.LinkEvidence(context.Background(), contracts.DeploymentEvidenceLinkRequest{
+	invalidReplacement := contracts.DeploymentEvidenceLinkRequest{
 		WorkspaceID: f.workspace, DeploymentID: "deployment-a", ReleaseID: release.ID,
 		Kind: contracts.DeploymentEvidenceProvider, ImportID: importTwo.Record.ID, SupersedesLinkID: linkOne.ID,
+		IdempotencyKey: "evidence-provider-lifecycle-two-invalid", Actor: f.actor,
+	}
+	if _, created, err := deployment.LinkEvidence(context.Background(), invalidReplacement, now.Add(3*time.Minute)); !errors.Is(err, ErrDeploymentEvidenceConflict) || created {
+		t.Fatalf("revoked predecessor supersession created=%v err=%v, want fail-closed conflict", created, err)
+	}
+	linkTwo, created, err := deployment.LinkEvidence(context.Background(), contracts.DeploymentEvidenceLinkRequest{
+		WorkspaceID: f.workspace, DeploymentID: "deployment-a", ReleaseID: release.ID,
+		Kind: contracts.DeploymentEvidenceProvider, ImportID: importTwo.Record.ID,
 		IdempotencyKey: "evidence-provider-lifecycle-two", Actor: f.actor,
 	}, now.Add(3*time.Minute))
-	if err != nil || !created || linkTwo.Status != contracts.DeploymentEvidenceLinkActive || linkTwo.SupersedesLinkID != linkOne.ID {
-		t.Fatalf("replacement link=%+v created=%v err=%v", linkTwo, created, err)
+	if err != nil || !created || linkTwo.Status != contracts.DeploymentEvidenceLinkActive || linkTwo.SupersedesLinkID != "" {
+		t.Fatalf("fresh evidence link after revocation=%+v created=%v err=%v", linkTwo, created, err)
 	}
 	gate, err := deployment.EvaluateGate(context.Background(), f.workspace, "deployment-a", release.ID, []string{contracts.DeploymentEvidenceProvider}, now.Add(3*time.Minute))
 	if err != nil || !gate.Ready || len(gate.Links) != 2 {
 		t.Fatalf("replacement gate=%+v err=%v", gate, err)
+	}
+	for _, link := range gate.Links {
+		if link.ID == linkOne.ID && (link.Status != contracts.DeploymentEvidenceLinkRevoked || link.SupersededByLinkID != "") {
+			t.Fatalf("fresh evidence link rewrote revoked predecessor: %+v", link)
+		}
 	}
 	if _, _, err := deployment.RevokeEvidence(context.Background(), contracts.DeploymentEvidenceRevocationRequest{
 		WorkspaceID: f.workspace, DeploymentID: "deployment-a", ReleaseID: release.ID,
