@@ -782,7 +782,7 @@ func (s *WorkflowStore) finalizeWorkflowTransition(ctx context.Context, tx pgx.T
 		return ErrWorkflowBudget
 	}
 	actor = workflowActor(actor, operation.Request.Actor)
-	if actor.WorkspaceID != operation.WorkspaceID || actor.ID != operation.Request.Actor.ID || actor.Kind != operation.Request.Actor.Kind || actor.Name != operation.Request.Actor.Name {
+	if !workflowTransitionActorAllowed(operation, previous, stepID, fromStep, toStep, actor) {
 		return ErrWorkflowWorkspace
 	}
 	databaseOperationFence, err := databaseCounter(fence)
@@ -852,7 +852,10 @@ func (s *WorkflowStore) advanceOperationForWorkflow(ctx context.Context, tx pgx.
 	default:
 		return Operation{}, errors.New("unsupported workflow operation command")
 	}
-	actor = workflowActor(actor, operation.Request.Actor)
+	// Operation lifecycle transitions remain attributed to the operation
+	// requester. A distinct reviewer is recorded on the workflow transition
+	// itself, where the approval decision is authoritative.
+	actor = operation.Request.Actor
 	for operation.Status != target {
 		next, ok := nextOperationStatus(operation.Status, target)
 		if !ok {
@@ -1314,6 +1317,25 @@ func workflowActor(actor, fallback contracts.ActorRef) contracts.ActorRef {
 		return fallback
 	}
 	return actor
+}
+
+func workflowTransitionActorAllowed(operation Operation, previous contracts.WorkflowRun, stepID, fromStep, toStep string, actor contracts.ActorRef) bool {
+	if actor.ID == "" || actor.WorkspaceID != operation.WorkspaceID {
+		return false
+	}
+	requester := operation.Request.Actor
+	if actor.ID == requester.ID && actor.Kind == requester.Kind && actor.Name == requester.Name {
+		return true
+	}
+	if fromStep != contracts.WorkflowStepAwaitingApproval || toStep != contracts.WorkflowStepSucceeded {
+		return false
+	}
+	for _, step := range previous.Plan.Steps {
+		if step.ID == stepID {
+			return step.Kind == contracts.WorkflowStepApproval
+		}
+	}
+	return false
 }
 
 func workflowEvent(run contracts.WorkflowRun, eventType, stepID string, version int64, stateHash, command string) (contracts.EventEnvelope, error) {
