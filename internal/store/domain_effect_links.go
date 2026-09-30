@@ -544,11 +544,20 @@ func applyDomainEffectLinkCurrentStatus(ctx context.Context, tx pgx.Tx, link *co
 	if link == nil {
 		return ErrDomainEffectLinkConflict
 	}
-	var status string
-	if err := tx.QueryRow(ctx, `SELECT to_status FROM fornix.domain_effect_link_transitions WHERE workspace_id=$1 AND link_id=$2 ORDER BY version DESC LIMIT 1`, link.WorkspaceID, link.ID).Scan(&status); err != nil {
+	transition, err := readLatestDomainEffectLinkTransitionTx(ctx, tx, link.WorkspaceID, link.ID, false)
+	if err != nil {
 		return err
 	}
-	link.Status = status
+	// Link identity remains immutable (and LinkHash continues to identify that
+	// original record); these fields are the bounded current-state projection
+	// read from its append-only transition history.
+	link.Status = transition.ToStatus
+	if transition.ResultHash != "" {
+		link.ResultHash = transition.ResultHash
+	}
+	if transition.ProviderRequestID != "" {
+		link.ProviderRequestID = transition.ProviderRequestID
+	}
 	return nil
 }
 

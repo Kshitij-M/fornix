@@ -131,7 +131,7 @@ func TestDomainEffectLinkBindingIsIdempotentAndWorkspaceScoped(t *testing.T) {
 		t.Fatalf("reconciled link identity no longer matches its immutable hash: %v", err)
 	}
 	latest, err := links.Get(ctx, workspace, first.Link.ID)
-	if err != nil || latest.Status != contracts.DomainEffectLinkStatusReconciled {
+	if err != nil || latest.Status != contracts.DomainEffectLinkStatusReconciled || latest.ResultHash != testHash("verified-result") {
 		t.Fatalf("latest link=%+v err=%v", latest, err)
 	}
 	foreign, err := links.GetByDomain(ctx, "other-workspace", contracts.DomainEffectKindHTTPRequest, "http-request-1", contracts.DomainEffectLinkRolePrimary)
