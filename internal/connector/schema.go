@@ -173,13 +173,18 @@ func (c SchemaCatalog) Authorize(request contracts.OperationRequest, definition 
 }
 
 func (c *SchemaCatalog) Sign(signerID string, privateKey ed25519.PrivateKey, issuedAt, expiresAt time.Time) error {
-	if c == nil || len(privateKey) != ed25519.PrivateKeySize || strings.TrimSpace(signerID) == "" || issuedAt.IsZero() || expiresAt.IsZero() || !expiresAt.After(issuedAt) {
+	if c == nil || len(privateKey) != ed25519.PrivateKeySize || strings.TrimSpace(signerID) == "" {
+		return ErrSchemaSignature
+	}
+	issuedAt = canonicalSignatureTimestamp(issuedAt)
+	expiresAt = canonicalSignatureTimestamp(expiresAt)
+	if issuedAt.IsZero() || expiresAt.IsZero() || !expiresAt.After(issuedAt) {
 		return ErrSchemaSignature
 	}
 	if err := c.Normalize(); err != nil {
 		return err
 	}
-	c.SignatureScheme, c.SignerID, c.IssuedAt, c.ExpiresAt = "ed25519", strings.TrimSpace(signerID), issuedAt.UTC(), expiresAt.UTC()
+	c.SignatureScheme, c.SignerID, c.IssuedAt, c.ExpiresAt = "ed25519", strings.TrimSpace(signerID), issuedAt, expiresAt
 	c.Signature = base64.RawURLEncoding.EncodeToString(ed25519.Sign(privateKey, schemaSigningBytes(*c)))
 	return nil
 }
@@ -193,7 +198,8 @@ func (c SchemaCatalog) Verify(publicKeys map[string]ed25519.PublicKey, now time.
 	if c.CatalogHash != clone.CatalogHash {
 		return ErrSchemaSignature
 	}
-	if c.IssuedAt.IsZero() || c.ExpiresAt.IsZero() || !c.ExpiresAt.After(c.IssuedAt) {
+	if c.IssuedAt.IsZero() || c.ExpiresAt.IsZero() || !c.ExpiresAt.After(c.IssuedAt) ||
+		!c.IssuedAt.Equal(canonicalSignatureTimestamp(c.IssuedAt)) || !c.ExpiresAt.Equal(canonicalSignatureTimestamp(c.ExpiresAt)) {
 		return ErrSchemaSignature
 	}
 	now = now.UTC()

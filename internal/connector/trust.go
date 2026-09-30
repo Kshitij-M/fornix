@@ -133,6 +133,8 @@ func (p *TrustPolicy) Sign(signerID string, privateKey ed25519.PrivateKey, issue
 	if p == nil || len(privateKey) != ed25519.PrivateKeySize || strings.TrimSpace(signerID) == "" {
 		return ErrTrustSignature
 	}
+	issuedAt = canonicalSignatureTimestamp(issuedAt)
+	expiresAt = canonicalSignatureTimestamp(expiresAt)
 	if issuedAt.IsZero() || expiresAt.IsZero() || !expiresAt.After(issuedAt) {
 		return fmt.Errorf("trust policy signature window is invalid")
 	}
@@ -141,8 +143,8 @@ func (p *TrustPolicy) Sign(signerID string, privateKey ed25519.PrivateKey, issue
 	}
 	p.SignatureScheme = "ed25519"
 	p.SignerID = strings.TrimSpace(signerID)
-	p.IssuedAt = issuedAt.UTC()
-	p.ExpiresAt = expiresAt.UTC()
+	p.IssuedAt = issuedAt
+	p.ExpiresAt = expiresAt
 	signature := ed25519.Sign(privateKey, trustSigningBytes(*p))
 	p.Signature = base64.RawURLEncoding.EncodeToString(signature)
 	return nil
@@ -158,7 +160,8 @@ func (p TrustPolicy) Verify(publicKeys map[string]ed25519.PublicKey, now time.Ti
 	if p.PolicyHash == "" || p.PolicyHash != trustPolicyHash(p) {
 		return ErrTrustSignature
 	}
-	if p.IssuedAt.IsZero() || p.ExpiresAt.IsZero() || !p.ExpiresAt.After(p.IssuedAt) {
+	if p.IssuedAt.IsZero() || p.ExpiresAt.IsZero() || !p.ExpiresAt.After(p.IssuedAt) ||
+		!p.IssuedAt.Equal(canonicalSignatureTimestamp(p.IssuedAt)) || !p.ExpiresAt.Equal(canonicalSignatureTimestamp(p.ExpiresAt)) {
 		return ErrTrustSignature
 	}
 	now = now.UTC()
@@ -174,6 +177,14 @@ func (p TrustPolicy) Verify(publicKeys map[string]ed25519.PublicKey, now time.Ti
 		return ErrTrustSignature
 	}
 	return nil
+}
+
+// canonicalSignatureTimestamp matches PostgreSQL timestamptz precision so a
+// signed authority record verifies identically after durable persistence and
+// reload. Signing nanoseconds that Postgres later truncates would invalidate
+// the detached signature at every strict-startup boundary.
+func canonicalSignatureTimestamp(value time.Time) time.Time {
+	return value.UTC().Truncate(time.Microsecond)
 }
 
 func trustSigningBytes(policy TrustPolicy) []byte {

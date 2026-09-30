@@ -125,6 +125,39 @@ func TestSignedTrustPolicyVerifiesAndRejectsTamperAndDowngrade(t *testing.T) {
 	}
 }
 
+func TestSignedTrustPolicyTimestampSurvivesPostgresPrecisionRoundTrip(t *testing.T) {
+	adapter, err := fakeincident.NewConnector("workspace-signed-trust-timestamp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	definitions := make([]contracts.CapabilityDefinition, 0, len(adapter.Capabilities()))
+	for _, capability := range adapter.Capabilities() {
+		definitions = append(definitions, capability.Definition())
+	}
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := connector.NewTrustPolicy("workspace-signed-trust-timestamp", "1", definitions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuedAt := time.Date(2026, time.January, 2, 3, 4, 5, 123456789, time.UTC)
+	expiresAt := issuedAt.Add(time.Hour)
+	if err := policy.Sign("release-key", privateKey, issuedAt, expiresAt); err != nil {
+		t.Fatal(err)
+	}
+	if policy.IssuedAt.Nanosecond()%1000 != 0 || policy.ExpiresAt.Nanosecond()%1000 != 0 {
+		t.Fatal("signed trust timestamps were not normalized to database precision")
+	}
+	loaded := policy
+	loaded.IssuedAt = loaded.IssuedAt.Truncate(time.Microsecond)
+	loaded.ExpiresAt = loaded.ExpiresAt.Truncate(time.Microsecond)
+	if err := loaded.Verify(map[string]ed25519.PublicKey{"release-key": publicKey}, issuedAt.Add(time.Minute)); err != nil {
+		t.Fatalf("verify trust policy after Postgres timestamp round trip: %v", err)
+	}
+}
+
 func TestRegistryTrustPolicyRejectsNewUntrustedRegistration(t *testing.T) {
 	adapter, err := fakeincident.NewConnector("workspace-trust-registry")
 	if err != nil {

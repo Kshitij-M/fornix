@@ -59,6 +59,40 @@ func TestSchemaCatalogIsDeterministicAndSigned(t *testing.T) {
 	}
 }
 
+func TestSignedSchemaCatalogTimestampSurvivesPostgresPrecisionRoundTrip(t *testing.T) {
+	const workspaceID = "workspace-schema-timestamp"
+	adapter, err := fakeincident.NewConnector(workspaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	definitions := make([]contracts.CapabilityDefinition, 0, len(adapter.Capabilities()))
+	for _, capability := range adapter.Capabilities() {
+		definitions = append(definitions, capability.Definition())
+	}
+	catalog, err := connector.NewSchemaCatalog(workspaceID, "1", definitions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	issuedAt := time.Date(2026, time.January, 2, 3, 4, 5, 123456789, time.UTC)
+	expiresAt := issuedAt.Add(time.Hour)
+	if err := catalog.Sign("schema-key", privateKey, issuedAt, expiresAt); err != nil {
+		t.Fatal(err)
+	}
+	if catalog.IssuedAt.Nanosecond()%1000 != 0 || catalog.ExpiresAt.Nanosecond()%1000 != 0 {
+		t.Fatal("signed schema timestamps were not normalized to database precision")
+	}
+	loaded := catalog
+	loaded.IssuedAt = loaded.IssuedAt.Truncate(time.Microsecond)
+	loaded.ExpiresAt = loaded.ExpiresAt.Truncate(time.Microsecond)
+	if err := loaded.Verify(map[string]ed25519.PublicKey{"schema-key": publicKey}, issuedAt.Add(time.Minute)); err != nil {
+		t.Fatalf("verify schema catalog after Postgres timestamp round trip: %v", err)
+	}
+}
+
 func TestSignedSchemaCatalogBindsAdmissionToExactSchemas(t *testing.T) {
 	workspaceID := "workspace-schema-admission"
 	adapter, err := fakeincident.NewConnector(workspaceID)
